@@ -8,8 +8,8 @@ use model::{
     AminoAcidSetBuilder, ModLocation, Modification, Peptide, Protein, ProteinDb, ResidueSpec,
     Spectrum, Tolerance, H2O, PROTON,
 };
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use scoring_crate::psm::ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
 use search::candidates::Candidate;
 use search::psm::TopNQueue;

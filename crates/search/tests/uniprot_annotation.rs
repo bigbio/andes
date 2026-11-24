@@ -14,7 +14,7 @@ use search::decoy::{decoy_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
 
 fn spec(list: &str, fixed: bool) -> Vec<Modification> {
-    model::mod_spec::parse_mod_list(list, fixed).unwrap()
+    model::modification::spec::parse_mod_list(list, fixed).unwrap()
 }
 
 fn annotated(item: &str) -> Modification {

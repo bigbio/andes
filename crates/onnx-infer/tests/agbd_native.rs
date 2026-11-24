@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use scoring::gbdt_eval::GbdtPeakModel;
+use scoring::gbdt::GbdtPeakModel;
 use serde_json::Value;
 
 fn fixture_dir() -> PathBuf {

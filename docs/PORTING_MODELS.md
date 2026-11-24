@@ -22,7 +22,7 @@ fragment tolerance (`mme_val`, `mme_is_ppm`) and three nullable binary columns, 
 A null blob is legal, and a store written before a column existed reads as `None`
 (`read.rs`, optional column reads), so adding a model kind does not break older stores.
 
-`GbdtPeakModel::from_bytes` (`crates/scoring/src/gbdt_eval.rs`) decodes the blob. Layout
+`GbdtPeakModel::from_bytes` (`crates/scoring/src/gbdt.rs`) decodes the blob. Layout
 (little endian): magic `AGBD`, `u32` version (2), `u32 n_features`, `u32 flags`
 (bit 0: apply sigmoid to the tree sum), `u32 n_trees`; per tree `u32 n_nodes` followed by the
 arrays `feature` (i32, -1 marks a leaf), `threshold` (f32), `left` (i32), `right` (i32),
@@ -69,7 +69,7 @@ these details right, none of which the decoder can detect:
 ### The feature contract
 
 The blob carries the ordered names of its features (`GbdtPeakModel::feature_names`; index `i`
-is the feature the tree splits call `i`). `validate_features` (`gbdt_eval.rs`) is called when a
+is the feature the tree splits call `i`). `validate_features` (`gbdt.rs`) is called when a
 store row is loaded (`read.rs`) and compares them, position by position, with the extractor
 for the slot:
 
@@ -97,7 +97,7 @@ Path A plus a nullable column and the plumbing that follows it:
 - the column in `store/schema.rs`, and a `None` default in the reader for stores without it
   (follow `rich_ion_model_bytes`: `read.rs` optional column read, `ManifestRow` field, decode
   and `validate_features` against the new extractor's name array);
-- a field on `scoring::Param` (`param_model.rs`);
+- a field on `scoring::Param` (`params.rs`);
 - the writers, which carry one blob per model per column (`store/write.rs`, `store/update.rs`);
 - the scoring code that consumes the model, and its feature extractor with a fixed feature
   count.
@@ -137,7 +137,7 @@ What exists:
 Not built:
 
 - A predictor that is neither AlphaPeptDeep, DeepLC nor andes-rt needs a `Predictor`
-  implementation (`predictors/mod.rs`): the input packing for its graph, the modifications it
+  implementation (`predictors.rs`): the input packing for its graph, the modifications it
   can encode, and its output layout. The export scripts and `ms2pip`/`prosit` input modules
   in `onnx-infer` are the starting point, but only the three predictors above are reachable
   from `--predict`.

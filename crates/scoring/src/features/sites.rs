@@ -1,5 +1,5 @@
-use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
-use crate::scoring::ScoredSpectrum;
+use crate::psm::ions::{predict_by_ions, IonKind};
+use crate::psm::ScoredSpectrum;
 use model::peptide::Peptide;
 
 pub const FEAT_SITE_SHIFTED_MATCHED: usize = 0;
@@ -147,8 +147,8 @@ pub fn mod_site_features(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::fragment_ions::predict_by_ions;
-    use crate::scoring::ScoredSpectrum;
+    use crate::psm::ions::predict_by_ions;
+    use crate::psm::ScoredSpectrum;
     use crate::testutil::tiny_param_with_ions;
     use crate::RankScorer;
     use model::amino_acid::AminoAcid;

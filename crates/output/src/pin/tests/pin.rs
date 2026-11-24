@@ -156,7 +156,7 @@ fn make_psm(
 }
 
 fn make_params(charge_range: std::ops::RangeInclusive<u8>) -> SearchParams {
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     SearchParams {
         aa_set,

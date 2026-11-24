@@ -9,7 +9,7 @@ pub fn mod_list(
     items: &[serde_yaml::Value],
     fixed: bool,
 ) -> Result<crate::cli::ModList, String> {
-    use model::mod_spec::ModDecl;
+    use model::modification::spec::ModDecl;
     let mut mods = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let at = |e: String| format!("{key}[{i}]: {e}");
@@ -30,7 +30,7 @@ pub fn mod_list(
     Ok(crate::cli::ModList(mods))
 }
 
-fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, String> {
+fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::modification::spec::ModDecl, String> {
     use serde_yaml::Value;
     let text = |key: &str, v: &Value| -> Result<String, String> {
         match v {
@@ -45,7 +45,7 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
             v => Ok(vec![one(v)?]),
         }
     };
-    let mut d = model::mod_spec::ModDecl::default();
+    let mut d = model::modification::spec::ModDecl::default();
     let mut sites = None;
     for (k, v) in map {
         let key = k.as_str().ok_or("modification keys are strings")?;
@@ -74,7 +74,7 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
     match (sites, d.name.clone(), d.mass) {
         (Some(s), _, _) => d.sites = s,
         (None, Some(name), None) => {
-            let parsed = model::mod_spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
+            let parsed = model::modification::spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
             d.name = parsed.name;
             d.sites = parsed.sites;
         }
@@ -93,7 +93,7 @@ pub fn xl_linker(key: &str, v: &serde_yaml::Value) -> Result<xl::crosslinker::Cr
             .and_then(|d| d.resolve(db))
             .map_err(|e| at(e.to_string())),
         Value::Mapping(map) if map.contains_key("intact") => {
-            let r: model::xl_reagents::Reagent =
+            let r: model::crosslinkers::Reagent =
                 serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
             xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
         }

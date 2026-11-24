@@ -1,6 +1,6 @@
 use super::charges_to_try;
 use crate::params::SearchParams;
-use model::aa_set::AminoAcidSetBuilder;
+use model::amino_acid::set::AminoAcidSetBuilder;
 use model::Spectrum;
 
 fn params() -> SearchParams {

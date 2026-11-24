@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch};
-use onnx_infer::rt_native::RtPeptide;
+use onnx_infer::ms2::{Ms2Conditions, Ms2Model, Ms2Scratch};
+use onnx_infer::rt::RtPeptide;
 
 fn main() {
     let v: Vec<String> = std::env::args().skip(1).collect();

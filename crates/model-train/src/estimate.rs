@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 
-use scoring_crate::param_model::{IonType, Param, Partition};
+use scoring_crate::params::{IonType, Param, Partition};
 
 use crate::counts::CountStats;
 

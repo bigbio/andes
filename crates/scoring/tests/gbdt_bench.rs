@@ -1,4 +1,4 @@
-use scoring::gbdt_eval::GbdtPeakModel;
+use scoring::gbdt::GbdtPeakModel;
 use std::time::Instant;
 
 #[test]

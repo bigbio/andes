@@ -25,6 +25,24 @@ the pull request.
 
 Test modules kept in their own files go under a `tests/` directory next to the module they test (for example `crates/search/src/engine/tests/dedup.rs`, declared with `#[cfg(test)] #[path = "engine/tests/dedup.rs"] mod dedup_tests;`). Files under `tests/` are not live code, so the unwrap, module-doc, print-macro and size checks skip them.
 
+## Module and file names
+
+- **One word where possible:** `dia/llr.rs`, not `dia_llr.rs`. A family of files that share a
+  prefix lives in a folder named after that prefix.
+- **A module with children is `name.rs` plus a `name/` folder, never `name/mod.rs`.**
+- **Name files after what they do.** Use field terms (`pin`, `mbr`, `tdc`, `fdr`, `xic`, `ipf`,
+  `tmt`, `ms1`, `ms2`) rather than private abbreviations, and no format or role suffixes such as
+  `_cmd`, `_out`, `_table` or `_parquet`.
+- **Do not name a module after a crate its own crate depends on**, so that `glyco::` or `quant::`
+  never becomes ambiguous. This is why `search` has `glycopeptides` and `crosslinks`, and `output`
+  has `quantities`.
+- **Test files are the exception:** they describe a behaviour (`pin_goldens.rs`) and may use
+  several words.
+
+Two tests enforce the first two rules: `no_mod_rs_files` and `no_prefix_family_beside_its_folder`.
+The second rejects a file `<prefix>_<rest>.rs` that sits beside a `<prefix>.rs` or `<prefix>/` and
+names the folder path it belongs in.
+
 ## Baselines
 
 A baseline is a TSV of `path<TAB>count` lines. The tests compare counts per file:

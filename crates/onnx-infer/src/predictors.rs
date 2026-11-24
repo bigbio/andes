@@ -10,9 +10,9 @@ use serde::Deserialize;
 
 use crate::deeplc::{self, DeepLcPeptide};
 use crate::error::{Error, Result};
-use crate::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use crate::ms2::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
 use crate::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
-use crate::rt_native::{RtModel, Scratch};
+use crate::rt::{RtModel, Scratch};
 use crate::{BackendKind, BackendOptions, OnnxSession};
 
 use form::{Form, Mod};

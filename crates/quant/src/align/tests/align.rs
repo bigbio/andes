@@ -395,7 +395,7 @@ fn noisy_singleton_donor() -> (Alignment, f64) {
 fn transfer_window_includes_the_donor_uncertainty() {
     use crate::decoys::{Hypothesis, Probe};
     use crate::evidence::{fit, EvidenceParams, Prior};
-    use crate::ms1_index::{Ms1RunIndex, Ms1Scan};
+    use crate::ms1::{Ms1RunIndex, Ms1Scan};
     use model::mass::ISOTOPE;
 
     let (a, sd0) = noisy_singleton_donor();

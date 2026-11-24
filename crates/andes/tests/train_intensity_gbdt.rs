@@ -216,7 +216,7 @@ fn train_intensity_gbdt_roundtrip() {
     );
 
     let fim = param.frag_intensity_model.as_ref().unwrap();
-    let n_features = scoring_crate::frag_features::N_FRAG_FEATURES;
+    let n_features = scoring_crate::features::fragment::N_FRAG_FEATURES;
     let dummy = vec![0.0f32; n_features];
     let val = fim.predict_value(&dummy);
     assert!(

@@ -1,8 +1,8 @@
-use glyco::glycan_first::PPM_FLOOR_DA;
+use glyco::glycan::first::PPM_FLOOR_DA;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::psm::ions::predict_by_ions;
 
 pub struct FragmentIndex {
     bin_width: f64,
@@ -174,9 +174,9 @@ mod tests {
     }
 
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
 
-    fn aa() -> model::aa_set::AminoAcidSet {
+    fn aa() -> model::amino_acid::set::AminoAcidSet {
         AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .build()
             .unwrap()

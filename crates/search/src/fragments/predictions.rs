@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use model::peptide::Peptide;
 use rustc_hash::FxHashMap;
-use scoring_crate::gbdt_eval::GbdtPeakModel;
-use scoring_crate::scoring::{frag_intensities_from_raw, predict_frag_raw};
+use scoring_crate::gbdt::GbdtPeakModel;
+use scoring_crate::psm::{frag_intensities_from_raw, predict_frag_raw};
 
 /// Shards of the cache; well above the thread count, so lock waits stay rare.
 const SHARDS: usize = 64;
@@ -34,7 +34,7 @@ impl Default for FragPredCache {
 }
 
 impl FragPredCache {
-    /// The intensities of [`scoring_crate::scoring::predict_frag_intensities`] for `peptide`
+    /// The intensities of [`scoring_crate::psm::predict_frag_intensities`] for `peptide`
     /// at `charge`, predicted on the first request of the chunk.
     pub fn intensities(&self, model: &GbdtPeakModel, peptide: &Peptide, charge: u8) -> Vec<f64> {
         use std::hash::BuildHasher;

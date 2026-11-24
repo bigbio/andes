@@ -3,7 +3,7 @@ use model::stats::{median_f32_as_f64_mut, MAD_TO_SD};
 
 use crate::decoys::Probe;
 use crate::gaussian;
-use crate::ms1_index::{slice_value, MobilityGate, Ms1RunIndex};
+use crate::ms1::{slice_value, MobilityGate, Ms1RunIndex};
 
 pub const MAX_ISOTOPES: usize = 4;
 pub const MIN_SCANS: usize = 5;

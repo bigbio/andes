@@ -1654,7 +1654,7 @@ already carry the decoy prefix or suffix is refused.
 The modifications are two lists, `--fixed-mods` and `--variable-mods` on the command line or
 `search.fixed_mods` and `search.variable_mods` in the config file (§1b). Each item is
 `Name (sites)`; the command line takes a comma-separated list
-(`crates/model/src/mod_spec.rs`).
+(`crates/model/src/modification/spec.rs`).
 
 ```bash
 andes ... --fixed-mods "Carbamidomethyl (C)" \
@@ -3549,8 +3549,8 @@ here only where the value is a fixed choice rather than a documented option.
 | Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |
 | Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (advanced) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
 | Co-isolation isotope walk | 3 steps | `search/src/coisolation.rs:115` | steps below an accepted peak when finding the monoisotope | no | No recorded evidence |
-| Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomer_class.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
-| Implausible residue mass | 5000 Da | `model/src/aa_set.rs:17` | residues rejected as unusable | no | Sanity bound |
+| Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomers.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
+| Implausible residue mass | 5000 Da | `model/src/amino_acid/set.rs:17` | residues rejected as unusable | no | Sanity bound |
 
 ### Scoring
 
@@ -3558,13 +3558,13 @@ here only where the value is a fixed choice rather than a documented option.
 |---|---|---|---|---|---|
 | GBDT trees | 100 | `andes/src/bin/andes/cli.rs` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
 | Isobaric peak filter | 100 Da window, 20 peaks | `andes/src/bin/andes/search.rs:273` (resolution), `--peak-filter` text in [§1](#scoring) | spectra filtered for TMT/iTRAQ data | `--peak-filter` | No recorded evidence |
-| Feature window | 50 Da | `scoring/src/peak_features.rs:43`, `scoring/src/scoring/strong_score.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
-| Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/scoring/fragment_error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
+| Feature window | 50 Da | `scoring/src/features/peaks.rs:43`, `scoring/src/psm/strong.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
+| Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/psm/error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
 | Nominal-mass node window | 6 sigma | `fragment_error.rs:13` | low-resolution fragment window | learned spread, fixed multiple | Fixed 0.15-0.25 Da windows are the plateau on five high-res sets; measured spreads 0.035-0.05 Da (code comment) |
 | ppm-Gaussian term | width 1.5 x spread, default 7 ppm, minimum 1 ppm | `fragment_error.rs:20-24` | fragment ppm score term | learned spread, fixed multiple | 1.5-1.8 x scored best on Astral (code comment); default and minimum: no recorded evidence |
 | Strong-score calibration minimum | 100 candidates | `strong_score.rs:427` | per-spectrum z-score calibration | no | Mirrors the Tailor minimum |
 | Predicted-intensity top-K | 6 fragments | `strong_score.rs:271` | fragments from the intensity predictor entering the score | no | No recorded evidence |
-| RT calibration anchors | 5 | `scoring/src/rt_model.rs:236` | smallest per-run RT fit | no | Needed for a robust slope and outlier trim (code comment) |
+| RT calibration anchors | 5 | `scoring/src/rt.rs:236` | smallest per-run RT fit | no | Needed for a robust slope and outlier trim (code comment) |
 | Artefact masses | 0.984016, 15.994915, 43.005814, 14.01565 | `andes/src/bin/andes/search.rs:3201` | substitutions warned as mimicking modifications | no | Chemistry (deamidation, oxidation, carbamylation, methylation) |
 
 ### FDR and rescoring
@@ -3596,7 +3596,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Width refinement | 16 golden-section steps, apex spacing 0.5 x width, profile reach 9 widths | `evidence.rs:1207,290,272` | numerical precision of the fit | no | Numerical bounds (profile reach: exp(-81/2) below 3e-18) |
 | Isotopes and scans | 4 isotopes, at least 5 scans | `evidence.rs:99,101` | envelope and fit eligibility | no | No recorded evidence |
 | Isotope exclusion | z 3.0 | `evidence.rs:114` | isotope traces excluded from the fit | no | No recorded evidence |
-| Detection limit | 5th percentile of a scan's centroid intensities; noise floor 0.5 x limit | `quant/src/ms1_index.rs:87`, `evidence.rs:109` | censoring and noise floor | learned per scan; fractions fixed | No recorded evidence |
+| Detection limit | 5th percentile of a scan's centroid intensities; noise floor 0.5 x limit | `quant/src/ms1.rs:87`, `evidence.rs:109` | censoring and noise floor | learned per scan; fractions fixed | No recorded evidence |
 | Trace integration range | 3 widths before the apex, 4 after | `evidence.rs:121,122` | area integration range | no | Longer after the apex because peaks tail (code comment) |
 | Trace baseline | at least 3 scans a side; sides differ at 3 standard errors, then the lower side alone | `evidence.rs:125,128` | baseline of each trace | no | No recorded evidence |
 | Peak boundaries | 2 half-widths at half maximum; deep valley 0.5, rise 1.5 | `quant/src/xic.rs:78-83` | LFQ peak bounds | no | 2 half-widths = 2.35 sigma, 98% of a Gaussian area (code comment); valley rule: no recorded evidence |
@@ -3622,10 +3622,10 @@ here only where the value is a fixed choice rather than a documented option.
 | Backbone candidates | top 150 per spectrum | `search/src/glycopeptides.rs:48` | candidates kept after truncation | no | No recorded evidence |
 | Peptide-first pool | charges 1..2, at most 1,024 peptides | `search/src/glycopeptides.rs:53,62` | peptide-first candidate pool | no | Cap sweep on one glyco set: 64 gives 218 at 1%, 256 gives 232, 1024 gives 253, no cap 268; 1024 kept best precision (code comment) |
 | Peptide-first filters | at least 6 matched b/y; minimum glycan 406 (N) and 203 (O) Da; backbone at least 500 Da | `search/src/glycopeptides.rs:932,188,194`, `glyco/src/backbone.rs:180,184` | candidate filters | no | 406 is two HexNAc, 203 one HexNAc (the Tn core); 6: no recorded evidence |
-| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `glyco/src/glyco_psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
+| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `glyco/src/psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |
-| Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `glyco/src/glycan_first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
+| Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `glyco/src/glycan/first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
 | Y-ion charge | 3 | `andes/src/bin/andes/cli.rs` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
 | Glyco tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
 | Glycan mass share in isotope model | 0.5 | `model/src/isotope.rs:126` | share of the mass from the glycan in the envelope model | no | No recorded evidence |

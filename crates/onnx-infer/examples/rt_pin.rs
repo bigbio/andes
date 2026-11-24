@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::time::Instant;
 
-use onnx_infer::rt_native::{RtModel, RtPeptide, Scratch};
+use onnx_infer::rt::{RtModel, RtPeptide, Scratch};
 
 fn main() {
     let v: Vec<String> = std::env::args().skip(1).collect();

@@ -518,7 +518,7 @@ mod tests {
         );
 
         let ms1 = dir.path().join("x.ms1.parquet");
-        crate::ms1::write_ms1_table(&ms1, "x", &quant::ms1_index::Ms1RunIndex::default())
+        crate::ms1::write_ms1_table(&ms1, "x", &quant::ms1::Ms1RunIndex::default())
             .unwrap();
         let e = read_ms2_table(&ms1).unwrap_err();
         assert!(e.contains("x.ms1.parquet") && e.contains(SCHEMA_KEY), "{e}");

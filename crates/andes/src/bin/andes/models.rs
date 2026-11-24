@@ -48,7 +48,7 @@ pub(crate) const DEFAULT_VARIABLE_MODS: &str = "Oxidation (M), Acetyl (Protein N
 const TRAINING_VARIABLE_MODS: &str = "Oxidation (M)";
 
 fn builtin_mods(list: &str, fixed: bool) -> Vec<Modification> {
-    model::mod_spec::parse_mod_list(list, fixed)
+    model::modification::spec::parse_mod_list(list, fixed)
         .unwrap_or_else(|e| panic!("built-in modification list {list:?}: {e}"))
 }
 
@@ -773,8 +773,8 @@ mod param_resolver_tests {
         use input::IsobaricLabel::{Itraq, Tmt, TmtPro};
         let set = |fixed: &str, variable: &str| {
             AminoAcidSetBuilder::new_standard()
-                .add_mods(model::mod_spec::parse_mod_list(fixed, true).unwrap())
-                .add_mods(model::mod_spec::parse_mod_list(variable, false).unwrap())
+                .add_mods(model::modification::spec::parse_mod_list(fixed, true).unwrap())
+                .add_mods(model::modification::spec::parse_mod_list(variable, false).unwrap())
                 .build()
                 .unwrap()
         };

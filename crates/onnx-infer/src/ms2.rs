@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use crate::rt_native::mods::N_COMP;
-use crate::rt_native::{read_tensors, silu, Conv, RtError, RtPeptide, Tensor};
+use crate::rt::mods::N_COMP;
+use crate::rt::{read_tensors, silu, Conv, RtError, RtPeptide, Tensor};
 
 const PHOSPHO: u32 = 21;
 const OXIDATION: u32 = 35;

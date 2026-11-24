@@ -202,7 +202,7 @@ fn run_train_env(in_parquet: &Path, store: &Path, extra: &[&str], env: &[(&str, 
     );
 }
 
-fn geometry_sig(partitions: &[scoring_crate::param_model::Partition]) -> Vec<(i32, i32, u32)> {
+fn geometry_sig(partitions: &[scoring_crate::params::Partition]) -> Vec<(i32, i32, u32)> {
     let mut v: Vec<(i32, i32, u32)> = partitions
         .iter()
         .map(|q| (q.charge, q.seg_num, q.parent_mass.to_bits()))

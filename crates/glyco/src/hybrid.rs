@@ -1,8 +1,8 @@
 use crate::backbone::{
     core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O,
 };
-use crate::glycan_db::GlycanComp;
-use crate::glycan_first::GlycanCore;
+use crate::glycan::db::GlycanComp;
+use crate::glycan::first::GlycanCore;
 use crate::oxonium::oxonium_gate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,8 +296,8 @@ pub fn hybrid_candidates_presolved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::glycan_db::load_glycan_gdb;
-    use crate::glycan_mass::{HEX, HEXNAC, PROTON};
+    use crate::glycan::db::load_glycan_gdb;
+    use crate::glycan::mass::{HEX, HEXNAC, PROTON};
 
     fn test_glycans() -> Vec<GlycanComp> {
         load_glycan_gdb(
@@ -363,7 +363,7 @@ mod tests {
     fn hybrid_union_contains_both_sources() {
         let glycans = test_glycans();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone_residue = 1500.0_f64;
@@ -395,7 +395,7 @@ mod tests {
     fn db_union_stays_bounded_and_keeps_true_backbone() {
         let glycans = test_glycans();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone_residue = 1500.0_f64;
         let precursor = true_backbone_residue + glycan_mass;
@@ -431,7 +431,7 @@ mod tests {
         const ISOTOPE: f64 = 1.00335;
         let glycans = test_glycans();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone_residue = 1500.0_f64;
         let z = 2u8;
@@ -521,7 +521,7 @@ mod tests {
     fn hybrid_dedup_keeps_db_over_denovo() {
         let glycans = test_glycans();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone_residue = 1500.0_f64;
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn denovo_and_db_branches_agree_on_residue_mass_convention() {
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let true_backbone_residue = 1500.0_f64;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
@@ -645,7 +645,7 @@ mod tests {
     fn novel_glycan_hit_preserves_residual_mass() {
         let glycans: Vec<GlycanComp> = Vec::new();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let novel_glycan_mass = 1234.5678_f64;
 
@@ -743,7 +743,7 @@ mod tests {
     fn hybrid_candidates_with_isotope_threads_offset_onto_all_hits() {
         let glycans = test_glycans();
         let proton = PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone = 1500.0_f64;

@@ -17,7 +17,7 @@ fn pep(seq: &[u8]) -> Peptide {
 
 #[test]
 fn a_peptide_of_two_proteins_lists_both_whatever_its_flanks() {
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::protein::{Protein, ProteinDb};
     let prot = |acc: &str, seq: &[u8]| Protein {
         accession: acc.into(),

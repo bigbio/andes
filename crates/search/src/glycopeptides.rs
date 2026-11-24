@@ -10,9 +10,9 @@ use glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
-use glyco::glycan_db::{GlycanComp, DENOVO_TOPOLOGY_ID};
-use glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use glyco::glyco_psm::{
+use glyco::glycan::db::{GlycanComp, DENOVO_TOPOLOGY_ID};
+use glyco::glycan::first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
+use glyco::psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
@@ -50,7 +50,7 @@ use crate::psm::PsmMatch;
 
 type GlycanWinnerKey = (u32, u64);
 
-use scoring_crate::scoring::{
+use scoring_crate::psm::{
     candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
     fuse_strong_score, hyperscore_psm_with_matches, listwise_score_gap, psm_edge_score, score_psm,
     score_psm_float, scored_for_charge, strong_score_calibrated_loo, ScoredSpectrum,
@@ -61,7 +61,7 @@ use scoring_crate::scoring::{
 fn glyco_candidate_strong_score(
     ss: &ScoredSpectrum<'_>,
     peptide: &model::peptide::Peptide,
-    spec_scorer: &scoring_crate::scoring::RankScorer,
+    spec_scorer: &scoring_crate::psm::RankScorer,
     z: u8,
     spectrum_rank_entropy: f32,
     spectrum_listwise_gap: f32,
@@ -274,7 +274,7 @@ impl GlycoCandidates {
 
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::params::SearchParams,
-    pub scorer: &'a scoring_crate::scoring::RankScorer,
+    pub scorer: &'a scoring_crate::psm::RankScorer,
     pub core: GlycanCore,
     pub candidates: &'a [crate::candidates::Candidate],
     pub mass_order: &'a [u32],
@@ -424,8 +424,8 @@ impl GlycoCtxOwned {
             min_core_ions: 1,
             top_k: 100,
             diagnostic_ions: match cfg.core {
-                GlycanCore::NGlycan => glyco::glycan_first::default_diagnostic_ions(),
-                GlycanCore::OGlycan => glyco::glycan_first::o_glycan_diagnostic_ions(),
+                GlycanCore::NGlycan => glyco::glycan::first::default_diagnostic_ions(),
+                GlycanCore::OGlycan => glyco::glycan::first::o_glycan_diagnostic_ions(),
             },
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),
@@ -636,8 +636,8 @@ fn score_spectrum_glyco(
     let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
     let (y_peaks, y_stats): (&[(f64, f32)], &SpectrumStats) = (&spec.peaks, &stats);
 
-    let spec_scorer: &scoring_crate::scoring::RankScorer = scorer;
-    let gen_scorer: &scoring_crate::scoring::RankScorer = scorer;
+    let spec_scorer: &scoring_crate::psm::RankScorer = scorer;
+    let gen_scorer: &scoring_crate::psm::RankScorer = scorer;
     let gen_is_etd = matches!(
         gen_spec.activation_method,
         Some(model::activation::ActivationMethod::ETD)
@@ -765,7 +765,7 @@ fn score_spectrum_glyco(
     } else {
         &scored_per_charge
     };
-    let phase1_scorer: &scoring_crate::scoring::RankScorer = if paired_hcd.is_some() {
+    let phase1_scorer: &scoring_crate::psm::RankScorer = if paired_hcd.is_some() {
         gen_scorer
     } else {
         spec_scorer

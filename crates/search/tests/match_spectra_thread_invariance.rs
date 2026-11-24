@@ -11,7 +11,7 @@ use model::{
     activation::ActivationMethod, instrument::InstrumentType, protocol::Protocol, Spectrum,
     Tolerance, H2O, PROTON,
 };
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
 use search::candidates::Candidate;
 use search::psm::TopNQueue;

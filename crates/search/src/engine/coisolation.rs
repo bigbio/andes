@@ -8,11 +8,11 @@ use crate::chimeric::precursor_isotope_match;
 use crate::precursor::calibration::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch};
 use crate::params::SearchParams;
-use model::aa_set::AminoAcidSet;
+use model::amino_acid::set::AminoAcidSet;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::scoring::{
+use scoring_crate::psm::{
     fuse_strong_score, predict_by_ions, psm_edge_score, score_psm, score_psm_float,
     strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum, StrongScoreInputs,
 };
@@ -523,8 +523,8 @@ pub(crate) fn search_secondary(
 
     let mut retained_scores: Vec<f32> = retained.iter().map(|p| p.score).collect();
     retained_scores.sort_by(|a, b| b.total_cmp(a));
-    let listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&retained_scores);
-    let candidate_rank_entropy = scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
+    let listwise_score_gap = scoring_crate::psm::listwise_score_gap(&retained_scores);
+    let candidate_rank_entropy = scoring_crate::psm::candidate_rank_entropy(&retained_scores);
     let tailor_denom = crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
     let delta_raw_score = if second_raw > i32::MIN {
         (best_raw - second_raw) as f32

@@ -309,7 +309,7 @@ fn lookup(db: &UnimodDb, token: &str, item: &str) -> Result<UnimodMod, ModSpecEr
         Ok(None) => db
             .resolve_alias(token)
             .cloned()
-            .or_else(|| crate::xl_reagents::monolink(db, token))
+            .or_else(|| crate::crosslinkers::monolink(db, token))
             .ok_or_else(|| ModSpecError::UnknownName {
                 item: item.to_string(),
                 name: token.trim().to_string(),

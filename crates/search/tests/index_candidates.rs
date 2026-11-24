@@ -7,8 +7,8 @@ use model::{
     AminoAcidSetBuilder, ModLocation, Modification, Peptide, Protein, ProteinDb, ResidueSpec,
     Spectrum, Tolerance, H2O, PROTON,
 };
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use scoring_crate::psm::ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
 use search::candidates::{enumerate_candidates, Candidate};
 use search::decoy::DecoyStrategy;
@@ -813,7 +813,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
     let table =
-        GlycoCandidates::from_index(&mmap, glyco::glycan_first::GlycanCore::NGlycan);
+        GlycoCandidates::from_index(&mmap, glyco::glycan::first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {

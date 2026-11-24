@@ -1,7 +1,7 @@
 use model::hash::{splitmix64, SPLITMIX_GOLDEN};
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
 use rayon::prelude::*;
-use scoring_crate::gbdt_eval::GbdtPeakModel;
+use scoring_crate::gbdt::GbdtPeakModel;
 
 pub const N_FOLDS: usize = 3;
 
@@ -156,7 +156,7 @@ fn train_fold(
         y,
         groups,
         n_features: nf,
-        feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
+        feature_names: scoring_crate::gbdt::indexed_feature_names(nf as u32),
     };
     train_gbdt(&ds, params, seed.wrapping_add(fold as u64 + 1))
         .map_err(|e| format!("fold {fold}: {e:?}"))

@@ -103,7 +103,7 @@ pub(crate) fn run_train_intensity_gbdt(
     args: TrainIntensityGbdtArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use model_train::gbdt::dataset::PsmRow;
-    use model_train::gbdt::frag_dataset::build_frag_dataset;
+    use model_train::gbdt::fragments::build_frag_dataset;
     use model_train::gbdt::train::{train_gbdt_regression, TrainParams};
     use std::sync::Arc;
 
@@ -206,7 +206,7 @@ pub(crate) fn run_train_rich_ion_llr(
     args: TrainRichIonLlrArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use model_train::gbdt::dataset::PsmRow;
-    use model_train::gbdt::ion_dataset::build_ion_dataset;
+    use model_train::gbdt::ions::build_ion_dataset;
     use model_train::gbdt::train::{train_gbdt, TrainParams};
     use std::sync::Arc;
 

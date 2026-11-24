@@ -1,6 +1,6 @@
-use crate::glycan_db::GlycanComp;
-use crate::glycan_first::PPM_FLOOR_DA;
-use crate::glycan_mass::{CORE_OXONIUM_MZ, HEX, HEXNAC, NEUAC, NEUGC, PROTON, WATER};
+use crate::glycan::db::GlycanComp;
+use crate::glycan::first::PPM_FLOOR_DA;
+use crate::glycan::mass::{CORE_OXONIUM_MZ, HEX, HEXNAC, NEUAC, NEUGC, PROTON, WATER};
 
 const OXONIUM_TOL_FLOOR_DA: f64 = 0.01;
 

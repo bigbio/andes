@@ -1,6 +1,6 @@
 use model_train::counts::CountStats;
 use model_train::store::{write_model_with_sources, ModelStore, SourceLedger};
-use scoring_crate::param_model::{IonType, Param, Partition};
+use scoring_crate::params::{IonType, Param, Partition};
 use std::path::Path;
 
 fn fixture_param() -> Param {

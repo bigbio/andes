@@ -276,13 +276,13 @@ pub(crate) const PRECURSOR_CAL_MODES: &[(&str, &str)] = &[
 pub(crate) struct ModList(pub(crate) Vec<model::Modification>);
 
 pub(crate) fn parse_fixed_mods(s: &str) -> Result<ModList, String> {
-    model::mod_spec::parse_mod_list(s, true)
+    model::modification::spec::parse_mod_list(s, true)
         .map(ModList)
         .map_err(|e| e.to_string())
 }
 
 pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
-    model::mod_spec::parse_mod_list(s, false)
+    model::modification::spec::parse_mod_list(s, false)
         .map(ModList)
         .map_err(|e| e.to_string())
 }
@@ -2044,11 +2044,11 @@ pub(crate) enum GlycoCoreFlag {
     O,
 }
 
-impl From<GlycoCoreFlag> for glyco::glycan_first::GlycanCore {
+impl From<GlycoCoreFlag> for glyco::glycan::first::GlycanCore {
     fn from(value: GlycoCoreFlag) -> Self {
         match value {
-            GlycoCoreFlag::N => glyco::glycan_first::GlycanCore::NGlycan,
-            GlycoCoreFlag::O => glyco::glycan_first::GlycanCore::OGlycan,
+            GlycoCoreFlag::N => glyco::glycan::first::GlycanCore::NGlycan,
+            GlycoCoreFlag::O => glyco::glycan::first::GlycanCore::OGlycan,
         }
     }
 }

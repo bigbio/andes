@@ -17,7 +17,7 @@ use source_scan::{blank, is_test_path, rust_files, test_item_ranges, Keep};
 /// never read by the shipped binary. Paired with the file that reads it.
 const TEST_HARNESS_VARS: &[(&str, &str)] = &[
     ("ANDES_GBDT_DIR", "crates/scoring/tests/gbdt_bench.rs"),
-    ("ANDES_GLYCO_GDB", "crates/glyco/src/glycan_first.rs"),
+    ("ANDES_GLYCO_GDB", "crates/glyco/src/glycan/first.rs"),
     (
         "ANDES_GLYCO_MGF",
         "crates/glyco/tests/glycan_first_mouse.rs",

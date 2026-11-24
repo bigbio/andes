@@ -546,7 +546,7 @@ mod tests {
                 ..base.clone()
             },
         ];
-        let aa = model::aa_set::AminoAcidSetBuilder::new_standard()
+        let aa = model::amino_acid::set::AminoAcidSetBuilder::new_standard()
             .build()
             .expect("standard amino acids");
         for proteases in &digests {

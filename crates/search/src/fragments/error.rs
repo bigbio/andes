@@ -2,8 +2,8 @@ use model::mass::{nominal_from, H2O, INTEGER_MASS_SCALER, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::stats::{median_mad, Even, MAD_TO_SD};
-use scoring_crate::scoring::fragment_ions::{predict_by_ions, IonKind, PredictedIon};
-use scoring_crate::scoring::FragmentErrorModel;
+use scoring_crate::psm::ions::{predict_by_ions, IonKind, PredictedIon};
+use scoring_crate::psm::FragmentErrorModel;
 
 use crate::engine::PreparedSearch;
 use crate::tdc::{confident_target_indices, ScoredLabel};
@@ -234,7 +234,7 @@ mod tests {
         let (nc, ns) = m.node_error_da.expect("nominal-reference error");
         assert!(nc.abs() < 0.011 && (ns - 0.074).abs() < 0.01, "{m:?}");
         let w = m.node_window_da().unwrap();
-        let six = scoring_crate::scoring::fragment_error::NODE_WINDOW_SIGMAS;
+        let six = scoring_crate::psm::error::NODE_WINDOW_SIGMAS;
         assert!((w - (nc.abs() + six * ns)).abs() < 1e-12, "{w}");
         assert!((m.offset_ppm + 2.5).abs() < 0.15, "{m:?}");
         assert!((m.sigma_ppm - 1.6).abs() < 0.25, "{m:?}");

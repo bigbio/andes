@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
-use crate::scoring::rank_scorer::RankScorer;
+use crate::params::{IonType, Param, Partition, PrecursorOffsetFrequency};
+use crate::psm::rank::RankScorer;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 use model::protocol::Protocol;
@@ -265,7 +265,7 @@ impl<'a> ScoredSpectrum<'a> {
         let gbdt_logit_by_rank: Vec<f32> = match param.gbdt_peak_model.as_ref() {
             None => Vec::new(),
             Some(model) => {
-                use crate::peak_features::{extract_peak_features, PeakFeatureCtx};
+                use crate::features::peaks::{extract_peak_features, PeakFeatureCtx};
                 let max_r = cache_ranks
                     .iter()
                     .copied()
@@ -1137,7 +1137,7 @@ fn visit_directional_node_ion_matches<F>(
 ) where
     F: FnMut(Partition, IonType, Option<(u32, f64)>, &[f32], f64, f64),
 {
-    use crate::param_model::IonType;
+    use crate::params::IonType;
 
     let param = scorer.param();
     let node_window = scorer.node_score_window();
@@ -1218,7 +1218,7 @@ fn visit_directional_loss_ion_matches<F>(
 ) where
     F: FnMut(Partition, IonType, Option<u32>, &[f32], f64, f64),
 {
-    use crate::param_model::IonType;
+    use crate::params::IonType;
     if active_losses.is_empty() {
         return;
     }
@@ -1344,7 +1344,7 @@ fn visit_directional_loss_ion_facts<F>(
 ) where
     F: FnMut(Partition, IonType, Option<u32>, f64, f64),
 {
-    use crate::param_model::IonType;
+    use crate::params::IonType;
     if active_losses.is_empty() {
         return;
     }
@@ -1582,7 +1582,7 @@ fn deconvolute_spectrum(
     (out_peaks, out_ranks)
 }
 
-fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) -> IonType {
+fn main_ion_from_param(param: &Param, partition: crate::params::Partition) -> IonType {
     let fallback = IonType::Prefix {
         charge: 1,
         offset_bits: 0.0_f32.to_bits(),
@@ -1591,7 +1591,7 @@ fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) 
     let num_segments = param.num_segments.max(1) as usize;
     let mut ion_freq: std::collections::HashMap<IonType, f32> = std::collections::HashMap::new();
     for seg in 0..num_segments {
-        let part = crate::param_model::Partition {
+        let part = crate::params::Partition {
             charge: partition.charge,
             parent_mass: partition.parent_mass,
             seg_num: seg as i32,
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn main_ion_deterministic_with_placeholder_zero_frequencies() {
-        use crate::param_model::{FragmentOffsetFrequency, IonType, Partition};
+        use crate::params::{FragmentOffsetFrequency, IonType, Partition};
         let part = Partition {
             charge: 2,
             parent_mass: 1500.0,
@@ -1776,8 +1776,8 @@ mod tests {
         );
     }
 
-    use crate::param_model::{IonType, Partition, SpecDataType};
-    use crate::scoring::rank_scorer::RankScorer;
+    use crate::params::{IonType, Partition, SpecDataType};
+    use crate::psm::rank::RankScorer;
     use crate::testutil::tiny_param_with_ions;
 
     fn spec(peaks: &[(f64, f32)]) -> Spectrum {
@@ -1962,7 +1962,7 @@ mod tests {
 
     #[test]
     fn prob_peak_uses_raw_mme_value_not_da_converted() {
-        use crate::param_model::SpecDataType;
+        use crate::params::SpecDataType;
         use model::activation::ActivationMethod;
         use model::instrument::InstrumentType;
         use model::protocol::Protocol;
@@ -2300,7 +2300,7 @@ mod tests {
 
     #[test]
     fn edge_score_nonzero_with_existence_table() {
-        use crate::param_model::{FragmentOffsetFrequency, SpecDataType};
+        use crate::params::{FragmentOffsetFrequency, SpecDataType};
         use model::activation::ActivationMethod;
         use model::instrument::InstrumentType;
         use model::protocol::Protocol;
@@ -2494,13 +2494,13 @@ mod tests {
 
     #[test]
     fn gbdt_term_raises_node_score_for_signal_peak() {
-        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+        use crate::gbdt::{GbdtPeakModel, Tree};
         use model::mass::INTEGER_MASS_SCALER;
 
         let gbdt = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
-            feature_names: crate::gbdt_eval::indexed_feature_names(1),
+            feature_names: crate::gbdt::indexed_feature_names(1),
             apply_sigmoid: true,
             trees: vec![Tree {
                 feature: vec![-1],
@@ -2574,7 +2574,7 @@ mod tests {
 #[cfg(test)]
 mod precursor_filter_tests {
     use super::*;
-    use crate::param_model::{Param, PrecursorOffsetFrequency, SpecDataType};
+    use crate::params::{Param, PrecursorOffsetFrequency, SpecDataType};
     use model::activation::ActivationMethod;
     use model::instrument::InstrumentType;
     use model::protocol::Protocol;

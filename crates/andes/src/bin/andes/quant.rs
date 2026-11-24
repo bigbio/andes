@@ -6,7 +6,7 @@ pub(crate) mod tmt;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use model::isomer_class::{bundled_unimod_mass, mod_units_match};
+use model::isomers::{bundled_unimod_mass, mod_units_match};
 use model::{IsomerClass, Tolerance};
 use output::extract::{read_extract_tags, write_extract_table_tagged};
 use output::features::{FeatureGroup, FeatureRecord, MbrColumns};

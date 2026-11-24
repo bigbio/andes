@@ -1,4 +1,4 @@
-use crate::glycan_db::GlycanComp;
+use crate::glycan::db::GlycanComp;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlycanRtCoeffs {

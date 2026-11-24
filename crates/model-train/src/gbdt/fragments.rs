@@ -1,6 +1,6 @@
-use scoring_crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
-use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
+use scoring_crate::features::fragment::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
+use scoring_crate::psm::ions::predict_by_ions;
+use scoring_crate::psm::spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
 
 use crate::gbdt::dataset::{group_id, PsmRow};
@@ -73,7 +73,7 @@ mod tests {
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;
-    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+    use scoring_crate::psm::ions::predict_by_ions;
     use std::path::PathBuf;
 
     fn make_scorer() -> RankScorer {
@@ -126,7 +126,7 @@ mod tests {
             charge: 2,
         };
         let ds = build_frag_dataset(&[row], &scorer);
-        assert_eq!(ds.n_features, scoring_crate::frag_features::N_FRAG_FEATURES);
+        assert_eq!(ds.n_features, scoring_crate::features::fragment::N_FRAG_FEATURES);
         assert!(
             ds.y.len() >= 2,
             "at least the 2 placed ions matched, got {}",

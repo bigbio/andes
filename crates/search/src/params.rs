@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use model::aa_set::AminoAcidSet;
+use model::amino_acid::set::AminoAcidSet;
 use model::enzyme::Enzyme;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 
@@ -121,7 +121,7 @@ mod tests {
     use super::*;
     use crate::precursor::calibration::PrecursorCalMode;
     use crate::precursor::matching::matches_precursor;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::mass::PROTON;
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;

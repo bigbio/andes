@@ -35,7 +35,7 @@ Each stage and where it lives:
 | Read spectra and database | `crates/input` | `mzml.rs`, `mgf.rs`, `thermo.rs`, `timstof.rs`, `database.rs` |
 | Digestion, decoys | `crates/search` | `candidates.rs`, `decoy.rs` |
 | Index and match | `crates/search` | `fragments/index.rs`, `precursor/matching.rs`, `engine.rs` |
-| Features and learned scores | `crates/scoring` | `frag_features.rs`, `gbdt_eval.rs`, `rt_model.rs` |
+| Features and learned scores | `crates/scoring` | `features/fragment.rs`, `gbdt.rs`, `rt.rs` |
 | PIN | `crates/output` | `pin.rs` |
 | Rescoring | `crates/rescore` | `run.rs`, `svm.rs`, `pep.rs` |
 | Protein inference | `crates/output` | `protein_inference.rs` |

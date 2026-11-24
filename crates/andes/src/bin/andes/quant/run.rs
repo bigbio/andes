@@ -16,7 +16,7 @@ use quant::isobaric::{extract_reporters, reporter_noise, signal_to_noise, Correc
 use quant::lfq::{
     competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };
-use quant::ms1_index::Ms1RunIndex;
+use quant::ms1::Ms1RunIndex;
 use quant::ms2::{Ms2Scan, ScanReporters};
 use quant::tdc::{picked_qvalues, Pair};
 use quant::unmix::{unmix_run, window_record, ScanInput, Strength, Survey, UnmixRun, WindowRecord};

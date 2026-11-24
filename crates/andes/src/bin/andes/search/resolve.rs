@@ -972,7 +972,7 @@ pub(super) fn resolve_search_params(
     }
     let dia_d = cli.dia && cli.spectrum.iter().all(|p| input_format_flags(p).2);
     let vote_filter = peak_filter.filter(|&(w, k)| dia_d && w > 0.0 && k > 0);
-    scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
+    scoring_crate::psm::init_scoring_settings(scoring_crate::psm::ScoringSettings {
         peak_filter: if vote_filter.is_some() {
             Some((0.0, 0))
         } else {
@@ -1232,7 +1232,7 @@ pub(super) fn log_resolved_parameters(
             .distinct_mods()
             .iter()
             .filter(|m| m.fixed == fixed && m.parts.is_empty())
-            .map(|m| model::mod_spec::describe(m))
+            .map(|m| model::modification::spec::describe(m))
             .collect();
         if names.is_empty() {
             "none".to_string()
@@ -1338,7 +1338,7 @@ fn set_flags<'a>(flags: &[(bool, &'a str)]) -> Vec<&'a str> {
 /// Shortens the GBDT ensemble in `slot` to `k` trees and returns its former tree count, or
 /// `None` when it is absent or already no longer than `k`.
 pub(super) fn truncate_gbdt(
-    slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>,
+    slot: &mut Option<Arc<scoring_crate::gbdt::GbdtPeakModel>>,
     k: usize,
 ) -> Option<usize> {
     let g = slot.as_ref()?;

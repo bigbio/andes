@@ -7,7 +7,7 @@ use output::ms1::write_ms1_table;
 use quant::align::AlignParams;
 use quant::decoys::Hypothesis;
 use quant::library::{build_library, PrecursorMeta, PsmIn};
-use quant::ms1_index::Ms1RunIndex;
+use quant::ms1::Ms1RunIndex;
 
 use super::*;
 use crate::quant::finalize::finalize;

@@ -1,4 +1,4 @@
-use crate::glycan_db::GlycanComp;
+use crate::glycan::db::GlycanComp;
 use crate::hybrid::Source;
 use std::cmp::Ordering;
 
@@ -65,9 +65,9 @@ pub fn collapse_cmp(
 /// canonical way to populate them is:
 ///
 /// ```rust
-/// # use glyco::glycan_db::GlycanComp;
+/// # use glyco::glycan::db::GlycanComp;
 /// # use glyco::hybrid::Source;
-/// # use glyco::glyco_psm::GlycoPsmKey;
+/// # use glyco::psm::GlycoPsmKey;
 /// let glycan: Option<GlycanComp> = None;
 /// let key = GlycoPsmKey {
 ///     spectrum_idx: 0,

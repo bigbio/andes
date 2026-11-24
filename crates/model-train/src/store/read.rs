@@ -16,7 +16,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::FxHashMap;
 
 use model::tolerance::Tolerance;
-use scoring_crate::param_model::{
+use scoring_crate::params::{
     FragmentOffsetFrequency, IonType, Param, Partition, PrecursorOffsetFrequency, SpecDataType,
 };
 
@@ -671,24 +671,24 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     param.rebuild_cache();
 
     if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+        let model = scoring_crate::gbdt::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}"))
         })?;
         model
-            .validate_features(&scoring_crate::peak_features::FEATURE_NAMES, "peak")
+            .validate_features(&scoring_crate::features::peaks::FEATURE_NAMES, "peak")
             .map_err(|e| TrainError::Other(format!("gbdt_model_bytes for '{model_id}': {e}")))?;
         param.gbdt_peak_model = Some(model);
     }
 
     if let Some(bytes) = manifest.frag_intensity_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+        let model = scoring_crate::gbdt::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!(
                 "decode frag_intensity_model_bytes for '{model_id}': {e}"
             ))
         })?;
         model
             .validate_features(
-                &scoring_crate::frag_features::FRAG_FEATURE_NAMES,
+                &scoring_crate::features::fragment::FRAG_FEATURE_NAMES,
                 "frag-intensity",
             )
             .map_err(|e| {
@@ -698,11 +698,11 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     }
 
     if let Some(bytes) = manifest.rich_ion_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+        let model = scoring_crate::gbdt::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!("decode rich_ion_model_bytes for '{model_id}': {e}"))
         })?;
         model
-            .validate_features(&scoring_crate::ion_features::ION_FEATURE_NAMES, "rich-ion")
+            .validate_features(&scoring_crate::features::ion::ION_FEATURE_NAMES, "rich-ion")
             .map_err(|e| {
                 TrainError::Other(format!("rich_ion_model_bytes for '{model_id}': {e}"))
             })?;

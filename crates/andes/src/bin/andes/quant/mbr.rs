@@ -11,7 +11,7 @@ use quant::evidence::{
 };
 use quant::library::{Library, LibraryEntry};
 use quant::mobility::{MobilityObservation, RunMobility};
-use quant::ms1_index::{MobilityGate, Ms1RunIndex};
+use quant::ms1::{MobilityGate, Ms1RunIndex};
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
 use quant::normalize::NormCell;
 use rayon::prelude::*;

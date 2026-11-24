@@ -1,6 +1,6 @@
-use crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
-use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
-use crate::scoring::ScoredSpectrum;
+use crate::features::fragment::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
+use crate::psm::ions::{predict_by_ions, IonKind};
+use crate::psm::ScoredSpectrum;
 use model::peptide::Peptide;
 
 pub const FEAT_ION_RANK: usize = N_FRAG_FEATURES;
@@ -124,8 +124,8 @@ pub fn extract_ion_features(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::fragment_ions::predict_by_ions;
-    use crate::scoring::ScoredSpectrum;
+    use crate::psm::ions::predict_by_ions;
+    use crate::psm::ScoredSpectrum;
     use crate::testutil::tiny_param_with_ions;
     use crate::RankScorer;
     use model::amino_acid::AminoAcid;

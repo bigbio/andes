@@ -3,12 +3,12 @@ use model::mass::nominal_from;
 use model::modification::{ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::param_model::{
+use scoring_crate::params::{
     FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType,
 };
-use scoring_crate::scoring::psm_score::score_psm;
-use scoring_crate::scoring::rank_scorer::RankScorer;
-use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
+use scoring_crate::psm::score::score_psm;
+use scoring_crate::psm::rank::RankScorer;
+use scoring_crate::psm::spectrum::ScoredSpectrum;
 
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;

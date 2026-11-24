@@ -1,5 +1,5 @@
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
-use scoring_crate::gbdt_eval::GbdtPeakModel;
+use scoring_crate::gbdt::GbdtPeakModel;
 
 fn separable_18(n: usize, seed: u64) -> Dataset {
     const NF: usize = 18;
@@ -25,7 +25,7 @@ fn separable_18(n: usize, seed: u64) -> Dataset {
         y,
         groups,
         n_features: NF,
-        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+        feature_names: scoring_crate::features::peaks::FEATURE_NAMES
             .iter()
             .map(|n| n.to_string())
             .collect(),

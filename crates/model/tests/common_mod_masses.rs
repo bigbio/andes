@@ -1,4 +1,4 @@
-use model::mod_spec::parse_mod_list;
+use model::modification::spec::parse_mod_list;
 use model::modification::{ModLocation, ResidueSpec};
 
 fn bit_eq(a: f64, b: f64) -> bool {

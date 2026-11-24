@@ -1,6 +1,6 @@
 use model::peptide::Peptide;
 
-use crate::scoring::fragment_ions::IonKind;
+use crate::psm::ions::IonKind;
 
 pub const FEAT_ION_TYPE: usize = 0;
 pub const FEAT_PRECURSOR_CHARGE: usize = 1;
@@ -171,7 +171,7 @@ mod tests {
     use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::peptide::Peptide;
 
-    use crate::scoring::fragment_ions::IonKind;
+    use crate::psm::ions::IonKind;
 
     fn pep(seq: &str) -> Peptide {
         Peptide::new(

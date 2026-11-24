@@ -18,20 +18,20 @@ use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::index::SearchIndex;
 use crate::params::{ScoreMode, SearchParams};
 use input::Ms1Link;
-use model::aa_set::AminoAcidSet;
+use model::amino_acid::set::AminoAcidSet;
 use model::activation::ActivationMethod;
 use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::mod_site_features::{
+use scoring_crate::features::sites::{
     mod_site_features, FEAT_SITE_DET_COUNT, FEAT_SITE_INTENS_FRAC, FEAT_SITE_LOCALIZED,
     FEAT_SITE_SHIFTED_FRAC, FEAT_SITE_SHIFTED_MATCHED,
 };
-use scoring_crate::scoring::fragment_ions::{
+use scoring_crate::psm::ions::{
     predict_by_ions, predict_by_ions_with_losses, IonKind,
 };
-use scoring_crate::scoring::{
+use scoring_crate::psm::{
     edge_scoring_enabled, frag_llr_battery, fragment_ambiguity, fuse_strong_score,
     intensity_signal, mass_competition_evidence, predict_frag_intensities, psm_edge_score,
     rich_ion_llr, score_psm, score_psm_float, scored_for_charge, strong_score_calibrated,
@@ -117,14 +117,14 @@ pub struct IpfScoring<'a> {
 }
 
 impl IpfScoring<'_> {
-    pub fn set_fragment_error(&self, m: Option<scoring_crate::scoring::FragmentErrorModel>) {
+    pub fn set_fragment_error(&self, m: Option<scoring_crate::psm::FragmentErrorModel>) {
         self.scorers.primary.set_fragment_error(m);
         for (_, s) in &self.scorers.alts {
             s.set_fragment_error(m);
         }
     }
 
-    pub fn fragment_error(&self) -> Option<scoring_crate::scoring::FragmentErrorModel> {
+    pub fn fragment_error(&self) -> Option<scoring_crate::psm::FragmentErrorModel> {
         self.scorers.primary.fragment_error()
     }
 
@@ -558,7 +558,7 @@ impl<'a> PreparedSearch<'a> {
         self
     }
 
-    pub fn set_fragment_error(&self, m: Option<scoring_crate::scoring::FragmentErrorModel>) {
+    pub fn set_fragment_error(&self, m: Option<scoring_crate::psm::FragmentErrorModel>) {
         self.scorer.set_fragment_error(m);
         if let Some(ps) = &self.per_scan {
             for route in ps.loaded.read().unwrap().iter() {
@@ -1562,9 +1562,9 @@ impl<'a> PreparedSearch<'a> {
                 let mut retained_scores: Vec<f32> = queue.iter_psms().map(|p| p.score).collect();
                 retained_scores.sort_by(|a, b| b.total_cmp(a));
                 let listwise_score_gap =
-                    scoring_crate::scoring::listwise_score_gap(&retained_scores);
+                    scoring_crate::psm::listwise_score_gap(&retained_scores);
                 let candidate_rank_entropy =
-                    scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
+                    scoring_crate::psm::candidate_rank_entropy(&retained_scores);
 
                 let strong_mode = params.score_mode == ScoreMode::Strong;
                 let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {

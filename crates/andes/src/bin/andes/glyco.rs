@@ -34,7 +34,7 @@ pub(crate) fn run_glyco(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
-    scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
+    scoring_crate::psm::init_cz_settings(scoring_crate::psm::CzSettings {
         zmax_override: cli.glyco_cz_max_charge,
     });
     glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
@@ -47,17 +47,17 @@ pub(crate) fn run_glyco(
         (Some(path), _, _) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("--glyco-glycan-gdb {}: {e}", path.display()))?;
-            let list = glyco::glycan_db::load_glycan_gdb(&content)?;
+            let list = glyco::glycan::db::load_glycan_gdb(&content)?;
             (list, format!("{} (file)", path.display()))
         }
         (None, Some(path), _) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("--glyco-glycan-wurcs {}: {e}", path.display()))?;
-            let list = glyco::glycan_db::load_glycan_wurcs_csv(&content)?;
+            let list = glyco::glycan::db::load_glycan_wurcs_csv(&content)?;
             (list, format!("{} (WURCS)", path.display()))
         }
         (None, None, Some(species)) => {
-            let list = glyco::glycan_db::load_species_glycan_db(species.key())?;
+            let list = glyco::glycan::db::load_species_glycan_db(species.key())?;
             (list, format!("--glyco-species {}", species.key()))
         }
         (None, None, None) => {

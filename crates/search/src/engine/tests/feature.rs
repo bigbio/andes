@@ -8,9 +8,9 @@ use model::protocol::Protocol;
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
-use scoring_crate::scoring::ScoredSpectrum;
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use scoring_crate::psm::ions::predict_by_ions;
+use scoring_crate::psm::ScoredSpectrum;
 
 fn make_scorer(tol_da: f64) -> RankScorer {
     use model::mass::{H2O, PROTON};

@@ -7,7 +7,7 @@ fn probe_sizes() {
     );
     println!(
         "GlycoPsmKey       = {}",
-        size_of::<glyco::glyco_psm::GlycoPsmKey>()
+        size_of::<glyco::psm::GlycoPsmKey>()
     );
     println!("PsmMatch          = {}", size_of::<search::psm::PsmMatch>());
     println!(

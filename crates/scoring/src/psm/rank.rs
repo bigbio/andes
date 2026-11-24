@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::param_model::{IonType, Param, Partition};
+use crate::params::{IonType, Param, Partition};
 
 #[derive(Debug, Clone)]
 pub struct RankScorer {
@@ -10,7 +10,7 @@ pub struct RankScorer {
     pub(crate) partition_loss_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
     max_rank: u32,
     fragment_tol_override: Option<model::tolerance::Tolerance>,
-    fragment_error: crate::scoring::fragment_error::SharedFragmentError,
+    fragment_error: crate::psm::error::SharedFragmentError,
     acquisition_high_res: Option<bool>,
 }
 
@@ -111,7 +111,7 @@ impl RankScorer {
             max_rank: param.max_rank as u32,
             fragment_tol_override: None,
             acquisition_high_res: None,
-            fragment_error: crate::scoring::fragment_error::SharedFragmentError::new(),
+            fragment_error: crate::psm::error::SharedFragmentError::new(),
         }
     }
 
@@ -165,11 +165,11 @@ impl RankScorer {
         })
     }
 
-    pub fn set_fragment_error(&self, m: Option<crate::scoring::FragmentErrorModel>) {
+    pub fn set_fragment_error(&self, m: Option<crate::psm::FragmentErrorModel>) {
         self.fragment_error.set(m);
     }
 
-    pub fn fragment_error(&self) -> Option<crate::scoring::FragmentErrorModel> {
+    pub fn fragment_error(&self) -> Option<crate::psm::FragmentErrorModel> {
         self.fragment_error.get()
     }
 
@@ -216,7 +216,7 @@ impl RankScorer {
             }
             _ => (
                 0.0,
-                crate::scoring::fragment_error::DEFAULT_GAUSSIAN_SIGMA_PPM,
+                crate::psm::error::DEFAULT_GAUSSIAN_SIGMA_PPM,
             ),
         }
     }
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn measured_error_sets_pin_tolerance_on_high_res_only() {
-        use crate::scoring::FragmentErrorModel;
+        use crate::psm::FragmentErrorModel;
         use model::tolerance::Tolerance;
         let hi = RankScorer::new(&tiny_param());
         assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn node_score_window_is_learned_on_high_res_only() {
-        use crate::scoring::FragmentErrorModel;
+        use crate::psm::FragmentErrorModel;
         use model::tolerance::Tolerance;
         let mut p = tiny_param();
         p.mme = Tolerance::Da(0.5);

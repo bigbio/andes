@@ -1,7 +1,7 @@
 pub const ISOTOPE_SPACING: f64 = model::mass::ISOTOPE;
 pub const PROTON: f64 = model::mass::PROTON;
 
-pub const MAX_STUBS: usize = model::xl_reagents::MAX_STUBS;
+pub const MAX_STUBS: usize = model::crosslinkers::MAX_STUBS;
 pub const N_FORMS: usize = MAX_STUBS + 1;
 
 #[derive(Debug, Clone, PartialEq)]

@@ -95,8 +95,8 @@ use model::protocol::Protocol;
 use model::Tolerance;
 use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{IonType, Partition, SpecDataType};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::params::{IonType, Partition, SpecDataType};
+use scoring_crate::psm::ions::predict_by_ions;
 use scoring_crate::Param;
 
 pub(crate) fn tiny_scorer() -> RankScorer {
@@ -163,7 +163,7 @@ pub(crate) fn tiny_scorer() -> RankScorer {
 }
 
 fn ion_scorer() -> RankScorer {
-    use scoring_crate::param_model::FragmentOffsetFrequency;
+    use scoring_crate::params::FragmentOffsetFrequency;
     let part = Partition {
         charge: 2,
         parent_mass: 0.0,

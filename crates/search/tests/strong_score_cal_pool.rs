@@ -13,8 +13,8 @@ use model::{
     activation::ActivationMethod, instrument::InstrumentType, protocol::Protocol, Spectrum,
     Tolerance, H2O, PROTON,
 };
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
-use scoring_crate::scoring::strong_score_calibrated_loo;
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use scoring_crate::psm::strong_score_calibrated_loo;
 use scoring_crate::{Param, RankScorer};
 use search::{PreparedSearch, SearchIndex, SearchParams};
 

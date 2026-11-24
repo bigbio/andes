@@ -7,7 +7,7 @@ use model::fdr::{ranked_q, Counts, Eval};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::stats::nan_low_f32;
-use scoring_crate::scoring::rank_scorer::RankScorer;
+use scoring_crate::psm::rank::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
 use search::psm::PsmMatch;
 use search::{match_spectra, SearchIndex, SearchParams};

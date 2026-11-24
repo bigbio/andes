@@ -1,6 +1,6 @@
 use super::*;
 use crate::psm::{PsmFeatures, PsmMatch};
-use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
+use model::amino_acid::set::{AminoAcidSet, AminoAcidSetBuilder};
 use model::modification::{Modification, ResidueSpec};
 use model::amino_acid::AminoAcid;
 use model::peptide::Peptide;
@@ -413,7 +413,7 @@ fn base_set_with_cam_c() -> AminoAcidSet {
 
 #[test]
 fn refinement_aa_set_leaves_out_mods_restricted_to_annotated_sites() {
-    let mut ox = model::mod_spec::parse_mod_list("Oxidation (M)", false)
+    let mut ox = model::modification::spec::parse_mod_list("Oxidation (M)", false)
         .unwrap()
         .remove(0);
     ox.annotated_site_mass = Some(ox.mass_delta);
@@ -946,7 +946,7 @@ fn tiny_scorer() -> RankScorer {
     use model::protocol::Protocol;
     use model::tolerance::Tolerance;
     use rustc_hash::FxHashMap;
-    use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+    use scoring_crate::params::{IonType, Partition, SpecDataType};
     use scoring_crate::Param;
 
     let part = Partition {

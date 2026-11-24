@@ -5,7 +5,7 @@ use crate::estimate::{Estimator, EstimatorConfig};
 use crate::store::read::ModelStore;
 use crate::store::write::{write_model_with_sources, SourceLedger};
 use crate::TrainError;
-use scoring_crate::param_model::Param;
+use scoring_crate::params::Param;
 
 type ModelEntry = (String, Param, Vec<(SourceLedger, CountStats)>);
 

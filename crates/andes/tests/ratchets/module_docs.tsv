@@ -7,7 +7,6 @@ crates/andes/src/bin/andes/dia.rs	1
 crates/andes/src/bin/andes/dia/rt.rs	1
 crates/andes/src/bin/andes/glyco.rs	1
 crates/andes/src/bin/andes/glyco/matching.rs	1
-crates/andes/src/bin/andes/glyco/quantities.rs	1
 crates/andes/src/bin/andes/inference.rs	1
 crates/andes/src/bin/andes/main.rs	1
 crates/andes/src/bin/andes/memory.rs	1

@@ -87,7 +87,7 @@ const SETTINGS: [(&str, SettingKey); 6] = [
     (PRECURSOR_TOL, |r| r.precursor_tol.clone().unwrap_or_default()),
     (DISSOCIATION, |r| r.dissociation.clone().unwrap_or_default()),
     (LABEL, |r| r.label.as_deref().map(label_kind).unwrap_or("").to_string()),
-    (XL, |r| r.xl.clone().unwrap_or_default()),
+    (XL, |r| r.xl.join("; ")),
 ];
 
 /// The data rows, and whether the file has any modification column.
@@ -164,7 +164,7 @@ fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
                 .and_then(|&i| cell(i))
                 .map(|v| nt(&v).map_err(|e| at(format!("`{DISSOCIATION}` {e}"))))
                 .transpose()?,
-            xl: xl_col.first().and_then(|&i| cell(i)),
+            xl: xl_col.iter().filter_map(|&i| cell(i)).collect(),
         });
     }
     if rows.is_empty() {
@@ -178,14 +178,14 @@ fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfS
         agree(rows, column, key)?;
     }
     let mut linkers: Vec<String> = Vec::new();
-    for v in rows.iter().filter_map(|r| r.xl.clone()) {
-        if !linkers.contains(&v) {
-            xl::spec::from_sdrf(&v, model::unimod::bundled())
+    for v in rows.iter().flat_map(|r| r.xl.iter()) {
+        if !linkers.contains(v) {
+            xl::spec::from_sdrf(v, model::unimod::bundled())
                 .map_err(|e| format!("`{XL}`: {e}"))?;
-            linkers.push(v);
+            linkers.push(v.clone());
         }
     }
-    if !linkers.is_empty() && rows.iter().any(|r| r.xl.is_none()) {
+    if !linkers.is_empty() && rows.iter().any(|r| r.xl.is_empty()) {
         return Err(format!(
             "`{XL}` is set for some files and not others; split the SDRF into crosslinked and \
              linear runs"
@@ -259,7 +259,7 @@ struct RowSettings {
     fragment_tol: Option<String>,
     label: Option<String>,
     dissociation: Option<String>,
-    xl: Option<String>,
+    xl: Vec<String>,
 }
 
 fn agree(

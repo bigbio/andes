@@ -265,6 +265,35 @@ fn the_crosslinkers_are_read_checked_and_listed() {
 }
 
 #[test]
+fn every_crosslinker_column_of_a_row_is_read() {
+    let h = [
+        "source name",
+        "comment[data file]",
+        "comment[label]",
+        "comment[cross-linker]",
+        "comment[cross-linker]",
+    ];
+    let pdh = "NT=PDH;AC=XLMOD:02209";
+    let dmtmm = "NT=DMTMM;AC=XLMOD:02208";
+    let t = sdrf(
+        &h,
+        &[
+            &["s", "a.raw", "label free sample", pdh, dmtmm],
+            &["s", "b.raw", "label free sample", "NT=DSS;AC=XLMOD:02001", "not applicable"],
+        ],
+    );
+    let s = parse(&t, Path::new(".")).unwrap();
+    assert_eq!(
+        s.xl,
+        vec![pdh.to_string(), dmtmm.to_string(), "NT=DSS;AC=XLMOD:02001".to_string()]
+    );
+    let groups = split(&t, Path::new(".")).unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].xl, vec![pdh.to_string(), dmtmm.to_string()]);
+    assert_eq!(groups[1].xl, vec!["NT=DSS;AC=XLMOD:02001".to_string()]);
+}
+
+#[test]
 fn the_sdrf_crosslinker_applies_below_the_command_line_and_the_config() {
     use clap::{CommandFactory, FromArgMatches};
     let s = SdrfSettings {

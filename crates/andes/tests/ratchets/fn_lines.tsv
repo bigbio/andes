@@ -5,7 +5,6 @@
 crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	373
 crates/andes/src/bin/andes/search.rs::run	1373
 crates/andes/src/bin/andes/search/files.rs::search_file	614
-crates/andes/src/bin/andes/search/resolve.rs::resolve_search_params	344
 crates/model-train/src/store/read.rs::reconstruct_param	439
 crates/quant/src/label/fit.rs::fit_group	428
 crates/search/src/engine/features.rs::compute_psm_features_with_edge	423

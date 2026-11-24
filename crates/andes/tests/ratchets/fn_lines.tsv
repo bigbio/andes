@@ -2,7 +2,6 @@
 # These functions are reported in CI, not gated; any other function over 300 lines fails no_new_function_over_the_budget.
 # After a function is split under the budget, drop its line (and refresh the listed lengths) with:
 # cargo test -p andes --release --test structure -- --ignored write_fn_lines_baseline
-crates/andes/src/bin/andes/dia/llr.rs::add_to_pin	305
 crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	373
 crates/andes/src/bin/andes/quant/tmt/mbr.rs::process_run	330
 crates/andes/src/bin/andes/search.rs::run	1373

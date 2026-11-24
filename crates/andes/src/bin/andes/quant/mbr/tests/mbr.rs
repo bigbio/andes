@@ -265,7 +265,16 @@ fn identified_decoys_are_the_transfer_probes_at_the_identified_prior() {
     let wp = WidthPrior::from_fits(Vec::new(), &scales);
     let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
     let off = PairGate::new(&TransferSelection::OFF, &fx.lib);
-    let (rows, _, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp, &rt_pool(&fx.lib, 1));
+    let (rows, _, _) = entry_rows(
+        entry,
+        1,
+        true,
+        &fx.lib,
+        &off,
+        &ms1,
+        &wp,
+        &rt_pool(&fx.lib, 1),
+    );
     let id: Vec<&(ExtractRow, Probe)> = rows
         .iter()
         .filter(|(r, _)| r.role == Role::Identified)
@@ -332,8 +341,7 @@ fn identity_decoys_are_measured_as_targets() {
             &params(),
         )
         .unwrap();
-        let b =
-            extract_all(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
+        let b = extract_all(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
         let rows = rows_of(&b.rows, ONLY_RUN0);
         if run == 0 {
             assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
@@ -389,7 +397,10 @@ fn missing_pairs_get_target_and_decoys() {
 
 fn assert_transfer_layout(rows: &[&ExtractRow]) {
     assert!(rows.len() >= 2, "{rows:?}");
-    assert!(rows.len() <= 2 + quant::decoys::RANDOM_RT_DECOYS, "{rows:?}");
+    assert!(
+        rows.len() <= 2 + quant::decoys::RANDOM_RT_DECOYS,
+        "{rows:?}"
+    );
     assert_eq!(rows[0].kind, Hypothesis::Target);
     assert!(matches!(rows[1].kind, Hypothesis::MassShiftDecoy(_)));
     assert!(
@@ -422,7 +433,9 @@ fn a_marginal_best_donor_psm_does_not_skip_the_transfer() {
     let fx = fixture(false);
     let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.002);
     let all = extract_all(1, &fx.ms1_tables[1], &lib, &params()).unwrap();
-    let off = TransferSelection { min_donor_fraction: 0.0 };
+    let off = TransferSelection {
+        min_donor_fraction: 0.0,
+    };
     let kept = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &off).unwrap();
     assert!(!rows_of(&kept.rows, ONLY_RUN0).is_empty());
     assert_eq!(kept.rows, all.rows);
@@ -437,8 +450,7 @@ fn selection_skips_transfers_with_too_few_donor_runs() {
     let sel = extract_run(0, &fx.ms1_tables[0], &lib, &params(), &SELECT).unwrap();
     assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
     assert_eq!(sel.counts.not_selected, 1);
-    let roles =
-        |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
+    let roles = |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
     for role in [Role::Identified, Role::PseudoTransfer] {
         assert_eq!(roles(&sel.rows, role), roles(&all.rows, role));
     }

@@ -3582,7 +3582,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Class-FDR guard | 20 decoys | `output/src/fdr/class.rs:144` | when a class uses its own competition | no | No recorded evidence |
 | Site identity weights | score 2.0, isotope -1.0 and -5.7, hit fraction 25, unique hit 0.08, miss -0.02, decoy -11, confident 0.9 | `output/src/fdr/identity.rs:25-33` | posterior of the modification identity | no | No recorded evidence in code comments |
 | Transfer classifier | 3 folds, learning rate 0.3, at most 16 strata, EB level 0.01 | `andes/src/bin/andes/transfers.rs:86,130,134,348` | transfer q-values | no | Learning rate 0.3: held-out scores separate targets from decoys better than 0.05 (code comment) |
-| Join mismatch limit | 1% | `andes/src/bin/andes/quant.rs:337` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
+| Join mismatch limit | 1% | `andes/src/bin/andes/quant/scores.rs:189` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
 
 ### Quantification
 

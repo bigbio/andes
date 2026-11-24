@@ -4,7 +4,6 @@
 # cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline
 crates/andes/src/bin/andes/cli.rs	2995
 crates/andes/src/bin/andes/glyco/quantities.rs	2099
-crates/andes/src/bin/andes/quant.rs	2439
 crates/andes/src/bin/andes/quant/finalize.rs	2955
 crates/andes/src/bin/andes/quant/run.rs	2530
 crates/andes/src/bin/andes/quant/run/labels.rs	1998

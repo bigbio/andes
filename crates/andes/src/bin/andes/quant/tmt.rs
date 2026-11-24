@@ -452,10 +452,7 @@ pub(crate) fn peptidoform_mz(peptidoform: &str, charge: u8) -> Option<f64> {
         let end = rest[start..].find(']')? + start;
         let tag = &rest[start + 1..end];
         if !(tag.starts_with('+') || tag.starts_with('-')) {
-            mods.insert(
-                tag.to_string(),
-                model::isomers::bundled_unimod_mass(tag)?,
-            );
+            mods.insert(tag.to_string(), model::isomers::bundled_unimod_mass(tag)?);
         }
         rest = &rest[end + 1..];
     }

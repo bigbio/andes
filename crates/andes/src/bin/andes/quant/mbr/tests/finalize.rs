@@ -16,8 +16,8 @@ use crate::quant::finalize::{
     WrongCalibration, SCORE_CHUNK,
 };
 use crate::transfers::{
-    row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
-    FoldScores, QValues, TrainingSample, TARGET,
+    row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow, FoldScores,
+    QValues, TrainingSample, TARGET,
 };
 
 const N: u32 = 900;
@@ -479,8 +479,7 @@ fn reference(
         }
         Ok(())
     })?;
-    let t_models =
-        train_bagged_folds(&[&t_sample.into_items()], seed, &transfer_train_params());
+    let t_models = train_bagged_folds(&[&t_sample.into_items()], seed, &transfer_train_params());
     let i_models = train_folds(&i_sample.into_items(), seed);
     let mut w_sample: TrainingSample<u64> = TrainingSample::new(usize::MAX, seed);
     let mut w_seq = 0u64;
@@ -612,23 +611,20 @@ fn reference(
         identity_entries,
         ..MbrValidation::default()
     };
-    let count_decoy =
-        |v: &mut MbrValidation, at: &mut [Accepted; 2], q: Option<f64>, f: usize| {
-            let Some(q) = q else { return };
-            v.decoy_transfers[f] += 1;
-            for (a, &t) in at.iter_mut().zip(&thresholds) {
-                a.decoys[f] += usize::from(q <= t);
-            }
-        };
+    let count_decoy = |v: &mut MbrValidation, at: &mut [Accepted; 2], q: Option<f64>, f: usize| {
+        let Some(q) = q else { return };
+        v.decoy_transfers[f] += 1;
+        for (a, &t) in at.iter_mut().zip(&thresholds) {
+            a.decoys[f] += usize::from(q <= t);
+        }
+    };
     let mut writer = MbrParquetWriter::create(mbr_path)?;
     shards.for_each(|rows| {
         let shapes = DonorShapes::from_rows(rows.iter(), maps);
         let k = relative_widths(rows.iter());
         let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
         for r in rows {
-            if let (Role::Identified, Hypothesis::Target, Some(e)) =
-                (r.role, r.kind, &r.evidence)
-            {
+            if let (Role::Identified, Hypothesis::Target, Some(e)) = (r.role, r.kind, &r.evidence) {
                 let previous = identified.insert((r.precursor, r.run), e);
                 debug_assert!(
                     previous.is_none(),
@@ -1456,8 +1452,7 @@ fn finalize_reports_the_quantity_at_the_relative_width() {
         .iter()
         .find(|r| r.precursor == 0 && r.role == Role::Identified);
     assert!(
-        (id0.unwrap().evidence.as_ref().unwrap().quantity / (4e6 * sqrt_2pi) - 1.0).abs()
-            < 1e-12
+        (id0.unwrap().evidence.as_ref().unwrap().quantity / (4e6 * sqrt_2pi) - 1.0).abs() < 1e-12
     );
 }
 
@@ -1957,9 +1952,7 @@ fn empty_ms2() -> Ms2Evidence {
 
 fn identity_maps(n: usize) -> Vec<Option<RunMap>> {
     (0..n)
-        .map(|_| {
-            Some(RunMap::from_parts(vec![0.0, 1000.0], vec![0.0, 1000.0], 1.0, 1.0).unwrap())
-        })
+        .map(|_| Some(RunMap::from_parts(vec![0.0, 1000.0], vec![0.0, 1000.0], 1.0, 1.0).unwrap()))
         .collect()
 }
 
@@ -2015,7 +2008,12 @@ fn shape_features_compare_with_the_donor_fits_of_other_runs() {
     assert_eq!(x.len(), n);
     assert_eq!(
         &TRANSFER_FEATURES[n - 4..],
-        ["shape_log_width", "shape_tailing_diff", "shape_iso_cos", "log10_donor_pep"]
+        [
+            "shape_log_width",
+            "shape_tailing_diff",
+            "shape_iso_cos",
+            "log10_donor_pep"
+        ]
     );
     assert_eq!(&x[n - 4..n - 1], &g.map(|v| v as f32));
     assert_eq!(x[n - 1], -4.0);
@@ -2102,8 +2100,7 @@ fn supported_accepted_transfers_are_transfer_ms2() {
     let (mbr, val) = mbr_paths(&dir.path().join("x"));
     let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
     let t = table(&mbr);
-    let ms2_rows: Vec<&Vec<String>> =
-        t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();
+    let ms2_rows: Vec<&Vec<String>> = t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();
     assert!(!ms2_rows.is_empty());
     for r in &ms2_rows {
         let p: u32 = r[0]

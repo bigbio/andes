@@ -22,8 +22,8 @@ use quant::tdc::{picked_qvalues, Pair};
 use quant::unmix::{unmix_run, window_record, ScanInput, Strength, Survey, UnmixRun, WindowRecord};
 use rayon::prelude::*;
 use search::candidates::Candidate;
-use search::psm::{PsmMatch, TopNQueue};
 use search::index::SearchIndex;
+use search::psm::{PsmMatch, TopNQueue};
 
 use crate::cli::{Cli, TmtUnmix};
 
@@ -806,7 +806,14 @@ fn select_hits<'a>(
     cutoffs: Option<&output::Cutoffs>,
 ) -> Vec<Hit<'a>> {
     select_rank1(
-        collector, spectra, queues, candidates, rescore, Some(omitted), cutoffs, false,
+        collector,
+        spectra,
+        queues,
+        candidates,
+        rescore,
+        Some(omitted),
+        cutoffs,
+        false,
     )
 }
 
@@ -816,7 +823,9 @@ fn select_rank1_all<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
 ) -> Vec<Hit<'a>> {
-    select_rank1(collector, spectra, queues, candidates, None, None, None, true)
+    select_rank1(
+        collector, spectra, queues, candidates, None, None, None, true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1500,7 +1509,9 @@ pub(crate) fn run_quant(
     if let Some(dir) = &s.quant_dir {
         write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
     }
-    let hits = select_hits(collector, spectra, queues, candidates, rescore, omitted, cutoffs);
+    let hits = select_hits(
+        collector, spectra, queues, candidates, rescore, omitted, cutoffs,
+    );
     log::info!(
         target: "quant",
         "{} rank-1 target PSMs selected{} ({})",
@@ -1706,7 +1717,8 @@ pub(crate) fn run_quant(
             };
             let stems: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
             let make = || crate::quant::rescore_scores(targets, input.decoys, input.source);
-            let (transfers, outcome) = crate::quant::tmt::mbr::run(quant_dir, &stems, &make, &params)?;
+            let (transfers, outcome) =
+                crate::quant::tmt::mbr::run(quant_dir, &stems, &make, &params)?;
             log::info!(
                 target: "quant",
                 "--mbr transferred {} reporter rows, {} at quant_q<={}{}",
@@ -2302,7 +2314,15 @@ mod tests {
                 },
             );
         }
-        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &HashSet::new(), None);
+        let hits = select_hits(
+            &c,
+            &spectra,
+            &queues,
+            &cands,
+            Some(&rescore),
+            &HashSet::new(),
+            None,
+        );
         assert_eq!(
             selected(&hits),
             vec![("Scan 1_1_2_1".to_string(), false, false)]
@@ -2313,7 +2333,8 @@ mod tests {
     #[test]
     fn a_row_psms_parquet_leaves_out_takes_no_psm_index() {
         let cands = vec![candidate(b"KEDITPEP", true), candidate(b"PEPTIDEK", false)];
-        let (c, spectra, queues) = one_spectrum(vec![psm(12.0, 0, Some(600.3)), psm(10.0, 1, None)]);
+        let (c, spectra, queues) =
+            one_spectrum(vec![psm(12.0, 0, Some(600.3)), psm(10.0, 1, None)]);
         let mut rescore = HashMap::new();
         rescore.insert(
             "Scan 1_1_2_1".to_string(),
@@ -2328,10 +2349,29 @@ mod tests {
             },
         );
         let omitted: HashSet<String> = ["Scan 1_1_1_0".to_string()].into();
-        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &omitted, None);
-        assert_eq!(selected(&hits), vec![("Scan 1_1_2_1".to_string(), false, false)]);
+        let hits = select_hits(
+            &c,
+            &spectra,
+            &queues,
+            &cands,
+            Some(&rescore),
+            &omitted,
+            None,
+        );
+        assert_eq!(
+            selected(&hits),
+            vec![("Scan 1_1_2_1".to_string(), false, false)]
+        );
         assert_eq!(hits[0].psm_index, 0);
-        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &HashSet::new(), None);
+        let hits = select_hits(
+            &c,
+            &spectra,
+            &queues,
+            &cands,
+            Some(&rescore),
+            &HashSet::new(),
+            None,
+        );
         assert_eq!(hits[0].psm_index, 1);
     }
 

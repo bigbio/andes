@@ -573,7 +573,13 @@ impl<'a> EntryIndex<'a> {
             .get(p as usize)
             .copied()
             .flatten()
-            .map_or(1.0, |e| if e.donor_psm.pep.is_finite() { e.donor_psm.pep } else { 1.0 })
+            .map_or(1.0, |e| {
+                if e.donor_psm.pep.is_finite() {
+                    e.donor_psm.pep
+                } else {
+                    1.0
+                }
+            })
     }
 
     pub(crate) fn table(&self, r: &ExtractRow) -> Option<(Table, u8)> {
@@ -715,9 +721,13 @@ pub(crate) fn table_features(
             let (t, fam) = idx.table(r).filter(|(t, _)| want(*t))?;
             let x = match t {
                 Table::Identified => identified_features(r),
-                Table::Transfer | Table::Pseudo => {
-                    transfer_features(r, shapes, maps, idx.neighbour_rate(r), idx.donor_pep(r.precursor))
-                }
+                Table::Transfer | Table::Pseudo => transfer_features(
+                    r,
+                    shapes,
+                    maps,
+                    idx.neighbour_rate(r),
+                    idx.donor_pep(r.precursor),
+                ),
             };
             Some((i, t, fam, x))
         })
@@ -2002,7 +2012,9 @@ pub(crate) fn finalize_stream(
             c.p.last().copied().unwrap_or(f64::NAN),
             c.p.first().copied().unwrap_or(f64::NAN)
         ),
-        None => log::warn!(target: "mbr", "wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1"),
+        None => {
+            log::warn!(target: "mbr", "wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1")
+        }
     }
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let t1 = Instant::now();

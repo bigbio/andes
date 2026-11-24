@@ -3589,7 +3589,7 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Trace-area share | 0.1 | `andes/src/bin/andes/quant/finalize.rs:156` | share of precursors that report trace areas | `--quant-trace-fraction` (advanced, `quant finalize`) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
+| Trace-area share | 0.1 | `andes/src/bin/andes/quant/finalize.rs:89` | share of precursors that report trace areas | `--quant-trace-fraction` (advanced, `quant finalize`) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
 | Fit window | scans within the RT prior t_hat +/- 3 s (s learned) | `quant/src/evidence.rs:1115` | apex candidates tried | s learned per run; 3 fixed | No recorded evidence |
 | Extraction half-window | 4 s + 4 w_prior | `evidence.rs:236` | scans extracted per probe | s and w_prior learned; multiples fixed | No recorded evidence |
 | Width grid | 0.7, 1.0, 1.4 x w_prior | `evidence.rs:103` | widths tried in the fit | w_prior learned | No recorded evidence; the run-level width scale uses 0.5-2.0 (below) |

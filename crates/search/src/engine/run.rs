@@ -19,7 +19,7 @@ use super::features::*;
 use super::{
     charges_to_try, enumeration_pass, mmap_window_key, prefetch_window_candidates,
     recalibrate_strong_over_spectrum, recentred_spectra, windowed_top_k, MmapRecordCache,
-    PreparedSearch, RefTracker, KEPT_FEATURE_BATCH_SPECTRA,
+    PreparedSearch, RefTracker, ScorerSet, KEPT_FEATURE_BATCH_SPECTRA,
 };
 use crate::candidates::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
@@ -30,6 +30,19 @@ use crate::params::{ScoreMode, SearchParams};
 use crate::precursor::calibration::adjusted_observed_neutral_mass;
 use crate::precursor::matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
+
+/// What every spectrum of a chunk shares while it is scored: the scorers, the RT source, the
+/// chunk's candidate records or fragment index, and the search parameters.
+#[derive(Clone, Copy)]
+struct ChunkScoring<'c> {
+    scorer_set: &'c ScorerSet<'c>,
+    rt_source: &'c Option<crate::fragments::index::FormRtSource<'c>>,
+    record_cache: &'c Option<MmapRecordCache>,
+    frag_index: Option<&'c ChunkFragmentIndex>,
+    params: &'c SearchParams,
+    spectrum_idx_offset: usize,
+    complete_later: bool,
+}
 
 impl<'a> PreparedSearch<'a> {
     pub fn run_chunk(&self, spectra: &[Spectrum], spectrum_idx_offset: usize) -> Vec<TopNQueue> {
@@ -261,8 +274,6 @@ impl<'a> PreparedSearch<'a> {
         complete_later: bool,
     ) -> Vec<(TopNQueue, Vec<f32>)> {
         let scorer_set = self.scorer_set(spectra);
-        let fragment_tolerance_da = self.fragment_tolerance_da;
-        let aa_set_for_scoring = &self.aa_set_for_scoring;
 
         let t_chunk_prep = std::time::Instant::now();
         let rt_prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
@@ -381,564 +392,573 @@ impl<'a> PreparedSearch<'a> {
         self.chunk_prep_nanos
             .fetch_add(t_chunk_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
+        let chunk = ChunkScoring {
+            scorer_set: &scorer_set,
+            rt_source: &rt_source,
+            record_cache: &record_cache,
+            frag_index,
+            params,
+            spectrum_idx_offset,
+            complete_later,
+        };
         let queues: Vec<(TopNQueue, Vec<f32>)> = spectra
             .par_iter()
             .enumerate()
-            .map(|(local_idx, spec)| {
-                let spec_idx = local_idx + spectrum_idx_offset;
-                let scorer = scorer_set.for_spec(spec);
-                let retention_cap = params.hot_loop_retention_cap();
-                let mut queue = TopNQueue::new(retention_cap);
-
-                if spec.peaks.len() < params.min_peaks as usize {
-                    return (queue, Vec::new());
-                }
-
-                let mut best_raw = i32::MIN;
-                let mut best_pep_key: u64 = 0;
-                let mut have_best = false;
-                let mut second_raw = i32::MIN;
-                let mut ref_tracker = RefTracker::default();
-                let track_ref = self.idx.has_alternative_entries;
-
-                let mut tailor_hist: FxHashMap<i32, u32> = FxHashMap::default();
-                let mut tailor_total: u32 = 0;
-                let mut strong_null_stats = OnlineStats::default();
-
-                let charges_to_try: SmallVec<[u8; 4]> = charges_to_try(spec, params);
-
-                let mut scored_per_charge: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> =
-                    SmallVec::new();
-                for &z in &charges_to_try {
-                    if scored_per_charge.iter().all(|(charge, _)| *charge != z) {
-                        scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
-                    }
-                }
-                let scored_spec_for_charge = |z: u8| {
-                    scored_for_charge(&scored_per_charge, z)
-                        .expect("scored spectrum exists for candidate charge")
-                };
-
-                let shift_ppm = params.precursor_mass_shift_ppm;
-                let ms1_gate = if params.dia {
-                    self.dia_ms1_scans(spec.rt_seconds)
-                } else {
-                    None
-                };
-                let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
-                    charges_to_try
-                        .iter()
-                        .map(|&z| {
-                            let (lo, hi) = crate::precursor::matching::dia_neutral_window(
-                                spec,
-                                z,
-                                &params.precursor_tolerance,
-                                params.chimeric_isolation_halfwidth_da,
-                                shift_ppm,
-                            );
-                            (z, lo, hi)
-                        })
-                        .collect()
-                } else {
-                    SmallVec::new()
-                };
-                let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
-                    let gate = |mass: f64| {
-                        ms1_gate.clone().is_none_or(|r| {
-                            dia_windows.iter().any(|&(z, lo, hi)| {
-                                (lo..=hi).contains(&mass)
-                                    && self.dia_ms1_has(
-                                        r.clone(),
-                                        mass / z as f64 + PROTON,
-                                        params.dia_ms1_tol_ppm,
-                                    )
-                            })
-                        })
-                    };
-                    let voted =
-                        params
-                            .dia_vote_filter
-                            .filter(|_| params.dia)
-                            .map(|(w, k)| Spectrum {
-                                peaks: windowed_top_k(&spec.peaks, w, k),
-                                title: String::new(),
-                                ..*spec
-                            });
-                    let sel = fi.query_where(
-                        voted.as_ref().unwrap_or(spec),
-                        &charges_to_try,
-                        params,
-                        scorer.feature_match_tolerance(),
-                        params.fragment_index_top_k as usize,
-                        crate::params::FRAGMENT_INDEX_MIN_MATCHED,
-                        crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
-                        &gate,
-                        rt_source.as_ref(),
-                    );
-                    let relabel = |v: &mut [Candidate]| {
-                        relabel_collision_decoys_with(v, &self.target_bare_seqs)
-                    };
-                    fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
-                } else {
-                    let key = mmap_window_key(spec, params);
-                    self.expand_mmap_window_candidates(params, &key, record_cache.as_ref())
-                };
-                if frag_index.is_some() && self.candidate_filter.is_some() {
-                    mmap_cands_owned.retain(|c| self.keeps(c));
-                }
-                let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
-                let mmap_cands: &[Candidate] = &mmap_cands_owned;
-                let cand_slice: &[Candidate] = mmap_cands;
-                let resolve_cand =
-                    |slot: usize| -> (&Candidate, u32) { (&cand_slice[slot], slot as u32) };
-
-                let enz_credit_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_credit();
-                let enz_penalty_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_penalty();
-                let enz_credit_peptide = aa_set_for_scoring.peptide_cleavage_credit();
-                let enz_penalty_peptide = aa_set_for_scoring.peptide_cleavage_penalty();
-                let enz_is_c_term = params.enzyme.is_c_term();
-                let enz_is_n_term = params.enzyme.is_n_term();
-                let enz = params.enzyme;
-                let edge_enabled = edge_scoring_enabled(scorer);
-
-                let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
-                let open_peaks: Option<Vec<(f64, f32)>> = params
-                    .open_search
-                    .map(|_| crate::open::sorted_peaks(&spec.peaks));
-                let mut open_attempts: usize = 0;
-                let mut open_wins: usize = 0;
-
-                for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
-                    prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
-                    let (cand, cand_idx) = resolve_cand(cand_slot);
-                    let cleavage_credit = enzyme_cleavage_credit(
-                        cand,
-                        enz,
-                        enz_is_c_term,
-                        enz_is_n_term,
-                        enz_credit_neighboring,
-                        enz_penalty_neighboring,
-                        enz_credit_peptide,
-                        enz_penalty_peptide,
-                    ) as f32;
-                    let max_edge_bonus_per_edge: f32 = 10.0;
-                    let n_minus_1 = cand.peptide.length().saturating_sub(1) as f32;
-                    let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
-                    for &z in &charges_to_try {
-                        let scored_spec = scored_spec_for_charge(z);
-                        let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
-                        if params.dia {
-                            let (lo, hi) = dia_windows
-                                .iter()
-                                .find(|w| w.0 == z)
-                                .map_or((f64::MAX, f64::MIN), |w| (w.1, w.2));
-                            let mass = cand.peptide.mass();
-                            let mono_mz = mass / z as f64 + PROTON;
-                            if (lo..=hi).contains(&mass)
-                                && ms1_gate.clone().is_none_or(|r| {
-                                    self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm)
-                                })
-                            {
-                                iso_errs.push(MassError {
-                                    mass_error_da: 0.0,
-                                    mass_error_ppm: 0.0,
-                                    isotope_offset: 0,
-                                });
-                            }
-                        } else {
-                            for offset in params.isotope_error_range.clone() {
-                                let matched = matches_precursor(
-                                    spec,
-                                    &cand.peptide,
-                                    z,
-                                    offset,
-                                    &params.precursor_tolerance,
-                                    shift_ppm,
-                                );
-                                if let Some(err) = matched {
-                                    iso_errs.push(err);
-                                }
-                            }
-                        }
-                        if iso_errs.is_empty() {
-                            continue;
-                        }
-
-                        let mut pin_score =
-                            score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
-                                + cleavage_credit;
-
-                        let mut mod_pep: Option<Peptide> = None;
-                        let mut open_iso: Option<i8> = None;
-                        if let (Some(open), Some(peaks)) =
-                            (params.open_search, open_peaks.as_deref())
-                        {
-                            let zf = f64::from(z);
-                            let observed = adjusted_observed_neutral_mass(
-                                spec.precursor_mz * zf - zf * PROTON,
-                                params.precursor_mass_shift_ppm,
-                            );
-                            for off in params.isotope_error_range.clone() {
-                                let corrected = observed - f64::from(off) * model::mass::ISOTOPE;
-                                let delta = corrected - cand.peptide.mass();
-                                if delta.abs() <= 0.5
-                                    || delta < open.delta_min
-                                    || delta > open.delta_max
-                                {
-                                    continue;
-                                }
-                                let loc_tol = fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
-                                let Some(loc) = crate::open::localize_and_refine(
-                                    &cand.peptide,
-                                    peaks,
-                                    z,
-                                    delta,
-                                    loc_tol,
-                                    fragment_tolerance_da,
-                                ) else {
-                                    continue;
-                                };
-                                if loc.best_site == 0 {
-                                    continue;
-                                }
-                                open_attempts += 1;
-                                let site0 = usize::from(loc.best_site - 1);
-                                let shifted =
-                                    crate::open::shifted_peptide(&cand.peptide, site0, loc.delta);
-                                let s2 = score_psm(
-                                    scored_spec,
-                                    &shifted,
-                                    scorer,
-                                    z,
-                                    fragment_tolerance_da,
-                                ) + cleavage_credit;
-                                if s2 > pin_score {
-                                    pin_score = s2;
-                                    mod_pep = Some(shifted);
-                                    open_iso = Some(off);
-                                    open_wins += 1;
-                                }
-                            }
-                        }
-                        {
-                            let s = pin_score.round() as i32;
-                            if track_ref
-                                && self.idx.db.proteins[cand.protein_index].entry_kind()
-                                    == model::EntryKind::Reference
-                            {
-                                ref_tracker.fold(s, peptidoform_key(&cand.peptide));
-                            }
-                            *tailor_hist.entry(s).or_insert(0) += 1;
-                            tailor_total += 1;
-                            strong_null_stats.push(pin_score);
-                            if s > second_raw {
-                                let mkey = peptidoform_key(&cand.peptide);
-                                if have_best && mkey == best_pep_key {
-                                    if s > best_raw {
-                                        best_raw = s;
-                                    }
-                                } else if s > best_raw {
-                                    second_raw = second_raw.max(best_raw);
-                                    best_raw = s;
-                                    best_pep_key = mkey;
-                                    have_best = true;
-                                } else {
-                                    second_raw = s;
-                                }
-                            }
-                        }
-
-                        let could_win = match per_charge_queues.get(&z) {
-                            Some(q) if q.len() >= q.capacity() as usize => {
-                                q.worst_rank_score().is_none_or(|worst| {
-                                    if edge_enabled {
-                                        pin_score + max_edge_bonus > worst
-                                    } else {
-                                        pin_score >= worst
-                                    }
-                                })
-                            }
-                            _ => true,
-                        };
-                        if !could_win {
-                            continue;
-                        }
-
-                        let edge_i = psm_edge_score(
-                            scored_spec,
-                            mod_pep.as_ref().unwrap_or(&cand.peptide),
-                            scorer,
-                            z,
-                        );
-                        let rank_score = pin_score + edge_i as f32;
-
-                        let smaller_ppm = |a: &MassError, b: &MassError| {
-                            a.mass_error_ppm
-                                .abs()
-                                .partial_cmp(&b.mass_error_ppm.abs())
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        };
-                        let err = match open_iso {
-                            Some(want) => iso_errs
-                                .iter()
-                                .copied()
-                                .find(|e| e.isotope_offset == want)
-                                .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
-                            None if params.open_search.is_some() => iso_errs
-                                .iter()
-                                .copied()
-                                .find(|e| e.isotope_offset == 0)
-                                .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
-                            None => iso_errs.iter().copied().min_by(smaller_ppm),
-                        }
-                        .unwrap();
-
-                        let features = PsmFeatures {
-                            open_used_shift: mod_pep.is_some(),
-                            ..PsmFeatures::default()
-                        };
-                        let psm = PsmMatch {
-                            spectrum_idx: spec_idx,
-                            candidate_idxs: smallvec::smallvec![cand_idx],
-                            charge_used: z,
-                            mass_error_ppm: err.mass_error_ppm,
-                            score: pin_score,
-                            rank_score,
-                            edge_score: edge_i,
-                            activation_method: Some(scorer.param().data_type.activation),
-                            features,
-                            isotope_offset: err.isotope_offset,
-                            precursor_mz_override: params
-                                .dia
-                                .then(|| cand.peptide.mass() / z as f64 + PROTON),
-                            site_evidence: None,
-                            tie_key: crate::psm::tie_key_of(cand),
-                        };
-                        per_charge_queues
-                            .entry(z)
-                            .or_insert_with(|| TopNQueue::new(retention_cap))
-                            .push(psm);
-                    }
-                }
-
-                for queue in per_charge_queues.values_mut() {
-                    if queue.len() > 1 {
-                        let drained = queue.drain_into_vec();
-                        let mut deduped = dedup_pepseq_score(drained, cand_slice);
-                        deduped.sort_by(|a, b| b.cmp(a));
-                        for psm in deduped {
-                            queue.push(psm);
-                        }
-                    }
-                }
-
-                let mut merged: Vec<PsmMatch> = per_charge_queues
-                    .drain()
-                    .flat_map(|(_charge, mut per_charge)| per_charge.drain_into_vec())
-                    .collect();
-                merged.sort_by(|a, b| b.cmp(a));
-                for psm in merged {
-                    queue.push(psm);
-                }
-
-                let delta_raw_score = if second_raw > i32::MIN {
-                    (best_raw - second_raw) as f32
-                } else {
-                    0.0
-                };
-
-                let tailor_denom =
-                    crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
-
-                let mut retained_scores: Vec<f32> = queue.iter_psms().map(|p| p.score).collect();
-                retained_scores.sort_by(|a, b| b.total_cmp(a));
-                let listwise_score_gap = scoring_crate::psm::listwise_score_gap(&retained_scores);
-                let candidate_rank_entropy =
-                    scoring_crate::psm::candidate_rank_entropy(&retained_scores);
-
-                let strong_mode = params.score_mode == ScoreMode::Strong;
-                let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
-                    let ss = scored_spec_for_charge(psm.charge_used);
-                    let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                    let used_shift = psm.features.open_used_shift;
-                    let mut open_loc: Option<crate::open::Localization> = None;
-                    let mut shifted_pep: Option<Peptide> = None;
-                    let mut open_delta_ref: Option<f64> = None;
-                    {
-                        if let (Some(_), Some(peaks)) = (params.open_search, open_peaks.as_deref())
-                        {
-                            let zf = f64::from(psm.charge_used);
-                            let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-                            let observed = adjusted_observed_neutral_mass(
-                                mz * zf - zf * PROTON,
-                                params.precursor_mass_shift_ppm,
-                            ) - f64::from(psm.isotope_offset) * model::mass::ISOTOPE;
-                            let delta = observed - cand.peptide.mass();
-                            if delta.abs() > 0.5 {
-                                let loc_tol = fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
-                                if let Some(loc) = crate::open::localize_and_refine(
-                                    &cand.peptide,
-                                    peaks,
-                                    psm.charge_used,
-                                    delta,
-                                    loc_tol,
-                                    fragment_tolerance_da,
-                                ) {
-                                    if loc.best_site != 0 {
-                                        if used_shift {
-                                            shifted_pep = Some(crate::open::shifted_peptide(
-                                                &cand.peptide,
-                                                usize::from(loc.best_site - 1),
-                                                loc.delta,
-                                            ));
-                                        }
-                                        open_delta_ref = Some(loc.delta);
-                                    }
-                                    open_loc = Some(crate::open::Localization {
-                                        site: loc.site,
-                                        score: loc.score,
-                                        margin: loc.margin,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    let pep = shifted_pep.as_ref().unwrap_or(&cand.peptide);
-                    let mut features = compute_psm_features_with_edge(
-                        ss,
-                        pep,
-                        scorer,
-                        psm.charge_used,
-                        Some(psm.edge_score),
-                        full,
-                        Some(&self.frag_pred_cache),
-                    );
-
-                    features.delta_raw_score = delta_raw_score;
-                    if track_ref {
-                        if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide))
-                        {
-                            features.ref_competitor = 1;
-                            features.ref_best_raw = r as f32;
-                        }
-                    }
-                    features.listwise_score_gap = listwise_score_gap;
-                    features.candidate_rank_entropy = candidate_rank_entropy;
-                    features.tailor_score = psm.score / tailor_denom;
-                    let credit = cleavage_credit_for(cand, enz, aa_set_for_scoring) as f32;
-                    features.rank_score_float =
-                        score_psm_float(ss, pep, scorer, psm.charge_used, fragment_tolerance_da)
-                            + credit;
-                    features.strong_score = fuse_strong_score(&StrongScoreInputs {
-                        intensity_signal: features.intensity_signal,
-                        chance_match_surprise: features.chance_match_surprise,
-                        mass_competition_evidence: features.mass_competition_evidence,
-                        candidate_rank_entropy: features.candidate_rank_entropy,
-                        listwise_score_gap: features.listwise_score_gap,
-                    });
-                    if let Some(loc) = open_loc {
-                        features.open_site = loc.site;
-                        features.open_loc_score = loc.score;
-                        features.open_loc_margin = loc.margin;
-                        features.open_delta = open_delta_ref.map_or(0.0, |d| d as f32);
-                    }
-                    features.open_used_shift = used_shift;
-                    features
-                };
-                queue.fill_post_topn(|psm| {
-                    psm.features = make_features(psm, !strong_mode);
-                });
-
-                let retained_strong: Vec<f32> =
-                    queue.iter_psms().map(|p| p.features.strong_score).collect();
-                queue.fill_post_topn(|psm| {
-                    psm.features.strong_score_cal = strong_score_calibrated(
-                        psm.features.strong_score,
-                        &retained_strong,
-                        &strong_null_stats,
-                    );
-                });
-
-                if strong_mode {
-                    queue.reorder_by_strong_score();
-                    queue.trim_to_capacity(params.top_n_psms_per_spectrum);
-                }
-                if strong_mode && params.open_search.is_some() {
-                    queue.update_in_place(|psm| {
-                        let strong = psm.features.strong_score;
-                        let strong_cal = psm.features.strong_score_cal;
-                        psm.features = make_features(psm, true);
-                        debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
-                        psm.features.strong_score_cal = strong_cal;
-                    });
-                } else if strong_mode && !complete_later {
-                    queue.update_in_place(|psm| {
-                        let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                        complete_psm_features(
-                            &mut psm.features,
-                            scored_spec_for_charge(psm.charge_used),
-                            &cand.peptide,
-                            scorer,
-                            psm.charge_used,
-                            Some(&self.frag_pred_cache),
-                        );
-                    });
-                }
-
-                {
-                    let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
-                    let rows: Vec<crate::sites::Row<'_>> = psms
-                        .iter()
-                        .map(|psm| {
-                            let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                            let z = psm.charge_used;
-                            let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-                            crate::sites::Row {
-                                peptide: &cand.peptide,
-                                is_decoy: cand.is_decoy,
-                                charge: z,
-                                precursor_mass: (mz - model::mass::PROTON) * z as f64,
-                            }
-                        })
-                        .collect();
-                    let key = |p: &PsmMatch| {
-                        (
-                            p.primary_candidate_idx(),
-                            p.charge_used,
-                            p.rank_score.to_bits(),
-                        )
-                    };
-                    let mut evidence: FxHashMap<_, _> = psms
-                        .iter()
-                        .map(|p| key(p))
-                        .zip(crate::sites::spectrum_evidence(
-                            &spec.peaks,
-                            &rows,
-                            scorer.pin_match_tolerance(),
-                        ))
-                        .collect();
-                    drop(rows);
-                    drop(psms);
-                    queue.update_in_place(|psm| {
-                        psm.site_evidence = evidence.remove(&key(psm)).flatten();
-                    });
-                }
-
-                {
-                    let mut accum = self.mmap_accum.lock().unwrap();
-                    queue.remap_candidate_idxs(|local| accum.intern(&mmap_cands[local as usize]));
-                }
-
-                if params.open_search.is_some() {
-                    self.open_rescore_attempts
-                        .fetch_add(open_attempts, Ordering::Relaxed);
-                    self.open_rescore_wins
-                        .fetch_add(open_wins, Ordering::Relaxed);
-                }
-                (queue, retained_strong)
-            })
+            .map(|(local_idx, spec)| self.score_spectrum(&chunk, local_idx, spec))
             .collect();
 
         queues
+    }
+
+    /// Scores one spectrum of a chunk against its candidate windows and fills its top-N queue;
+    /// returns the queue and the strong scores kept for the chunk's calibration.
+    fn score_spectrum(
+        &self,
+        chunk: &ChunkScoring<'_>,
+        local_idx: usize,
+        spec: &Spectrum,
+    ) -> (TopNQueue, Vec<f32>) {
+        let ChunkScoring {
+            scorer_set,
+            rt_source,
+            record_cache,
+            frag_index,
+            params,
+            spectrum_idx_offset,
+            complete_later,
+        } = *chunk;
+        let fragment_tolerance_da = self.fragment_tolerance_da;
+        let aa_set_for_scoring = &self.aa_set_for_scoring;
+        let spec_idx = local_idx + spectrum_idx_offset;
+        let scorer = scorer_set.for_spec(spec);
+        let retention_cap = params.hot_loop_retention_cap();
+        let mut queue = TopNQueue::new(retention_cap);
+
+        if spec.peaks.len() < params.min_peaks as usize {
+            return (queue, Vec::new());
+        }
+
+        let mut best_raw = i32::MIN;
+        let mut best_pep_key: u64 = 0;
+        let mut have_best = false;
+        let mut second_raw = i32::MIN;
+        let mut ref_tracker = RefTracker::default();
+        let track_ref = self.idx.has_alternative_entries;
+
+        let mut tailor_hist: FxHashMap<i32, u32> = FxHashMap::default();
+        let mut tailor_total: u32 = 0;
+        let mut strong_null_stats = OnlineStats::default();
+
+        let charges_to_try: SmallVec<[u8; 4]> = charges_to_try(spec, params);
+
+        let mut scored_per_charge: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> = SmallVec::new();
+        for &z in &charges_to_try {
+            if scored_per_charge.iter().all(|(charge, _)| *charge != z) {
+                scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
+            }
+        }
+        let scored_spec_for_charge = |z: u8| {
+            scored_for_charge(&scored_per_charge, z)
+                .expect("scored spectrum exists for candidate charge")
+        };
+
+        let shift_ppm = params.precursor_mass_shift_ppm;
+        let ms1_gate = if params.dia {
+            self.dia_ms1_scans(spec.rt_seconds)
+        } else {
+            None
+        };
+        let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
+            charges_to_try
+                .iter()
+                .map(|&z| {
+                    let (lo, hi) = crate::precursor::matching::dia_neutral_window(
+                        spec,
+                        z,
+                        &params.precursor_tolerance,
+                        params.chimeric_isolation_halfwidth_da,
+                        shift_ppm,
+                    );
+                    (z, lo, hi)
+                })
+                .collect()
+        } else {
+            SmallVec::new()
+        };
+        let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
+            let gate = |mass: f64| {
+                ms1_gate.clone().is_none_or(|r| {
+                    dia_windows.iter().any(|&(z, lo, hi)| {
+                        (lo..=hi).contains(&mass)
+                            && self.dia_ms1_has(
+                                r.clone(),
+                                mass / z as f64 + PROTON,
+                                params.dia_ms1_tol_ppm,
+                            )
+                    })
+                })
+            };
+            let voted = params
+                .dia_vote_filter
+                .filter(|_| params.dia)
+                .map(|(w, k)| Spectrum {
+                    peaks: windowed_top_k(&spec.peaks, w, k),
+                    title: String::new(),
+                    ..*spec
+                });
+            let sel = fi.query_where(
+                voted.as_ref().unwrap_or(spec),
+                &charges_to_try,
+                params,
+                scorer.feature_match_tolerance(),
+                params.fragment_index_top_k as usize,
+                crate::params::FRAGMENT_INDEX_MIN_MATCHED,
+                crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
+                &gate,
+                rt_source.as_ref(),
+            );
+            let relabel =
+                |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);
+            fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
+        } else {
+            let key = mmap_window_key(spec, params);
+            self.expand_mmap_window_candidates(params, &key, record_cache.as_ref())
+        };
+        if frag_index.is_some() && self.candidate_filter.is_some() {
+            mmap_cands_owned.retain(|c| self.keeps(c));
+        }
+        let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
+        let mmap_cands: &[Candidate] = &mmap_cands_owned;
+        let cand_slice: &[Candidate] = mmap_cands;
+        let resolve_cand = |slot: usize| -> (&Candidate, u32) { (&cand_slice[slot], slot as u32) };
+
+        let enz_credit_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_credit();
+        let enz_penalty_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_penalty();
+        let enz_credit_peptide = aa_set_for_scoring.peptide_cleavage_credit();
+        let enz_penalty_peptide = aa_set_for_scoring.peptide_cleavage_penalty();
+        let enz_is_c_term = params.enzyme.is_c_term();
+        let enz_is_n_term = params.enzyme.is_n_term();
+        let enz = params.enzyme;
+        let edge_enabled = edge_scoring_enabled(scorer);
+
+        let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
+        let open_peaks: Option<Vec<(f64, f32)>> = params
+            .open_search
+            .map(|_| crate::open::sorted_peaks(&spec.peaks));
+        let mut open_attempts: usize = 0;
+        let mut open_wins: usize = 0;
+
+        for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
+            prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
+            let (cand, cand_idx) = resolve_cand(cand_slot);
+            let cleavage_credit = enzyme_cleavage_credit(
+                cand,
+                enz,
+                enz_is_c_term,
+                enz_is_n_term,
+                enz_credit_neighboring,
+                enz_penalty_neighboring,
+                enz_credit_peptide,
+                enz_penalty_peptide,
+            ) as f32;
+            let max_edge_bonus_per_edge: f32 = 10.0;
+            let n_minus_1 = cand.peptide.length().saturating_sub(1) as f32;
+            let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
+            for &z in &charges_to_try {
+                let scored_spec = scored_spec_for_charge(z);
+                let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
+                if params.dia {
+                    let (lo, hi) = dia_windows
+                        .iter()
+                        .find(|w| w.0 == z)
+                        .map_or((f64::MAX, f64::MIN), |w| (w.1, w.2));
+                    let mass = cand.peptide.mass();
+                    let mono_mz = mass / z as f64 + PROTON;
+                    if (lo..=hi).contains(&mass)
+                        && ms1_gate
+                            .clone()
+                            .is_none_or(|r| self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm))
+                    {
+                        iso_errs.push(MassError {
+                            mass_error_da: 0.0,
+                            mass_error_ppm: 0.0,
+                            isotope_offset: 0,
+                        });
+                    }
+                } else {
+                    for offset in params.isotope_error_range.clone() {
+                        let matched = matches_precursor(
+                            spec,
+                            &cand.peptide,
+                            z,
+                            offset,
+                            &params.precursor_tolerance,
+                            shift_ppm,
+                        );
+                        if let Some(err) = matched {
+                            iso_errs.push(err);
+                        }
+                    }
+                }
+                if iso_errs.is_empty() {
+                    continue;
+                }
+
+                let mut pin_score =
+                    score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
+                        + cleavage_credit;
+
+                let mut mod_pep: Option<Peptide> = None;
+                let mut open_iso: Option<i8> = None;
+                if let (Some(open), Some(peaks)) = (params.open_search, open_peaks.as_deref()) {
+                    let zf = f64::from(z);
+                    let observed = adjusted_observed_neutral_mass(
+                        spec.precursor_mz * zf - zf * PROTON,
+                        params.precursor_mass_shift_ppm,
+                    );
+                    for off in params.isotope_error_range.clone() {
+                        let corrected = observed - f64::from(off) * model::mass::ISOTOPE;
+                        let delta = corrected - cand.peptide.mass();
+                        if delta.abs() <= 0.5 || delta < open.delta_min || delta > open.delta_max {
+                            continue;
+                        }
+                        let loc_tol = fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
+                        let Some(loc) = crate::open::localize_and_refine(
+                            &cand.peptide,
+                            peaks,
+                            z,
+                            delta,
+                            loc_tol,
+                            fragment_tolerance_da,
+                        ) else {
+                            continue;
+                        };
+                        if loc.best_site == 0 {
+                            continue;
+                        }
+                        open_attempts += 1;
+                        let site0 = usize::from(loc.best_site - 1);
+                        let shifted = crate::open::shifted_peptide(&cand.peptide, site0, loc.delta);
+                        let s2 = score_psm(scored_spec, &shifted, scorer, z, fragment_tolerance_da)
+                            + cleavage_credit;
+                        if s2 > pin_score {
+                            pin_score = s2;
+                            mod_pep = Some(shifted);
+                            open_iso = Some(off);
+                            open_wins += 1;
+                        }
+                    }
+                }
+                {
+                    let s = pin_score.round() as i32;
+                    if track_ref
+                        && self.idx.db.proteins[cand.protein_index].entry_kind()
+                            == model::EntryKind::Reference
+                    {
+                        ref_tracker.fold(s, peptidoform_key(&cand.peptide));
+                    }
+                    *tailor_hist.entry(s).or_insert(0) += 1;
+                    tailor_total += 1;
+                    strong_null_stats.push(pin_score);
+                    if s > second_raw {
+                        let mkey = peptidoform_key(&cand.peptide);
+                        if have_best && mkey == best_pep_key {
+                            if s > best_raw {
+                                best_raw = s;
+                            }
+                        } else if s > best_raw {
+                            second_raw = second_raw.max(best_raw);
+                            best_raw = s;
+                            best_pep_key = mkey;
+                            have_best = true;
+                        } else {
+                            second_raw = s;
+                        }
+                    }
+                }
+
+                let could_win = match per_charge_queues.get(&z) {
+                    Some(q) if q.len() >= q.capacity() as usize => {
+                        q.worst_rank_score().is_none_or(|worst| {
+                            if edge_enabled {
+                                pin_score + max_edge_bonus > worst
+                            } else {
+                                pin_score >= worst
+                            }
+                        })
+                    }
+                    _ => true,
+                };
+                if !could_win {
+                    continue;
+                }
+
+                let edge_i = psm_edge_score(
+                    scored_spec,
+                    mod_pep.as_ref().unwrap_or(&cand.peptide),
+                    scorer,
+                    z,
+                );
+                let rank_score = pin_score + edge_i as f32;
+
+                let smaller_ppm = |a: &MassError, b: &MassError| {
+                    a.mass_error_ppm
+                        .abs()
+                        .partial_cmp(&b.mass_error_ppm.abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                };
+                let err = match open_iso {
+                    Some(want) => iso_errs
+                        .iter()
+                        .copied()
+                        .find(|e| e.isotope_offset == want)
+                        .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+                    None if params.open_search.is_some() => iso_errs
+                        .iter()
+                        .copied()
+                        .find(|e| e.isotope_offset == 0)
+                        .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+                    None => iso_errs.iter().copied().min_by(smaller_ppm),
+                }
+                .unwrap();
+
+                let features = PsmFeatures {
+                    open_used_shift: mod_pep.is_some(),
+                    ..PsmFeatures::default()
+                };
+                let psm = PsmMatch {
+                    spectrum_idx: spec_idx,
+                    candidate_idxs: smallvec::smallvec![cand_idx],
+                    charge_used: z,
+                    mass_error_ppm: err.mass_error_ppm,
+                    score: pin_score,
+                    rank_score,
+                    edge_score: edge_i,
+                    activation_method: Some(scorer.param().data_type.activation),
+                    features,
+                    isotope_offset: err.isotope_offset,
+                    precursor_mz_override: params
+                        .dia
+                        .then(|| cand.peptide.mass() / z as f64 + PROTON),
+                    site_evidence: None,
+                    tie_key: crate::psm::tie_key_of(cand),
+                };
+                per_charge_queues
+                    .entry(z)
+                    .or_insert_with(|| TopNQueue::new(retention_cap))
+                    .push(psm);
+            }
+        }
+
+        for queue in per_charge_queues.values_mut() {
+            if queue.len() > 1 {
+                let drained = queue.drain_into_vec();
+                let mut deduped = dedup_pepseq_score(drained, cand_slice);
+                deduped.sort_by(|a, b| b.cmp(a));
+                for psm in deduped {
+                    queue.push(psm);
+                }
+            }
+        }
+
+        let mut merged: Vec<PsmMatch> = per_charge_queues
+            .drain()
+            .flat_map(|(_charge, mut per_charge)| per_charge.drain_into_vec())
+            .collect();
+        merged.sort_by(|a, b| b.cmp(a));
+        for psm in merged {
+            queue.push(psm);
+        }
+
+        let delta_raw_score = if second_raw > i32::MIN {
+            (best_raw - second_raw) as f32
+        } else {
+            0.0
+        };
+
+        let tailor_denom = crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
+
+        let mut retained_scores: Vec<f32> = queue.iter_psms().map(|p| p.score).collect();
+        retained_scores.sort_by(|a, b| b.total_cmp(a));
+        let listwise_score_gap = scoring_crate::psm::listwise_score_gap(&retained_scores);
+        let candidate_rank_entropy = scoring_crate::psm::candidate_rank_entropy(&retained_scores);
+
+        let strong_mode = params.score_mode == ScoreMode::Strong;
+        let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
+            let ss = scored_spec_for_charge(psm.charge_used);
+            let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+            let used_shift = psm.features.open_used_shift;
+            let mut open_loc: Option<crate::open::Localization> = None;
+            let mut shifted_pep: Option<Peptide> = None;
+            let mut open_delta_ref: Option<f64> = None;
+            {
+                if let (Some(_), Some(peaks)) = (params.open_search, open_peaks.as_deref()) {
+                    let zf = f64::from(psm.charge_used);
+                    let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                    let observed = adjusted_observed_neutral_mass(
+                        mz * zf - zf * PROTON,
+                        params.precursor_mass_shift_ppm,
+                    ) - f64::from(psm.isotope_offset) * model::mass::ISOTOPE;
+                    let delta = observed - cand.peptide.mass();
+                    if delta.abs() > 0.5 {
+                        let loc_tol = fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
+                        if let Some(loc) = crate::open::localize_and_refine(
+                            &cand.peptide,
+                            peaks,
+                            psm.charge_used,
+                            delta,
+                            loc_tol,
+                            fragment_tolerance_da,
+                        ) {
+                            if loc.best_site != 0 {
+                                if used_shift {
+                                    shifted_pep = Some(crate::open::shifted_peptide(
+                                        &cand.peptide,
+                                        usize::from(loc.best_site - 1),
+                                        loc.delta,
+                                    ));
+                                }
+                                open_delta_ref = Some(loc.delta);
+                            }
+                            open_loc = Some(crate::open::Localization {
+                                site: loc.site,
+                                score: loc.score,
+                                margin: loc.margin,
+                            });
+                        }
+                    }
+                }
+            }
+            let pep = shifted_pep.as_ref().unwrap_or(&cand.peptide);
+            let mut features = compute_psm_features_with_edge(
+                ss,
+                pep,
+                scorer,
+                psm.charge_used,
+                Some(psm.edge_score),
+                full,
+                Some(&self.frag_pred_cache),
+            );
+
+            features.delta_raw_score = delta_raw_score;
+            if track_ref {
+                if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide)) {
+                    features.ref_competitor = 1;
+                    features.ref_best_raw = r as f32;
+                }
+            }
+            features.listwise_score_gap = listwise_score_gap;
+            features.candidate_rank_entropy = candidate_rank_entropy;
+            features.tailor_score = psm.score / tailor_denom;
+            let credit = cleavage_credit_for(cand, enz, aa_set_for_scoring) as f32;
+            features.rank_score_float =
+                score_psm_float(ss, pep, scorer, psm.charge_used, fragment_tolerance_da) + credit;
+            features.strong_score = fuse_strong_score(&StrongScoreInputs {
+                intensity_signal: features.intensity_signal,
+                chance_match_surprise: features.chance_match_surprise,
+                mass_competition_evidence: features.mass_competition_evidence,
+                candidate_rank_entropy: features.candidate_rank_entropy,
+                listwise_score_gap: features.listwise_score_gap,
+            });
+            if let Some(loc) = open_loc {
+                features.open_site = loc.site;
+                features.open_loc_score = loc.score;
+                features.open_loc_margin = loc.margin;
+                features.open_delta = open_delta_ref.map_or(0.0, |d| d as f32);
+            }
+            features.open_used_shift = used_shift;
+            features
+        };
+        queue.fill_post_topn(|psm| {
+            psm.features = make_features(psm, !strong_mode);
+        });
+
+        let retained_strong: Vec<f32> =
+            queue.iter_psms().map(|p| p.features.strong_score).collect();
+        queue.fill_post_topn(|psm| {
+            psm.features.strong_score_cal = strong_score_calibrated(
+                psm.features.strong_score,
+                &retained_strong,
+                &strong_null_stats,
+            );
+        });
+
+        if strong_mode {
+            queue.reorder_by_strong_score();
+            queue.trim_to_capacity(params.top_n_psms_per_spectrum);
+        }
+        if strong_mode && params.open_search.is_some() {
+            queue.update_in_place(|psm| {
+                let strong = psm.features.strong_score;
+                let strong_cal = psm.features.strong_score_cal;
+                psm.features = make_features(psm, true);
+                debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
+                psm.features.strong_score_cal = strong_cal;
+            });
+        } else if strong_mode && !complete_later {
+            queue.update_in_place(|psm| {
+                let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                complete_psm_features(
+                    &mut psm.features,
+                    scored_spec_for_charge(psm.charge_used),
+                    &cand.peptide,
+                    scorer,
+                    psm.charge_used,
+                    Some(&self.frag_pred_cache),
+                );
+            });
+        }
+
+        {
+            let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
+            let rows: Vec<crate::sites::Row<'_>> = psms
+                .iter()
+                .map(|psm| {
+                    let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                    let z = psm.charge_used;
+                    let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                    crate::sites::Row {
+                        peptide: &cand.peptide,
+                        is_decoy: cand.is_decoy,
+                        charge: z,
+                        precursor_mass: (mz - model::mass::PROTON) * z as f64,
+                    }
+                })
+                .collect();
+            let key = |p: &PsmMatch| {
+                (
+                    p.primary_candidate_idx(),
+                    p.charge_used,
+                    p.rank_score.to_bits(),
+                )
+            };
+            let mut evidence: FxHashMap<_, _> = psms
+                .iter()
+                .map(|p| key(p))
+                .zip(crate::sites::spectrum_evidence(
+                    &spec.peaks,
+                    &rows,
+                    scorer.pin_match_tolerance(),
+                ))
+                .collect();
+            drop(rows);
+            drop(psms);
+            queue.update_in_place(|psm| {
+                psm.site_evidence = evidence.remove(&key(psm)).flatten();
+            });
+        }
+
+        {
+            let mut accum = self.mmap_accum.lock().unwrap();
+            queue.remap_candidate_idxs(|local| accum.intern(&mmap_cands[local as usize]));
+        }
+
+        if params.open_search.is_some() {
+            self.open_rescore_attempts
+                .fetch_add(open_attempts, Ordering::Relaxed);
+            self.open_rescore_wins
+                .fetch_add(open_wins, Ordering::Relaxed);
+        }
+        (queue, retained_strong)
     }
 }

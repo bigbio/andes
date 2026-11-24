@@ -338,8 +338,57 @@ pub(super) fn resolve_search_params(
     } else {
         0
     };
+    apply_open_search(cli, choice.use_index, retrieval_excluded, &mut params)?;
+    if let Some(refusal) = choice.refused_because {
+        log::warn!(target: "search", "the fragment-ion index cannot be used here ({refusal}); using enumeration.");
+    }
+    if let Some(reason) = &choice.report {
+        if choice.use_index {
+            log::info!(
+                target: "candidate-retrieval",
+                "fragment-ion index ({reason}; {} candidates per spectrum, \
+                 >= {} matched b/y ions)",
+                params.fragment_index_top_k,
+                search::params::FRAGMENT_INDEX_MIN_MATCHED
+            );
+        } else {
+            log::info!(target: "candidate-retrieval", "per-spectrum enumeration ({reason})");
+        }
+    }
+
+    warn_glyco_flags(cli, decoy_strategy, spectrum_paths);
+    if params.chimeric && cli.refine {
+        log::warn!(target: "search",
+            "--refine + --chimeric do not fully stack in this release — chimeric \
+             already explains many of the spectra refinement would otherwise rescue, so \
+             refinement adds much less on top of chimeric than it does alone. See \
+             docs/benchmarks/README.md for the measured combination."
+        );
+    }
+    if params.score_mode == search::ScoreMode::Strong {
+        log::info!(target: "search", "score mode: strong (ranking + PIN RawScore use StrongScore)");
+    }
+
+    Ok(ResolvedSearch {
+        params,
+        chimeric_active,
+        mono_active,
+        mono_params,
+        restricted_site_masses,
+        fixed_terminal_mods,
+    })
+}
+
+/// `--open-search`: the wide precursor window, its fragment-index shortlist and the settings it
+/// overrides (isotope range 0..=2, no precursor calibration). It needs the fragment-ion index.
+fn apply_open_search(
+    cli: &Cli,
+    use_index: bool,
+    retrieval_excluded: Option<&str>,
+    params: &mut SearchParams,
+) -> Result<(), Box<dyn std::error::Error>> {
     if cli.open_search {
-        if !choice.use_index {
+        if !use_index {
             let why = retrieval_excluded.unwrap_or("it was disabled with --fragment-index off");
             return Err(format!(
                 "--open-search needs the fragment-ion index (it cannot enumerate the wide \
@@ -366,23 +415,16 @@ pub(super) fn resolve_search_params(
              isotope-corrected)"
         );
     }
-    if let Some(refusal) = choice.refused_because {
-        log::warn!(target: "search", "the fragment-ion index cannot be used here ({refusal}); using enumeration.");
-    }
-    if let Some(reason) = &choice.report {
-        if choice.use_index {
-            log::info!(
-                target: "candidate-retrieval",
-                "fragment-ion index ({reason}; {} candidates per spectrum, \
-                 >= {} matched b/y ions)",
-                params.fragment_index_top_k,
-                search::params::FRAGMENT_INDEX_MIN_MATCHED
-            );
-        } else {
-            log::info!(target: "candidate-retrieval", "per-spectrum enumeration ({reason})");
-        }
-    }
+    Ok(())
+}
 
+/// Warnings about glyco flags: `--glyco-hcd-pair` without `--glyco`, a generated decoy strategy
+/// that does not preserve sequon density, and paired generation over several inputs.
+fn warn_glyco_flags(
+    cli: &Cli,
+    decoy_strategy: search::decoy::DecoyStrategy,
+    spectrum_paths: &[PathBuf],
+) {
     if !cli.glyco && arg_present("--glyco-hcd-pair") {
         log::warn!(target: "search",
             "--glyco-hcd-pair has no effect without --glyco (it only drives \
@@ -413,26 +455,6 @@ pub(super) fn resolve_search_params(
             );
         }
     }
-    if params.chimeric && cli.refine {
-        log::warn!(target: "search",
-            "--refine + --chimeric do not fully stack in this release — chimeric \
-             already explains many of the spectra refinement would otherwise rescue, so \
-             refinement adds much less on top of chimeric than it does alone. See \
-             docs/benchmarks/README.md for the measured combination."
-        );
-    }
-    if params.score_mode == search::ScoreMode::Strong {
-        log::info!(target: "search", "score mode: strong (ranking + PIN RawScore use StrongScore)");
-    }
-
-    Ok(ResolvedSearch {
-        params,
-        chimeric_active,
-        mono_active,
-        mono_params,
-        restricted_site_masses,
-        fixed_terminal_mods,
-    })
 }
 
 /// Logs the resolved parameters of the run.

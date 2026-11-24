@@ -605,6 +605,46 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     }
     let area = w * (2.0 * std::f64::consts::PI).sqrt();
 
+    let se = amplitude_se(&h, &passive, n_ch);
+
+    let n_points = rt.iter().filter(|&&t| (t - t0).abs() <= 2.0 * w).count() as u32;
+    let inputs = ChannelInputs {
+        ms1,
+        probe,
+        params,
+        n_ch,
+        window: &window,
+        rt: &rt,
+        traces: &traces,
+        y: &y,
+        ybar: &ybar,
+        yc: &yc,
+        t0,
+        w,
+        gc: &gc,
+        h: &h,
+        b: &b,
+        proj: &proj,
+        sgg: &sgg,
+        a: &a,
+        llr,
+        area,
+        se: &se,
+    };
+    let channels = (0..n_ch).map(|c| channel_fit(&inputs, c)).collect();
+    Some(GroupFit {
+        t0,
+        w,
+        llr,
+        rt_z: (t0 - probe.t_hat) / s,
+        n_points,
+        channels,
+    })
+}
+
+/// The standard error of each channel's amplitude: from the inverse of the normal matrix over the
+/// channels the fit kept free (passive), else from the channel's own diagonal.
+fn amplitude_se(h: &[f64], passive: &[bool], n_ch: usize) -> Vec<f64> {
     let pidx: Vec<usize> = (0..n_ch).filter(|&c| passive[c]).collect();
     let mut se = vec![0.0; n_ch];
     let k = pidx.len();
@@ -621,164 +661,206 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             _ => 1.0 / h[c * n_ch + c].max(1e-300).sqrt(),
         };
     }
+    se
+}
 
-    let n_points = rt.iter().filter(|&&t| (t - t0).abs() <= 2.0 * w).count() as u32;
-    let channels = (0..n_ch)
-        .map(|c| {
-            let mut free = probe.free.clone();
-            free[c] = false;
-            let (_, llr0, _) = nn_quadratic(&h, &b, n_ch, &free);
-            let llr_c = (llr - llr0).max(0.0);
-            let s_cc = sgg[c * n_ch + c].max(1e-300);
-            let height = |t: usize| -> f64 {
-                let mut p = proj[t][c];
-                for c2 in 0..n_ch {
-                    if c2 != c {
-                        p -= traces.mix[t * n_ch + c2] * a[c2] * sgg[c * n_ch + c2];
-                    }
-                }
-                p / s_cc
-            };
-            let mut obs = Vec::new();
-            let mut exp = Vec::new();
-            for (k, &off) in READ_OFFSETS.iter().enumerate() {
-                if off < 0 {
-                    continue;
-                }
-                let t = traces.own[c][k];
-                obs.push(height(t));
-                exp.push(traces.mix[t * n_ch + c]);
-            }
-            let envelope_cos = cosine(&obs, &exp);
-            let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
-            let mono = traces.own[c][1];
-            let mut xs = Vec::new();
-            let mut gs = Vec::new();
-            for (j, &t) in rt.iter().enumerate() {
-                if (t - t_ch).abs() > 2.0 * w {
-                    continue;
-                }
-                let mut v = yc[mono][j];
-                for c2 in 0..n_ch {
-                    if c2 != c {
-                        v -= traces.mix[mono * n_ch + c2] * a[c2] * gc[c2][j];
-                    }
-                }
-                xs.push(v);
-                gs.push(gc[c][j]);
-            }
-            let coherence = if xs.len() >= 3 {
-                pearson(&xs, &gs)
-            } else {
-                0.0
-            };
-            let m1 = traces.own[c][0];
-            let mut r = proj[m1][c];
-            for c2 in 0..n_ch {
-                r -= traces.mix[m1 * n_ch + c2] * a[c2] * sgg[c * n_ch + c2];
-            }
-            let pi0 = probe.envelopes[c].at(0).max(1e-9);
-            let m1_ratio = (r / s_cc).max(0.0) / (pi0 * a[c].max(se[c]).max(1e-300));
-            let tc = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
-            let (mut sy, mut syt) = (0.0, 0.0);
-            for k in [1usize, 2] {
-                let tr = traces.own[c][k];
-                for (j, &t) in rt.iter().enumerate() {
-                    if (t - tc).abs() > 2.0 * w {
-                        continue;
-                    }
-                    let mut v = y[tr][j] - ybar[tr];
-                    for c2 in 0..n_ch {
-                        if c2 != c {
-                            v -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
-                        }
-                    }
-                    if v > 0.0 {
-                        sy += v;
-                        syt += v * (t - tc);
-                    }
-                }
-            }
-            let apex_offset = if sy > 0.0 { syt / sy } else { 0.0 };
-            let trace_quantity = {
-                let (lo, hi) = (tc - 3.0 * w, tc + 4.0 * w);
-                let mut area = 0.0;
-                let mut share = 0.0;
-                for k in 1..READ_OFFSETS.len() {
-                    let tr = traces.own[c][k];
-                    let pi = traces.mix[tr * n_ch + c];
-                    if pi <= 0.0 {
-                        continue;
-                    }
-                    share += pi;
-                    let v: Vec<f64> = (0..rt.len())
-                        .map(|j| {
-                            let mut x = yc[tr][j];
-                            for c2 in 0..n_ch {
-                                if c2 != c {
-                                    x -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
-                                }
-                            }
-                            x
-                        })
-                        .collect();
-                    let out: Vec<f64> = (0..rt.len())
-                        .filter(|&j| rt[j] < lo || rt[j] > hi)
-                        .map(|j| v[j])
-                        .collect();
-                    let b = if out.is_empty() {
-                        0.0
-                    } else {
-                        out.iter().sum::<f64>() / out.len() as f64
-                    };
-                    for j in 1..rt.len() {
-                        if rt[j - 1] >= lo && rt[j] <= hi {
-                            area += 0.5 * (v[j - 1] + v[j] - 2.0 * b) * (rt[j] - rt[j - 1]);
-                        }
-                    }
-                }
-                if share > 0.0 {
-                    area / share
-                } else {
-                    0.0
-                }
-            };
-            let mz = probe.channel_mz[c];
-            let tol = mz * params.tol_ppm * 1e-6;
-            let (mut sw, mut swe) = (0.0, 0.0);
-            let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
-            for (j, i) in window.clone().enumerate() {
-                if (rt[j] - t_ch).abs() > w {
-                    continue;
-                }
-                if let Some((m, inten)) = ms1.apex_centroid(i, mz - tol, mz + tol) {
-                    sw += inten as f64;
-                    swe += inten as f64 * (m - mz) / mz * 1e6;
-                }
-            }
-            ChannelFit {
-                amplitude: a[c],
-                amplitude_se: se[c],
-                quantity: a[c] * area,
-                quantity_se: se[c] * area,
-                llr: llr_c,
-                envelope_cos,
-                coherence,
-                m1_ratio,
-                mass_err_ppm: (sw > 0.0).then(|| swe / sw),
-                apex_offset,
-                trace_quantity,
-            }
-        })
-        .collect();
-    Some(GroupFit {
+/// What fitting one channel of a group reads: the MS1 window and its traces, the group's joint
+/// fit (apex, width, normal equations, amplitudes and their errors) and the fit parameters.
+#[derive(Clone, Copy)]
+struct ChannelInputs<'a> {
+    ms1: &'a Ms1RunIndex,
+    probe: &'a GroupProbe,
+    params: &'a FitParams,
+    n_ch: usize,
+    window: &'a std::ops::Range<usize>,
+    rt: &'a [f64],
+    traces: &'a Traces,
+    y: &'a [Vec<f64>],
+    ybar: &'a [f64],
+    yc: &'a [Vec<f64>],
+    t0: f64,
+    w: f64,
+    gc: &'a [Vec<f64>],
+    h: &'a [f64],
+    b: &'a [f64],
+    proj: &'a [Vec<f64>],
+    sgg: &'a [f64],
+    a: &'a [f64],
+    llr: f64,
+    area: f64,
+    se: &'a [f64],
+}
+
+/// One channel's fit within its group's joint fit: its own LLR, envelope and coherence checks,
+/// M+1 ratio, mass error, apex offset and trace quantity.
+fn channel_fit(inputs: &ChannelInputs<'_>, c: usize) -> ChannelFit {
+    let ChannelInputs {
+        ms1,
+        probe,
+        params,
+        n_ch,
+        window,
+        rt,
+        traces,
+        y,
+        ybar,
+        yc,
         t0,
         w,
+        gc,
+        h,
+        b,
+        proj,
+        sgg,
+        a,
         llr,
-        rt_z: (t0 - probe.t_hat) / s,
-        n_points,
-        channels,
-    })
+        area,
+        se,
+    } = *inputs;
+    let mut free = probe.free.clone();
+    free[c] = false;
+    let (_, llr0, _) = nn_quadratic(h, b, n_ch, &free);
+    let llr_c = (llr - llr0).max(0.0);
+    let s_cc = sgg[c * n_ch + c].max(1e-300);
+    let height = |t: usize| -> f64 {
+        let mut p = proj[t][c];
+        for c2 in 0..n_ch {
+            if c2 != c {
+                p -= traces.mix[t * n_ch + c2] * a[c2] * sgg[c * n_ch + c2];
+            }
+        }
+        p / s_cc
+    };
+    let mut obs = Vec::new();
+    let mut exp = Vec::new();
+    for (k, &off) in READ_OFFSETS.iter().enumerate() {
+        if off < 0 {
+            continue;
+        }
+        let t = traces.own[c][k];
+        obs.push(height(t));
+        exp.push(traces.mix[t * n_ch + c]);
+    }
+    let envelope_cos = cosine(&obs, &exp);
+    let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
+    let mono = traces.own[c][1];
+    let mut xs = Vec::new();
+    let mut gs = Vec::new();
+    for (j, &t) in rt.iter().enumerate() {
+        if (t - t_ch).abs() > 2.0 * w {
+            continue;
+        }
+        let mut v = yc[mono][j];
+        for c2 in 0..n_ch {
+            if c2 != c {
+                v -= traces.mix[mono * n_ch + c2] * a[c2] * gc[c2][j];
+            }
+        }
+        xs.push(v);
+        gs.push(gc[c][j]);
+    }
+    let coherence = if xs.len() >= 3 {
+        pearson(&xs, &gs)
+    } else {
+        0.0
+    };
+    let m1 = traces.own[c][0];
+    let mut r = proj[m1][c];
+    for c2 in 0..n_ch {
+        r -= traces.mix[m1 * n_ch + c2] * a[c2] * sgg[c * n_ch + c2];
+    }
+    let pi0 = probe.envelopes[c].at(0).max(1e-9);
+    let m1_ratio = (r / s_cc).max(0.0) / (pi0 * a[c].max(se[c]).max(1e-300));
+    let tc = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
+    let (mut sy, mut syt) = (0.0, 0.0);
+    for k in [1usize, 2] {
+        let tr = traces.own[c][k];
+        for (j, &t) in rt.iter().enumerate() {
+            if (t - tc).abs() > 2.0 * w {
+                continue;
+            }
+            let mut v = y[tr][j] - ybar[tr];
+            for c2 in 0..n_ch {
+                if c2 != c {
+                    v -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
+                }
+            }
+            if v > 0.0 {
+                sy += v;
+                syt += v * (t - tc);
+            }
+        }
+    }
+    let apex_offset = if sy > 0.0 { syt / sy } else { 0.0 };
+    let trace_quantity = {
+        let (lo, hi) = (tc - 3.0 * w, tc + 4.0 * w);
+        let mut area = 0.0;
+        let mut share = 0.0;
+        for k in 1..READ_OFFSETS.len() {
+            let tr = traces.own[c][k];
+            let pi = traces.mix[tr * n_ch + c];
+            if pi <= 0.0 {
+                continue;
+            }
+            share += pi;
+            let v: Vec<f64> = (0..rt.len())
+                .map(|j| {
+                    let mut x = yc[tr][j];
+                    for c2 in 0..n_ch {
+                        if c2 != c {
+                            x -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
+                        }
+                    }
+                    x
+                })
+                .collect();
+            let out: Vec<f64> = (0..rt.len())
+                .filter(|&j| rt[j] < lo || rt[j] > hi)
+                .map(|j| v[j])
+                .collect();
+            let b = if out.is_empty() {
+                0.0
+            } else {
+                out.iter().sum::<f64>() / out.len() as f64
+            };
+            for j in 1..rt.len() {
+                if rt[j - 1] >= lo && rt[j] <= hi {
+                    area += 0.5 * (v[j - 1] + v[j] - 2.0 * b) * (rt[j] - rt[j - 1]);
+                }
+            }
+        }
+        if share > 0.0 {
+            area / share
+        } else {
+            0.0
+        }
+    };
+    let mz = probe.channel_mz[c];
+    let tol = mz * params.tol_ppm * 1e-6;
+    let (mut sw, mut swe) = (0.0, 0.0);
+    let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
+    for (j, i) in window.clone().enumerate() {
+        if (rt[j] - t_ch).abs() > w {
+            continue;
+        }
+        if let Some((m, inten)) = ms1.apex_centroid(i, mz - tol, mz + tol) {
+            sw += inten as f64;
+            swe += inten as f64 * (m - mz) / mz * 1e6;
+        }
+    }
+    ChannelFit {
+        amplitude: a[c],
+        amplitude_se: se[c],
+        quantity: a[c] * area,
+        quantity_se: se[c] * area,
+        llr: llr_c,
+        envelope_cos,
+        coherence,
+        m1_ratio,
+        mass_err_ppm: (sw > 0.0).then(|| swe / sw),
+        apex_offset,
+        trace_quantity,
+    }
 }
 
 fn cosine(a: &[f64], b: &[f64]) -> f64 {

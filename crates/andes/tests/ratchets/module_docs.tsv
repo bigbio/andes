@@ -196,7 +196,6 @@ crates/search/src/candidates/records.rs	1
 crates/search/src/chimeric.rs	1
 crates/search/src/crosslinks.rs	1
 crates/search/src/decoy.rs	1
-crates/search/src/engine.rs	1
 crates/search/src/fragments/error.rs	1
 crates/search/src/fragments/index.rs	1
 crates/search/src/glycopeptides.rs	1

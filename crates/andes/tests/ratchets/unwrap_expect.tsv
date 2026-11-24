@@ -18,7 +18,8 @@ crates/andes/src/bin/andes/transfers.rs	1
 crates/glyco/src/glycan/db.rs	1
 crates/input/src/annotations.rs	3
 crates/input/src/ms1.rs	1
-crates/input/src/mzml.rs	4
+crates/input/src/mzml/parallel.rs	3
+crates/input/src/mzml/reader.rs	1
 crates/input/src/timstof.rs	5
 crates/input/src/timstof/archive.rs	1
 crates/input/src/uniprot.rs	1

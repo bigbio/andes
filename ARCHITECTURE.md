@@ -68,7 +68,7 @@ library crates and binary alike.
 ## 4. DDA data flow
 
 1. **Read.** `input` yields `model::Spectrum` values (`crates/model/src/spectrum.rs`), with MS1
-   scans linked through `Ms1Link` (`crates/input/src/mzml.rs`), and a `model::ProteinDb`
+   scans linked through `Ms1Link` (`crates/input/src/mzml/reader.rs`), and a `model::ProteinDb`
    (`crates/model/src/protein.rs`) from `load_protein_database` (`crates/input/src/database.rs`).
 2. **Database.** `search::decoy::build_search_db` adds decoys under a `DecoyStrategy`
    (`crates/search/src/decoy.rs`). `SearchIndex` (`crates/search/src/index.rs`) holds the

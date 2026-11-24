@@ -45,7 +45,6 @@ crates/input/src/database.rs	1
 crates/input/src/fasta.rs	1
 crates/input/src/isobaric.rs	1
 crates/input/src/mgf.rs	1
-crates/input/src/mzml.rs	1
 crates/input/src/peff.rs	1
 crates/input/src/resolution.rs	1
 crates/input/src/thermo.rs	1

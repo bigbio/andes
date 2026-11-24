@@ -3,7 +3,6 @@
 # After a file is split under the budget, drop its line (and refresh the listed counts) with:
 # cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline
 crates/andes/src/bin/andes/glyco/quantities.rs	2099
-crates/andes/src/bin/andes/quant/run.rs	2530
 crates/andes/src/bin/andes/quant/run/labels.rs	1998
 crates/andes/src/bin/andes/search.rs	2704
 crates/andes/src/bin/andes/search/resolve.rs	2062

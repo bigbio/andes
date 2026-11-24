@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::sync::Mutex;
 
 use model::amino_acid::AminoAcid;
-use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::scan::ProductScan;
 use model::spectrum::Spectrum;
@@ -18,6 +17,9 @@ use xl::sites::{link_sites, LinkSite};
 use crate::candidates::Candidate;
 use crate::fragments::index::ChunkFragmentIndex;
 use crate::engine::PreparedSearch;
+
+mod stub_mods;
+use stub_mods::StubMods;
 
 #[derive(Debug, Clone)]
 pub struct XlConfig {
@@ -504,40 +506,6 @@ pub struct XlSpectrumResult {
     /// The best and the next-best peptide pair at every charge searched, with their pair
     /// scores: the candidates of the CSM's runner-up across charges and linkers.
     pub pairs: Vec<(PairKey, f32)>,
-}
-
-struct StubMods {
-    names: Vec<String>,
-    cache: Mutex<HashMap<(LinkForm, u64), &'static Modification>>,
-}
-
-impl StubMods {
-    fn new(linker: &Crosslinker) -> Self {
-        let mut names = vec![String::new(); N_FORMS];
-        for form in linker.forms() {
-            names[form.index()] = format!("XL:{}", linker.form_name(form));
-        }
-        StubMods {
-            names,
-            cache: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn get(&self, form: LinkForm, stub: f64, existing: f64) -> &'static Modification {
-        let key = (form, existing.to_bits());
-        let mut c = self.cache.lock().expect("stub mod cache");
-        c.entry(key).or_insert_with(|| {
-            let mut m = Modification::new(
-                self.names[form.index()].clone(),
-                existing + stub,
-                ResidueSpec::Wildcard,
-                ModLocation::Anywhere,
-                false,
-            );
-            m.blocks_cleavage = true;
-            leak_mod(m)
-        })
-    }
 }
 
 fn with_link_mass(
@@ -1445,7 +1413,7 @@ pub fn xl_search_run(
     table: &XlCandidates,
     cfg: &XlConfig,
 ) -> Vec<XlSpectrumResult> {
-    let mods = StubMods::new(&cfg.linker);
+    let mods = StubMods::for_table(&cfg.linker, table);
     let eligible: Vec<usize> = spectra
         .iter()
         .enumerate()

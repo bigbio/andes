@@ -759,8 +759,7 @@ pub(crate) struct SearchArgs {
     ///
     /// The search runs with the variable modifications --xl implies (the default ones plus
     /// the linker's water-quenched monolink) and no cross-link search; with --rescore it
-    /// writes <stem>.protein_groups.tsv. `andes cohort run` uses it once
-    /// per project to choose the proteins its cross-link searches look in.
+    /// writes <stem>.protein_groups.tsv.
     #[arg(
         long = "xl-linear-only",
         requires = "xl",

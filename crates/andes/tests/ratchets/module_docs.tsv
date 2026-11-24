@@ -154,7 +154,6 @@ crates/quant/src/evidence.rs	1
 crates/quant/src/formula.rs	1
 crates/quant/src/gaussian.rs	1
 crates/quant/src/isobaric.rs	1
-crates/quant/src/label.rs	1
 crates/quant/src/lfq.rs	1
 crates/quant/src/library.rs	1
 crates/quant/src/mobility.rs	1

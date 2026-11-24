@@ -10,6 +10,5 @@ crates/andes/src/bin/andes/quant/run/labels.rs	1998
 crates/andes/src/bin/andes/search.rs	2704
 crates/andes/src/bin/andes/search/resolve.rs	2062
 crates/andes/src/bin/andes/train.rs	1748
-crates/quant/src/label.rs	2195
 crates/scoring/src/psm/spectrum.rs	2702
 crates/search/src/engine.rs	3773

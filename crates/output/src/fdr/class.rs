@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use model::fdr::{ranked_q, Counts, Eval};
 use model::EntryKind;
+use rayon::prelude::*;
 use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
@@ -80,7 +81,7 @@ impl Cutoffs {
             .map(|p| (p.accession.as_str(), p.entry_kind()))
             .collect();
         let variant_rows = targets
-            .iter()
+            .par_iter()
             .filter(|(_, p)| class_of(&p.proteins, &kinds) == "variant")
             .map(|(id, _)| id.clone())
             .collect();
@@ -130,24 +131,22 @@ pub fn apply_class_fdr(
         .map(|p| (p.accession.as_str(), p.entry_kind()))
         .collect();
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
+    let classes = |rows: &HashMap<String, PercolatorPsm>| -> Vec<(String, f64)> {
+        let psms: Vec<&PercolatorPsm> = rows.values().collect();
+        psms.par_iter()
+            .map(|p| (class_of(&p.proteins, &kinds), rank(p)))
+            .collect()
+    };
     let mut by_class: HashMap<String, ClassRows> = HashMap::new();
-    for (i, p) in targets.values().enumerate() {
-        by_class
-            .entry(class_of(&p.proteins, &kinds))
-            .or_default()
-            .0
-            .push((rank(p), i));
+    for (i, (class, r)) in classes(targets).into_iter().enumerate() {
+        by_class.entry(class).or_default().0.push((r, i));
     }
-    for p in decoys.values() {
-        by_class
-            .entry(class_of(&p.proteins, &kinds))
-            .or_default()
-            .1
-            .push(rank(p));
+    for (class, r) in classes(decoys) {
+        by_class.entry(class).or_default().1.push(r);
     }
     let single = by_class.len() < 2;
     let mut pooled: Vec<f64> = decoys.values().map(rank).collect();
-    pooled.sort_by(f64::total_cmp);
+    pooled.par_sort_unstable_by(f64::total_cmp);
     let n = pooled.len();
     let p_of = |s: f64| -> f64 {
         let ge = n - pooled.partition_point(|&x| x < s);

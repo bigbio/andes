@@ -35,11 +35,50 @@ pub(super) struct Rescoring {
     pub(super) dia_precursor_ids: std::collections::HashSet<String>,
 }
 
+/// The DIA precursor learned score trained beside the steps before rescoring, and the pass-2
+/// table it was trained on.
+pub(super) type EarlyLearned =
+    std::thread::JoinHandle<(output::dia::pass2::Pass2Table, crate::dia::score::Learned)>;
+
+/// The Percolator arguments of the run: `--percolator-args`, on DIA with the default train FDR.
+fn user_args(cli: &Cli) -> Vec<String> {
+    let mut args: Vec<String> = cli
+        .percolator_args
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if cli.dia {
+        crate::dia::default_train_fdr(&mut args);
+    }
+    args
+}
+
+/// Starts the DIA precursor learned score on its own thread as soon as pass 2 has its table,
+/// when rescoring will use it (`--rescore`, DIA, no `--quant-dir`): the table moves into the
+/// thread and comes back with the score when [`rescore_pin`] joins it. The score depends only
+/// on the table and the seed, so it is the one [`rescore_pin`] would train itself.
+pub(super) fn start_learned(
+    cli: &Cli,
+    dia_pass2: &mut Option<output::dia::pass2::Pass2Table>,
+) -> Option<EarlyLearned> {
+    if !(cli.rescore && cli.dia && cli.quant_dir.is_none()) {
+        return None;
+    }
+    let t = dia_pass2.take()?;
+    let seed = crate::dia::score::percolator_seed(&user_args(cli));
+    Some(std::thread::spawn(move || {
+        let learned = crate::dia::score::learn(&t, &[], seed);
+        (t, learned)
+    }))
+}
+
 /// Rescores the search's PIN when `--rescore` is set; takes `dia_pass2` when it is used.
+/// `early` is the learned score [`start_learned`] started, joined after pass 1.
 pub(super) fn rescore_pin(
     inputs: &RescoreInputs<'_>,
     spectra: &mut [Spectrum],
     dia_pass2: &mut Option<output::dia::pass2::Pass2Table>,
+    early: Option<EarlyLearned>,
 ) -> Result<Rescoring, Box<dyn std::error::Error>> {
     let RescoreInputs {
         cli,
@@ -73,14 +112,7 @@ pub(super) fn rescore_pin(
             .map_err(|e| format!("{e}"))?
         };
         log::info!(target: "rescore", "Percolator backend = {}", backend.describe());
-        let mut user_args: Vec<String> = cli
-            .percolator_args
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-        if cli.dia {
-            crate::dia::default_train_fdr(&mut user_args);
-        }
+        let user_args = user_args(cli);
         let extra = output::percolator_args_with_threads(&user_args, cli.threads);
         let t_resc = std::time::Instant::now();
         if cli.dia && free_peaks {
@@ -90,21 +122,18 @@ pub(super) fn rescore_pin(
             crate::memory::release_free_memory();
         }
         let seed = crate::dia::score::percolator_seed(&user_args);
-        let early = dia_pass2
-            .as_ref()
-            .filter(|_| cli.dia && cli.quant_dir.is_none());
-        let (pass1, learned) = std::thread::scope(|sc| -> Result<_, String> {
-            let job = early.map(|t| sc.spawn(move || crate::dia::score::learn(t, &[], seed)));
-            let pass1 = rescore_pass1(cli, output_pin_path, spectra, &backend, &extra);
-            let learned = match job {
-                Some(h) => Some(
-                    h.join()
-                        .map_err(|_| "the precursor learned score panicked".to_string())?,
-                ),
-                None => None,
-            };
-            Ok((pass1?, learned))
-        })?;
+        let pass1 = rescore_pass1(cli, output_pin_path, spectra, &backend, &extra);
+        let learned = match early {
+            Some(h) => {
+                let (t, learned) = h
+                    .join()
+                    .map_err(|_| "the precursor learned score panicked".to_string())?;
+                *dia_pass2 = Some(t);
+                Some(learned)
+            }
+            None => None,
+        };
+        let pass1 = pass1?;
         let Pass1 {
             targets: mut map,
             decoy_ids: mut decoys,

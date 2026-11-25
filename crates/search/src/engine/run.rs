@@ -55,6 +55,54 @@ fn scored_spec<'a, 's>(
     scored_for_charge(scored_per_charge, z).expect("scored spectrum exists for candidate charge")
 }
 
+/// Moves the PSMs and pool scores of one charge search's units (`got`, unit `k` of spectrum
+/// `owners[k]`) into their spectra's merged queues and pools, the PSMs numbered from
+/// `offset`. When the units belong to distinct spectra (one spectrum's charges fall in
+/// different searches) the spectra are filled in parallel, each in the same order as the
+/// sequential fill; otherwise unit by unit.
+fn merge_units(
+    got: Vec<(TopNQueue, Vec<f32>)>,
+    owners: &[usize],
+    merged: &mut [TopNQueue],
+    pools: &mut [Vec<f32>],
+    offset: usize,
+) {
+    let fill = |(mut q, pool): (TopNQueue, Vec<f32>),
+                i: usize,
+                queue: &mut TopNQueue,
+                kept: &mut Vec<f32>| {
+        kept.extend(pool);
+        for mut psm in q.drain_into_vec() {
+            psm.spectrum_idx = offset + i;
+            queue.push(psm);
+        }
+    };
+    let mut seen = vec![false; merged.len()];
+    if !owners
+        .iter()
+        .all(|&i| !std::mem::replace(&mut seen[i], true))
+    {
+        for (unit, &i) in got.into_iter().zip(owners) {
+            fill(unit, i, &mut merged[i], &mut pools[i]);
+        }
+        return;
+    }
+    let mut slot: Vec<Option<(TopNQueue, Vec<f32>)>> = (0..merged.len()).map(|_| None).collect();
+    for (unit, &i) in got.into_iter().zip(owners) {
+        slot[i] = Some(unit);
+    }
+    merged
+        .par_iter_mut()
+        .zip(pools.par_iter_mut())
+        .zip(slot.into_par_iter())
+        .enumerate()
+        .for_each(|(i, ((queue, kept), unit))| {
+            if let Some(unit) = unit {
+                fill(unit, i, queue, kept);
+            }
+        });
+}
+
 /// What finishing a spectrum's scoring carries over from its candidate loop: the scorer and scored
 /// spectra, the candidates, the top-N queue and the per-charge queues, and the loop's statistics.
 struct SpectrumTail<'a, 's> {
@@ -150,22 +198,16 @@ impl<'a> PreparedSearch<'a> {
         while !units.is_empty() {
             let take = crate::fragments::index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for ((mut q, pool), i) in self
-                .run_chunk_inner(&chunk, 0, params, complete_later)
-                .into_iter()
-                .zip(owners)
-            {
-                pools[i].extend(pool);
-                for mut psm in q.drain_into_vec() {
-                    psm.spectrum_idx = spectrum_idx_offset + i;
-                    merged[i].push(psm);
-                }
-            }
+            let got = self.run_chunk_inner(&chunk, 0, params, complete_later);
+            merge_units(got, &owners, &mut merged, &mut pools, spectrum_idx_offset);
         }
-        for (queue, pool) in merged.iter_mut().zip(&pools) {
-            queue.trim_to_capacity(params.top_n_psms_per_spectrum);
-            recalibrate_strong_over_spectrum(queue, pool);
-        }
+        merged
+            .par_iter_mut()
+            .zip(pools.par_iter())
+            .for_each(|(queue, pool)| {
+                queue.trim_to_capacity(params.top_n_psms_per_spectrum);
+                recalibrate_strong_over_spectrum(queue, pool);
+            });
         if complete_later {
             self.complete_kept_features(spectra, &mut merged);
         }
@@ -184,9 +226,10 @@ impl<'a> PreparedSearch<'a> {
             .zip(queues.chunks_mut(KEPT_FEATURE_BATCH_SPECTRA))
         {
             let peptides: Vec<Vec<Peptide>> = {
-                let accum = self.mmap_accum.lock().unwrap();
+                let guard = self.mmap_accum.lock().unwrap();
+                let accum = &*guard;
                 batch
-                    .iter()
+                    .par_iter()
                     .map(|q| {
                         q.iter_psms()
                             .map(|p| {

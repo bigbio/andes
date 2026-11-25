@@ -714,6 +714,7 @@ pub(super) fn write_pin_and_rescore(
             crate::memory::mark_stage("pass 2");
         }
     }
+    let early_learned = rescoring::start_learned(&cli, &mut dia_pass2);
     if cli.dia {
         crate::memory::release_free_memory();
     }
@@ -775,6 +776,7 @@ pub(super) fn write_pin_and_rescore(
         },
         &mut spectra,
         &mut dia_pass2,
+        early_learned,
     )?;
     let rescoring::Rescoring {
         rescore_map,

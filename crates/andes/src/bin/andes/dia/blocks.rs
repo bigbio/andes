@@ -7,6 +7,8 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 
+use rayon::prelude::*;
+
 /// Bytes read per block.
 const BLOCK_BYTES: usize = 64 << 20;
 /// Lines per parallel work unit of a block.
@@ -21,6 +23,40 @@ fn push_lines<'a>(text: &'a str, out: &mut Vec<&'a str>) {
             out.push(line);
         }
     }
+}
+
+/// Pieces a block's lines are split into on the thread pool.
+const SPLIT_PIECES: usize = 64;
+
+/// The lines of `bytes` as [`push_lines`] gives them, `None` when `bytes` is not UTF-8. The
+/// bytes are cut after newlines into pieces that are checked and split in parallel; each piece
+/// but the last ends with a newline, so the pieces' lines, in order, are the lines of the whole.
+fn block_lines(bytes: &[u8]) -> Option<Vec<&str>> {
+    let n = bytes.len();
+    let mut cuts = vec![0usize];
+    for k in 1..SPLIT_PIECES {
+        let from = (k * n / SPLIT_PIECES).max(*cuts.last().unwrap_or(&0));
+        match bytes[from..].iter().position(|&b| b == b'\n') {
+            Some(p) => cuts.push(from + p + 1),
+            None => break,
+        }
+    }
+    cuts.push(n);
+    cuts.dedup();
+    let pieces: Vec<Option<Vec<&str>>> = cuts
+        .par_windows(2)
+        .map(|w| {
+            let text = std::str::from_utf8(&bytes[w[0]..w[1]]).ok()?;
+            let mut lines = Vec::new();
+            push_lines(text, &mut lines);
+            Some(lines)
+        })
+        .collect();
+    let mut lines = Vec::with_capacity(pieces.iter().flatten().map(Vec::len).sum());
+    for piece in pieces {
+        lines.extend(piece?);
+    }
+    Some(lines)
 }
 
 /// Reads `path`: `on_header` gets its first line, then `on_block` gets the following non-empty
@@ -74,18 +110,18 @@ pub(crate) fn read_blocks(
         });
         let mut header: Option<_> = Some(on_header);
         let mut first = 0usize;
+        let not_utf8 = || err(&"stream did not contain valid UTF-8");
         for block in rx {
             let block = block.map_err(|e| err(&e))?;
-            let text = std::str::from_utf8(&block)
-                .map_err(|_| err(&"stream did not contain valid UTF-8"))?;
-            let mut body = text;
+            let mut body: &[u8] = &block;
             if let Some(h) = header.take() {
-                let (line, rest) = text.split_once('\n').unwrap_or((text, ""));
+                let end = body.iter().position(|&b| b == b'\n');
+                let line = std::str::from_utf8(&body[..end.unwrap_or(body.len())])
+                    .map_err(|_| not_utf8())?;
+                body = end.map_or(&[][..], |e| &body[e + 1..]);
                 h(line.strip_suffix('\r').unwrap_or(line))?;
-                body = rest;
             }
-            let mut lines: Vec<&str> = Vec::new();
-            push_lines(body, &mut lines);
+            let lines = block_lines(body).ok_or_else(not_utf8)?;
             on_block(first, &lines)?;
             first += lines.len();
         }
@@ -143,6 +179,23 @@ mod tests {
             .enumerate()
             .collect();
         assert_eq!(rows, body);
+    }
+
+    #[test]
+    fn parallel_split_gives_the_lines_of_the_whole_block() {
+        let text: String = (0..5000)
+            .map(|i| match i % 7 {
+                0 => "\n".to_string(),
+                1 => format!("r{i}\tx\r\n"),
+                _ => format!("row {i}\t{}\n", "y".repeat(i % 13)),
+            })
+            .chain(["tail without newline".to_string()])
+            .collect();
+        let mut want = Vec::new();
+        push_lines(&text, &mut want);
+        assert_eq!(block_lines(text.as_bytes()), Some(want));
+        assert_eq!(block_lines(b""), Some(Vec::new()));
+        assert_eq!(block_lines(b"a\n\xff\nb\n"), None);
     }
 
     #[test]

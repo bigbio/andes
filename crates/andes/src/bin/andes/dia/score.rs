@@ -263,7 +263,7 @@ pub(crate) fn learned_score(
 /// own nominees (their SpecIds are pass-1 SpecIds).
 struct Pass1 {
     names: Vec<String>,
-    rows: HashMap<(String, String, u8), Vec<f32>>,
+    rows: rustc_hash::FxHashMap<(String, String, u8), Vec<f32>>,
     run_file: HashMap<u32, String>,
 }
 
@@ -281,7 +281,7 @@ impl Pass1 {
 }
 
 /// Reads the pass-1 PIN. `own` maps the SpecId of every pass-2 row to its run.
-fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
+fn read_pass1(pin: &Path, own: &rustc_hash::FxHashMap<&str, u32>) -> Result<Pass1, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
     struct Layout {
         c_pep: usize,
@@ -292,7 +292,8 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
         names: Vec<String>,
     }
     let layout: std::cell::OnceCell<Layout> = std::cell::OnceCell::new();
-    let mut rows: HashMap<(String, String, u8), Vec<f32>> = HashMap::new();
+    let mut rows: rustc_hash::FxHashMap<(String, String, u8), Vec<f32>> =
+        rustc_hash::FxHashMap::default();
     let mut run_file: HashMap<u32, String> = HashMap::new();
     crate::dia::blocks::read_blocks(
         pin,
@@ -323,7 +324,7 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
             let Some(l) = layout.get() else {
                 return Err(err(&"empty PIN"));
             };
-            type Parsed<'a> = (&'a str, &'a str, &'a str, u8, Vec<f32>);
+            type Parsed<'a> = (&'a str, &'a str, (String, String, u8), Vec<f32>);
             let parsed: Vec<Option<Parsed<'_>>> = lines
                 .par_iter()
                 .map(|line| {
@@ -343,12 +344,12 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
                         .map(|&i| x[i].trim().parse::<f32>().unwrap_or(f32::NAN))
                         .map(|v| if v.is_finite() { v } else { 0.0 })
                         .collect();
-                    Some((x[0], file, x[l.c_pep], z, v))
+                    Some((x[0], file, (file.to_string(), x[l.c_pep].to_string(), z), v))
                 })
                 .collect();
             let llr = |v: &[f32]| l.c_llr.map_or(MISSING_DIA_LLR, |k| v[k]);
             for p in parsed {
-                let Some((id, file, pep, z, v)) = p else {
+                let Some((id, file, k, v)) = p else {
                     return Err(err(&"short PIN row"));
                 };
                 if let Some(&run) = own.get(id) {
@@ -365,7 +366,6 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
                         }
                     }
                 }
-                let k = (file.to_string(), pep.to_string(), z);
                 match rows.get_mut(&k) {
                     Some(old) if llr(old) >= llr(&v) => {}
                     Some(old) => *old = v,
@@ -489,7 +489,7 @@ pub(crate) fn write_precursor_pin_with(
     learned: Option<Learned>,
 ) -> Result<PrecursorPin, String> {
     let t0 = std::time::Instant::now();
-    let own: HashMap<&str, u32> = t
+    let own: rustc_hash::FxHashMap<&str, u32> = t
         .spec_id
         .iter()
         .zip(&t.run)
@@ -783,7 +783,7 @@ mod tests {
             features: Vec::new(),
             ..Default::default()
         };
-        let own: HashMap<&str, u32> =
+        let own: rustc_hash::FxHashMap<&str, u32> =
             t.spec_id.iter().zip(&t.run).map(|(s, &r)| (s.as_str(), r)).collect();
         let p1 = read_pass1(&pin, &own).unwrap();
         assert_eq!(p1.names, ["p1_dia_llr", "p1_x"]);

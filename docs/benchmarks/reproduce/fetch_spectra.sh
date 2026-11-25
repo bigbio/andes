@@ -67,7 +67,10 @@ for ds in "${SETS[@]}"; do
       curl -sS --retry 3 --max-time 7200 -L -o "$out/$name.part" "$url"
       echo "    sha256 $(shasum -a 256 "$out/$name.part" | cut -d' ' -f1)  $name"
       case "$name" in
-        *.tar.gz) tar xzf "$out/$name.part" -C "$out" && rm "$out/$name.part" ;;
+        *.tar.gz) tmp="$out/.extract"; rm -rf "$tmp"; mkdir -p "$tmp"
+                  tar xzf "$out/$name.part" -C "$tmp" && mv "$tmp/$(basename "$d")" "$d" \
+                    || { rm -rf "$tmp"; echo "ERROR: could not unpack $name" >&2; exit 1; }
+                  rm -rf "$tmp" "$out/$name.part" ;;
         *) mv "$out/$name.part" "$out/$name" ;;
       esac
     done

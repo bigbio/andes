@@ -226,9 +226,10 @@ impl<'a> PreparedSearch<'a> {
             .zip(queues.chunks_mut(KEPT_FEATURE_BATCH_SPECTRA))
         {
             let peptides: Vec<Vec<Peptide>> = {
-                let accum = self.mmap_accum.lock().unwrap();
+                let guard = self.mmap_accum.lock().unwrap();
+                let accum = &*guard;
                 batch
-                    .iter()
+                    .par_iter()
                     .map(|q| {
                         q.iter_psms()
                             .map(|p| {

@@ -10,9 +10,9 @@ pub(crate) mod score;
 pub(crate) mod study;
 pub(crate) mod transfer;
 
-pub(crate) use qvalue::{classwise_q_values, precursor_q, precursor_q_by_class};
+pub(crate) use qvalue::{precursor_q, precursor_q_by_class};
 #[cfg(test)]
-use qvalue::{curve_at, precursor_q_values, q_curve};
+use qvalue::{classwise_q_values, curve_at, precursor_q_values, q_curve};
 
 use std::collections::HashMap;
 use std::path::Path;

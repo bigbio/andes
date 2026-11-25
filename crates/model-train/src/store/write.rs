@@ -338,40 +338,86 @@ fn build_manifest_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-fn build_table_batch(
-    schema: &Arc<Schema>,
-    models: &[(&str, &Param)],
-) -> Result<RecordBatch, TrainError> {
-    let mut record_kinds: Vec<&str> = Vec::new();
-    let mut model_ids: Vec<&str> = Vec::new();
-    let mut part_charges: Vec<Option<i32>> = Vec::new();
-    let mut part_mass_bits: Vec<Option<i32>> = Vec::new();
-    let mut part_segs: Vec<Option<i32>> = Vec::new();
-    let mut ion_kinds: Vec<Option<&str>> = Vec::new();
-    let mut ion_charges: Vec<Option<i32>> = Vec::new();
-    let mut ion_offset_bits: Vec<Option<i32>> = Vec::new();
-    let mut ion_loss_classes: Vec<Option<i32>> = Vec::new();
-    let mut table_kinds: Vec<Option<&str>> = Vec::new();
+/// The `table` records of the model store, one entry per row in each column.
+#[derive(Default)]
+struct TableRows<'a> {
+    record_kinds: Vec<&'a str>,
+    model_ids: Vec<&'a str>,
+    part_charges: Vec<Option<i32>>,
+    part_mass_bits: Vec<Option<i32>>,
+    part_segs: Vec<Option<i32>>,
+    ion_kinds: Vec<Option<&'a str>>,
+    ion_charges: Vec<Option<i32>>,
+    ion_offset_bits: Vec<Option<i32>>,
+    ion_loss_classes: Vec<Option<i32>>,
+    table_kinds: Vec<Option<&'a str>>,
+    all_values: Vec<Option<Vec<f32>>>,
+    all_precursor_offsets: Vec<Option<Vec<PrecursorEntry>>>,
+    all_frag_off_loss_classes: Vec<Option<Vec<i32>>>,
+}
 
-    let mut all_values: Vec<Option<Vec<f32>>> = Vec::new();
-    let mut all_precursor_offsets: Vec<Option<Vec<PrecursorEntry>>> = Vec::new();
-    let mut all_frag_off_loss_classes: Vec<Option<Vec<i32>>> = Vec::new();
+/// One `table` record: its partition key, ion key, table kind and payload.
+struct TableRow<'a> {
+    model_id: &'a str,
+    charge: i32,
+    mass_bits: i32,
+    seg: i32,
+    ion: (&'a str, i32, i32, Option<i32>),
+    kind: &'a str,
+    values: Option<Vec<f32>>,
+    precursor_offsets: Option<Vec<PrecursorEntry>>,
+    frag_off_loss_classes: Option<Vec<i32>>,
+}
 
+impl<'a> TableRows<'a> {
+    fn push(&mut self, row: TableRow<'a>) {
+        let (ion_kind, ion_charge, ion_offset_bits, ion_loss_class) = row.ion;
+        self.record_kinds.push("table");
+        self.model_ids.push(row.model_id);
+        self.part_charges.push(Some(row.charge));
+        self.part_mass_bits.push(Some(row.mass_bits));
+        self.part_segs.push(Some(row.seg));
+        self.ion_kinds.push(Some(ion_kind));
+        self.ion_charges.push(Some(ion_charge));
+        self.ion_offset_bits.push(Some(ion_offset_bits));
+        self.ion_loss_classes.push(ion_loss_class);
+        self.table_kinds.push(Some(row.kind));
+        self.all_values.push(row.values);
+        self.all_precursor_offsets.push(row.precursor_offsets);
+        self.all_frag_off_loss_classes
+            .push(row.frag_off_loss_classes);
+    }
+
+    /// A partition's row with no ion key, carrying `values` or nothing.
+    fn push_partition(
+        &mut self,
+        model_id: &'a str,
+        part: &Partition,
+        kind: &'a str,
+        values: Option<Vec<f32>>,
+        frag_off_loss_classes: Option<Vec<i32>>,
+    ) {
+        self.push(TableRow {
+            model_id,
+            charge: part.charge,
+            mass_bits: f32_to_i32_bits(part.parent_mass),
+            seg: part.seg_num,
+            ion: ("-", 0, 0, None),
+            kind,
+            values,
+            precursor_offsets: None,
+            frag_off_loss_classes,
+        });
+    }
+}
+
+/// The `table` records of every model: partitions, precursor offsets, fragment offsets, rank
+/// distributions and the error and existence tables, in that order per model.
+fn table_rows<'a>(models: &[(&'a str, &Param)]) -> TableRows<'a> {
+    let mut rows = TableRows::default();
     for &(model_id, param) in models {
         for part in &param.partitions {
-            record_kinds.push("table");
-            model_ids.push(model_id);
-            part_charges.push(Some(part.charge));
-            part_mass_bits.push(Some(f32_to_i32_bits(part.parent_mass)));
-            part_segs.push(Some(part.seg_num));
-            ion_kinds.push(Some("-"));
-            ion_charges.push(Some(0));
-            ion_offset_bits.push(Some(0));
-            ion_loss_classes.push(None);
-            table_kinds.push(Some("partition"));
-            all_values.push(None);
-            all_precursor_offsets.push(None);
-            all_frag_off_loss_classes.push(None);
+            rows.push_partition(model_id, part, "partition", None, None);
         }
 
         let mut precursor_charges: Vec<i32> = param.precursor_off_map.keys().copied().collect();
@@ -388,19 +434,17 @@ fn build_table_batch(
                     (e.reduced_charge, e.offset, is_ppm, tol_val, e.frequency)
                 })
                 .collect();
-            record_kinds.push("table");
-            model_ids.push(model_id);
-            part_charges.push(Some(charge));
-            part_mass_bits.push(Some(0));
-            part_segs.push(Some(0));
-            ion_kinds.push(Some("-"));
-            ion_charges.push(Some(0));
-            ion_offset_bits.push(Some(0));
-            ion_loss_classes.push(None);
-            table_kinds.push(Some("precursor_off"));
-            all_values.push(None);
-            all_precursor_offsets.push(Some(payload));
-            all_frag_off_loss_classes.push(None);
+            rows.push(TableRow {
+                model_id,
+                charge,
+                mass_bits: 0,
+                seg: 0,
+                ion: ("-", 0, 0, None),
+                kind: "precursor_off",
+                values: None,
+                precursor_offsets: Some(payload),
+                frag_off_loss_classes: None,
+            });
         }
 
         for part in &param.partitions {
@@ -434,20 +478,7 @@ fn build_table_batch(
                     flat.extend_from_slice(&[is_prefix, charge, off_f32, f.frequency]);
                     loss_classes.push(lc);
                 }
-
-                record_kinds.push("table");
-                model_ids.push(model_id);
-                part_charges.push(Some(part.charge));
-                part_mass_bits.push(Some(f32_to_i32_bits(part.parent_mass)));
-                part_segs.push(Some(part.seg_num));
-                ion_kinds.push(Some("-"));
-                ion_charges.push(Some(0));
-                ion_offset_bits.push(Some(0));
-                ion_loss_classes.push(None);
-                table_kinds.push(Some("frag_off"));
-                all_values.push(Some(flat));
-                all_precursor_offsets.push(None);
-                all_frag_off_loss_classes.push(Some(loss_classes));
+                rows.push_partition(model_id, part, "frag_off", Some(flat), Some(loss_classes));
             }
         }
 
@@ -455,95 +486,55 @@ fn build_table_batch(
             if let Some(ion_map) = param.rank_dist_table.get(part) {
                 for (ion, freqs) in ion_map {
                     let (kind_str, ic, iob, lc) = encode_ion_type(ion);
-                    record_kinds.push("table");
-                    model_ids.push(model_id);
-                    part_charges.push(Some(part.charge));
-                    part_mass_bits.push(Some(f32_to_i32_bits(part.parent_mass)));
-                    part_segs.push(Some(part.seg_num));
-                    ion_kinds.push(Some(kind_str));
-                    ion_charges.push(Some(ic));
-                    ion_offset_bits.push(Some(iob));
-                    ion_loss_classes.push(Some(lc));
-                    table_kinds.push(Some("rank_dist"));
-                    all_values.push(Some(freqs.clone()));
-                    all_precursor_offsets.push(None);
-                    all_frag_off_loss_classes.push(None);
+                    rows.push(TableRow {
+                        model_id,
+                        charge: part.charge,
+                        mass_bits: f32_to_i32_bits(part.parent_mass),
+                        seg: part.seg_num,
+                        ion: (kind_str, ic, iob, Some(lc)),
+                        kind: "rank_dist",
+                        values: Some(freqs.clone()),
+                        precursor_offsets: None,
+                        frag_off_loss_classes: None,
+                    });
                 }
             }
         }
 
         for part in &param.partitions {
             if let Some(v) = param.ion_err_dist_table.get(part) {
-                emit_dist_row(
-                    &mut record_kinds,
-                    &mut model_ids,
-                    &mut part_charges,
-                    &mut part_mass_bits,
-                    &mut part_segs,
-                    &mut ion_kinds,
-                    &mut ion_charges,
-                    &mut ion_offset_bits,
-                    &mut ion_loss_classes,
-                    &mut table_kinds,
-                    &mut all_values,
-                    &mut all_precursor_offsets,
-                    &mut all_frag_off_loss_classes,
-                    model_id,
-                    part.charge,
-                    part.parent_mass,
-                    part.seg_num,
-                    "ion_err",
-                    v,
-                );
+                rows.push_partition(model_id, part, "ion_err", Some(v.to_vec()), None);
             }
             if let Some(v) = param.noise_err_dist_table.get(part) {
-                emit_dist_row(
-                    &mut record_kinds,
-                    &mut model_ids,
-                    &mut part_charges,
-                    &mut part_mass_bits,
-                    &mut part_segs,
-                    &mut ion_kinds,
-                    &mut ion_charges,
-                    &mut ion_offset_bits,
-                    &mut ion_loss_classes,
-                    &mut table_kinds,
-                    &mut all_values,
-                    &mut all_precursor_offsets,
-                    &mut all_frag_off_loss_classes,
-                    model_id,
-                    part.charge,
-                    part.parent_mass,
-                    part.seg_num,
-                    "noise_err",
-                    v,
-                );
+                rows.push_partition(model_id, part, "noise_err", Some(v.to_vec()), None);
             }
             if let Some(v) = param.ion_existence_table.get(part) {
-                emit_dist_row(
-                    &mut record_kinds,
-                    &mut model_ids,
-                    &mut part_charges,
-                    &mut part_mass_bits,
-                    &mut part_segs,
-                    &mut ion_kinds,
-                    &mut ion_charges,
-                    &mut ion_offset_bits,
-                    &mut ion_loss_classes,
-                    &mut table_kinds,
-                    &mut all_values,
-                    &mut all_precursor_offsets,
-                    &mut all_frag_off_loss_classes,
-                    model_id,
-                    part.charge,
-                    part.parent_mass,
-                    part.seg_num,
-                    "ion_existence",
-                    v,
-                );
+                rows.push_partition(model_id, part, "ion_existence", Some(v.to_vec()), None);
             }
         }
     }
+    rows
+}
+
+fn build_table_batch(
+    schema: &Arc<Schema>,
+    models: &[(&str, &Param)],
+) -> Result<RecordBatch, TrainError> {
+    let TableRows {
+        record_kinds,
+        model_ids,
+        part_charges,
+        part_mass_bits,
+        part_segs,
+        ion_kinds,
+        ion_charges,
+        ion_offset_bits,
+        ion_loss_classes,
+        table_kinds,
+        all_values,
+        all_precursor_offsets,
+        all_frag_off_loss_classes,
+    } = table_rows(models);
 
     let nrows = record_kinds.len();
 
@@ -637,43 +628,6 @@ fn build_table_batch(
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_dist_row<'a>(
-    record_kinds: &mut Vec<&'a str>,
-    model_ids: &mut Vec<&'a str>,
-    part_charges: &mut Vec<Option<i32>>,
-    part_mass_bits: &mut Vec<Option<i32>>,
-    part_segs: &mut Vec<Option<i32>>,
-    ion_kinds: &mut Vec<Option<&'a str>>,
-    ion_charges: &mut Vec<Option<i32>>,
-    ion_offset_bits: &mut Vec<Option<i32>>,
-    ion_loss_classes: &mut Vec<Option<i32>>,
-    table_kinds: &mut Vec<Option<&'a str>>,
-    all_values: &mut Vec<Option<Vec<f32>>>,
-    all_precursor_offsets: &mut Vec<Option<Vec<PrecursorEntry>>>,
-    all_frag_off_loss_classes: &mut Vec<Option<Vec<i32>>>,
-    model_id: &'a str,
-    charge: i32,
-    parent_mass: f32,
-    seg_num: i32,
-    kind: &'a str,
-    values: &[f32],
-) {
-    record_kinds.push("table");
-    model_ids.push(model_id);
-    part_charges.push(Some(charge));
-    part_mass_bits.push(Some(f32_to_i32_bits(parent_mass)));
-    part_segs.push(Some(seg_num));
-    ion_kinds.push(Some("-"));
-    ion_charges.push(Some(0));
-    ion_offset_bits.push(Some(0));
-    ion_loss_classes.push(None);
-    table_kinds.push(Some(kind));
-    all_values.push(Some(values.to_vec()));
-    all_precursor_offsets.push(None);
-    all_frag_off_loss_classes.push(None);
 }
 
 fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32, i32) {

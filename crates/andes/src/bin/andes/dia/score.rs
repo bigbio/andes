@@ -283,63 +283,97 @@ impl Pass1 {
 /// Reads the pass-1 PIN. `own` maps the SpecId of every pass-2 row to its run.
 fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let f = std::fs::File::open(pin).map_err(|e| err(&e))?;
-    let mut lines = BufReader::new(f).lines();
-    let header = lines.next().ok_or_else(|| err(&"empty PIN"))?.map_err(|e| err(&e))?;
-    let h: Vec<&str> = header.split('\t').collect();
-    let c_pep = h.iter().position(|c| *c == "Peptide").ok_or_else(|| err(&"no Peptide"))?;
-    let c_file = h.iter().position(|c| *c == "FileName");
-    let charge: Vec<(usize, u8)> = h
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
-        .collect();
-    let numeric: Vec<usize> = (0..c_pep)
-        .filter(|&i| !PASS1_SKIP.contains(&h[i]) && !h[i].starts_with("charge"))
-        .collect();
-    let c_llr = numeric.iter().position(|&i| h[i] == "dia_llr");
-    let names: Vec<String> = numeric.iter().map(|&i| format!("p1_{}", h[i])).collect();
+    struct Layout {
+        c_pep: usize,
+        c_file: Option<usize>,
+        charge: Vec<(usize, u8)>,
+        numeric: Vec<usize>,
+        c_llr: Option<usize>,
+        names: Vec<String>,
+    }
+    let layout: std::cell::OnceCell<Layout> = std::cell::OnceCell::new();
     let mut rows: HashMap<(String, String, u8), Vec<f32>> = HashMap::new();
     let mut run_file: HashMap<u32, String> = HashMap::new();
-    for line in lines {
-        let line = line.map_err(|e| err(&e))?;
-        if line.is_empty() {
-            continue;
-        }
-        let x: Vec<&str> = line.split('\t').collect();
-        if x.len() <= c_pep {
-            return Err(err(&"short PIN row"));
-        }
-        let file = c_file.map_or("", |c| x[c]);
-        if let Some(&run) = own.get(x[0]) {
-            match run_file.get(&run) {
-                Some(f) if f != file => {
-                    return Err(err(&format!(
-                        "the nominees of pass-2 run {run} come from PIN files {f:?} and {file:?}"
-                    )))
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let c_pep = h
+                .iter()
+                .position(|c| *c == "Peptide")
+                .ok_or_else(|| err(&"no Peptide"))?;
+            let numeric: Vec<usize> = (0..c_pep)
+                .filter(|&i| !PASS1_SKIP.contains(&h[i]) && !h[i].starts_with("charge"))
+                .collect();
+            let _ = layout.set(Layout {
+                c_pep,
+                c_file: h.iter().position(|c| *c == "FileName"),
+                charge: h
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
+                    .collect(),
+                c_llr: numeric.iter().position(|&i| h[i] == "dia_llr"),
+                names: numeric.iter().map(|&i| format!("p1_{}", h[i])).collect(),
+                numeric,
+            });
+            Ok(())
+        },
+        |_, lines| {
+            let Some(l) = layout.get() else {
+                return Err(err(&"empty PIN"));
+            };
+            type Parsed<'a> = (&'a str, &'a str, &'a str, u8, Vec<f32>);
+            let parsed: Vec<Option<Parsed<'_>>> = lines
+                .par_iter()
+                .map(|line| {
+                    let x: Vec<&str> = line.split('\t').collect();
+                    if x.len() <= l.c_pep {
+                        return None;
+                    }
+                    let file = l.c_file.map_or("", |c| x[c]);
+                    let z = l.charge.iter().find(|(i, _)| x[*i] == "1").map_or(0, |c| c.1);
+                    let v: Vec<f32> = l
+                        .numeric
+                        .iter()
+                        .map(|&i| x[i].trim().parse::<f32>().unwrap_or(f32::NAN))
+                        .map(|v| if v.is_finite() { v } else { 0.0 })
+                        .collect();
+                    Some((x[0], file, x[l.c_pep], z, v))
+                })
+                .collect();
+            let llr = |v: &[f32]| l.c_llr.map_or(MISSING_DIA_LLR, |k| v[k]);
+            for p in parsed {
+                let Some((id, file, pep, z, v)) = p else {
+                    return Err(err(&"short PIN row"));
+                };
+                if let Some(&run) = own.get(id) {
+                    match run_file.get(&run) {
+                        Some(f) if f != file => {
+                            return Err(err(&format!(
+                                "the nominees of pass-2 run {run} come from PIN files {f:?} and \
+                                 {file:?}"
+                            )))
+                        }
+                        Some(_) => {}
+                        None => {
+                            run_file.insert(run, file.to_string());
+                        }
+                    }
                 }
-                Some(_) => {}
-                None => {
-                    run_file.insert(run, file.to_string());
+                let k = (file.to_string(), pep.to_string(), z);
+                match rows.get_mut(&k) {
+                    Some(old) if llr(old) >= llr(&v) => {}
+                    Some(old) => *old = v,
+                    None => {
+                        rows.insert(k, v);
+                    }
                 }
             }
-        }
-        let z = charge.iter().find(|(i, _)| x[*i] == "1").map_or(0, |c| c.1);
-        let v: Vec<f32> = numeric
-            .iter()
-            .map(|&i| x[i].trim().parse::<f32>().unwrap_or(f32::NAN))
-            .map(|v| if v.is_finite() { v } else { 0.0 })
-            .collect();
-        let llr = |v: &[f32]| c_llr.map_or(MISSING_DIA_LLR, |k| v[k]);
-        let k = (file.to_string(), x[c_pep].to_string(), z);
-        match rows.get_mut(&k) {
-            Some(old) if llr(old) >= llr(&v) => {}
-            Some(old) => *old = v,
-            None => {
-                rows.insert(k, v);
-            }
-        }
-    }
+            Ok(())
+        },
+    )?;
+    let names = layout.into_inner().map(|l| l.names).unwrap_or_default();
     Ok(Pass1 {
         names,
         rows,

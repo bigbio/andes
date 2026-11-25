@@ -19,7 +19,6 @@
 //! the trace) or that has no signal has no quantity; a quantity is never 0.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::ops::Range;
 use std::path::Path;
 
@@ -287,52 +286,54 @@ fn pin_fields(
     pin: &Path,
     want: &[usize],
 ) -> Result<Vec<PinFields>, String> {
-    let f = std::fs::File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = BufReader::new(f).lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| format!("{}: empty PIN", pin.display()))?
-        .map_err(|e| format!("{}: {e}", pin.display()))?;
-    let h: Vec<&str> = header.split('\t').collect();
-    let at = |n: &str| {
-        h.iter()
-            .position(|c| *c == n)
-            .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
-    };
-    let (c_id, c_rt, c_miss, c_pep, c_prot) = (
-        at("SpecId")?,
-        at("andesrt_predicted_rt")?,
-        at("andesrt_missing")?,
-        at("Peptide")?,
-        at("Proteins")?,
-    );
+    let cols: std::cell::OnceCell<[usize; 5]> = std::cell::OnceCell::new();
     let mut out = Vec::with_capacity(want.len());
-    let mut w = 0usize;
-    let mut idx = 0usize;
-    for line in lines {
-        if w == want.len() {
-            break;
-        }
-        let line = line.map_err(|e| format!("{}: {e}", pin.display()))?;
-        if line.is_empty() {
-            continue;
-        }
-        if want[w] == idx {
-            let x: Vec<&str> = line.split('\t').collect();
-            if x.len() <= c_prot.max(c_pep).max(c_rt).max(c_miss) {
-                return Err(format!("{}: PIN row {} is short", pin.display(), idx + 2));
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let at = |n: &str| {
+                h.iter()
+                    .position(|c| *c == n)
+                    .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
+            };
+            let _ = cols.set([
+                at("SpecId")?,
+                at("andesrt_predicted_rt")?,
+                at("andesrt_missing")?,
+                at("Peptide")?,
+                at("Proteins")?,
+            ]);
+            Ok(())
+        },
+        |first, lines| {
+            let Some(&[c_id, c_rt, c_miss, c_pep, c_prot]) = cols.get() else {
+                return Err(format!("{}: empty PIN", pin.display()));
+            };
+            let lo = want.partition_point(|&i| i < first);
+            let hi = want.partition_point(|&i| i < first + lines.len());
+            let rows: Vec<Result<PinFields, String>> = want[lo..hi]
+                .par_iter()
+                .map(|&idx| {
+                    let x: Vec<&str> = lines[idx - first].split('\t').collect();
+                    if x.len() <= c_prot.max(c_pep).max(c_rt).max(c_miss) {
+                        return Err(format!("{}: PIN row {} is short", pin.display(), idx + 2));
+                    }
+                    Ok((
+                        x[c_rt].trim().parse().unwrap_or(f64::NAN),
+                        x[c_miss].trim().parse::<f64>() != Ok(0.0),
+                        x[c_pep].to_string(),
+                        x[c_prot..].join(";"),
+                        x[c_id].to_string(),
+                    ))
+                })
+                .collect();
+            for r in rows {
+                out.push(r?);
             }
-            out.push((
-                x[c_rt].trim().parse().unwrap_or(f64::NAN),
-                x[c_miss].trim().parse::<f64>() != Ok(0.0),
-                x[c_pep].to_string(),
-                x[c_prot..].join(";"),
-                x[c_id].to_string(),
-            ));
-            w += 1;
-        }
-        idx += 1;
-    }
+            Ok(())
+        },
+    )?;
     if out.len() != want.len() {
         return Err(format!(
             "{}: {} of {} nominee rows found",

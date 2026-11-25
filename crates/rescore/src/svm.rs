@@ -795,20 +795,38 @@ fn line_search(
     let mut l = lambda * omega_l;
     let mut r = lambda * omega_r;
     deltas.clear();
-    each_row(t.len(), sc, |i| {
+    let visit = |i: usize, terms: &mut Vec<(f64, f64)>, found: &mut Vec<(f64, usize, f64)>| {
         let y = t.y(i);
         let diff = y * (o_bar[i] - o[i]);
         if y * o[i] < 1.0 {
             let d2 = t.c(i) * (o_bar[i] - o[i]);
-            l += (o[i] - y) * d2;
-            r += (o_bar[i] - y) * d2;
+            terms.push(((o[i] - y) * d2, (o_bar[i] - y) * d2));
             if diff > 0.0 {
-                deltas.push(((1.0 - y * o[i]) / diff, i, -1.0));
+                found.push(((1.0 - y * o[i]) / diff, i, -1.0));
             }
         } else if diff < 0.0 {
-            deltas.push(((1.0 - y * o[i]) / diff, i, 1.0));
+            found.push(((1.0 - y * o[i]) / diff, i, 1.0));
         }
-    });
+    };
+    let n = sc.map_or(t.len(), |sc| sc.live.len());
+    let row = |k: usize| sc.map_or(k, |sc| sc.live[k] as usize);
+    let parts: Vec<(Vec<(f64, f64)>, Vec<(f64, usize, f64)>)> = (0..n.div_ceil(CHUNK))
+        .into_par_iter()
+        .map(|c| {
+            let (mut terms, mut found) = (Vec::new(), Vec::new());
+            for k in c * CHUNK..((c + 1) * CHUNK).min(n) {
+                visit(row(k), &mut terms, &mut found);
+            }
+            (terms, found)
+        })
+        .collect();
+    for (terms, found) in parts {
+        for (dl, dr) in terms {
+            l += dl;
+            r += dr;
+        }
+        deltas.extend(found);
+    }
     if deltas.len() >= PAR_SORT_MIN {
         deltas.par_sort_by(|a, b| a.0.total_cmp(&b.0));
     } else {

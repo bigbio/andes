@@ -200,19 +200,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let n = pin.meta.len();
     let fold = folds_by_precursor(&pin.meta, FOLDS, cfg.seed);
     let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
-    let folds: Vec<Fold> = (0..FOLDS)
-        .into_par_iter()
-        .map(|f| {
-            let (test, train): (Vec<usize>, Vec<usize>) =
-                (0..n).partition(|&i| fold[i] as usize == f);
-            Fold {
-                train_decoy: train.iter().map(|&i| is_decoy[i]).collect(),
-                test_decoy: test.iter().map(|&i| is_decoy[i]).collect(),
-                train,
-                test,
-            }
-        })
-        .collect();
+    let folds = make_folds(&fold, &is_decoy);
     let targets = is_decoy.iter().filter(|&&d| !d).count();
     if targets == 0 {
         return Err("Error: no target PSMs were provided.".to_string());
@@ -335,25 +323,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 let batch = &ks[done..end];
                 let starts: Vec<Option<&[f64]>> =
                     batch.iter().map(|&k| warm[k].as_deref()).collect();
-                let mut pre: Vec<Option<Vec<f64>>> = batch.iter().map(|_| None).collect();
-                let mut norms: Vec<Vec<f32>> = vec![Vec::new(); FOLDS];
-                for (f, nf) in norms.iter_mut().enumerate() {
-                    if sets[f].ex.rows.is_empty() {
-                        continue;
-                    }
-                    let js: Vec<usize> = (0..batch.len())
-                        .filter(|&j| pairs[batch[j]].0 == f && starts[j].is_some())
-                        .collect();
-                    if js.is_empty() {
-                        continue;
-                    }
-                    let ws: Vec<&[f64]> = js.iter().filter_map(|&j| starts[j]).collect();
-                    let (os, nrm) = warm_scores(x, &sets[f].ex, &ws);
-                    for (&j, o) in js.iter().zip(os) {
-                        pre[j] = Some(o);
-                    }
-                    *nf = nrm;
-                }
+                let (pre, norms) = warm_starts(x, &sets, &pairs, batch, &starts);
                 let norms = &norms;
                 let got: Vec<Option<Vec<f64>>> = batch
                     .par_iter()
@@ -440,11 +410,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     }
 
     log::debug!(target: "rescore", "at most {widest} SVM fits ran at once");
-    let mut test: Vec<Vec<f64>> = folds
-        .iter()
-        .zip(&w)
-        .map(|(fd, w)| score(&pin.rows, &fd.test, w, Some(norm)))
-        .collect();
+    let mut test = fold_test_scores(pin, norm, &folds, &w);
     let found: usize = folds
         .iter()
         .zip(&test)
@@ -455,25 +421,86 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     }
     if (found == 0 || init_positives > found) && !cfg.overrule {
         w = init;
-        test = folds
-            .iter()
-            .zip(&w)
-            .map(|(fd, w)| score(&pin.rows, &fd.test, w, Some(norm)))
-            .collect();
+        test = fold_test_scores(pin, norm, &folds, &w);
     }
 
-    let mut test_scores = vec![0.0f64; n];
-    for (fd, s) in folds.iter().zip(&test) {
-        for (&i, &v) in fd.test.iter().zip(s) {
-            test_scores[i] = v;
-        }
-    }
+    let test_scores = scatter_test_scores(&folds, &test, n);
     Ok(CvResult {
         w_raw: std::array::from_fn(|f| raw_weights(norm, &w[f])),
         w_norm: std::array::from_fn(|f| w[f].clone()),
         test_scores,
         fold,
     })
+}
+
+/// The `FOLDS` cross-validation folds: each fold's test rows are the rows assigned to it, its
+/// training rows all the others, with their decoy labels.
+fn make_folds(fold: &[u8], is_decoy: &[bool]) -> Vec<Fold> {
+    let n = fold.len();
+    (0..FOLDS)
+        .into_par_iter()
+        .map(|f| {
+            let (test, train): (Vec<usize>, Vec<usize>) =
+                (0..n).partition(|&i| fold[i] as usize == f);
+            Fold {
+                train_decoy: train.iter().map(|&i| is_decoy[i]).collect(),
+                test_decoy: test.iter().map(|&i| is_decoy[i]).collect(),
+                train,
+                test,
+            }
+        })
+        .collect()
+}
+
+/// For the fits of `batch` that start from a previous solution, their starting outputs on the
+/// fold's training examples, and each fold's example norms.
+fn warm_starts(
+    x: &Rows,
+    sets: &[TrainSet],
+    pairs: &[(usize, f64, f64)],
+    batch: &[usize],
+    starts: &[Option<&[f64]>],
+) -> (Vec<Option<Vec<f64>>>, Vec<Vec<f32>>) {
+    let mut pre: Vec<Option<Vec<f64>>> = batch.iter().map(|_| None).collect();
+    let mut norms: Vec<Vec<f32>> = vec![Vec::new(); FOLDS];
+    for (f, nf) in norms.iter_mut().enumerate() {
+        if sets[f].ex.rows.is_empty() {
+            continue;
+        }
+        let js: Vec<usize> = (0..batch.len())
+            .filter(|&j| pairs[batch[j]].0 == f && starts[j].is_some())
+            .collect();
+        if js.is_empty() {
+            continue;
+        }
+        let ws: Vec<&[f64]> = js.iter().filter_map(|&j| starts[j]).collect();
+        let (os, nrm) = warm_scores(x, &sets[f].ex, &ws);
+        for (&j, o) in js.iter().zip(os) {
+            pre[j] = Some(o);
+        }
+        *nf = nrm;
+    }
+    (pre, norms)
+}
+
+/// Each fold's scores of its test rows under its weights `w`.
+fn fold_test_scores(pin: &Pin, norm: &Norm, folds: &[Fold], w: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    folds
+        .iter()
+        .zip(w)
+        .map(|(fd, w)| score(&pin.rows, &fd.test, w, Some(norm)))
+        .collect()
+}
+
+/// Every row's score from the fold that tests it.
+fn scatter_test_scores(folds: &[Fold], test: &[Vec<f64>], n: usize) -> Vec<f64> {
+    let mut test_scores = vec![0.0f64; n];
+    for (fd, s) in folds.iter().zip(test) {
+        for (&i, &v) in fd.test.iter().zip(s) {
+            test_scores[i] = v;
+        }
+    }
+    test_scores
 }
 
 /// The test-set positives the initial directions separate, summed over the folds; at verbose

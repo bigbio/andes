@@ -133,7 +133,7 @@ fn an_ms2_scan_links_to_the_latest_ms1_at_its_faims_voltage() {
     let path = std::env::temp_dir().join(format!("andes-faims-link-{}.mzML", std::process::id()));
     std::fs::write(&path, &xml).expect("write");
     for piece in [300u64, 1 << 30] {
-        let read = read_ms1_linked_in_pieces(&path, 2, false, false, piece)
+        let read = read_ms1_linked_in_pieces(&path, 2, (false, false, false), piece)
             .expect("read")
             .expect("no parse error");
         let got: Vec<Option<f64>> = read
@@ -184,7 +184,7 @@ fn ms1_linked_parallel_read_matches_the_chunked_reader() {
         );
         for piece in [1_000u64, 7_919, 65_536, 1 << 30] {
             for threads in [1, 3] {
-                let read = read_ms1_linked_in_pieces(&path, threads, context, noise, piece)
+                let read = read_ms1_linked_in_pieces(&path, threads, (context, noise, false), piece)
                     .expect("read")
                     .expect("no parse error");
                 let what = format!("piece {piece}, {threads} threads");
@@ -199,6 +199,78 @@ fn ms1_linked_parallel_read_matches_the_chunked_reader() {
                     .collect();
                 assert_eq!(got_linked, linked, "{what}");
             }
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn ms1_linked_piece_read_with_ms3_matches_the_streamed_reader() {
+    let spectrum = |n: u32, level: u32, cv: f64| {
+        let precursor = match level {
+            2 => r#"<precursorList count="1"><precursor><selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                  </selectedIon></selectedIonList></precursor></precursorList>"#
+                .to_string(),
+            3 => format!(
+                r#"<precursorList count="1"><precursor spectrumRef="scan={}">
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="300.25"/>
+                  </selectedIon></selectedIonList></precursor></precursorList>"#,
+                n - 1
+            ),
+            _ => String::new(),
+        };
+        let mz = [100.0 + f64::from(n), 200.0 + f64::from(n)];
+        format!(
+            r#"<spectrum index="{n}" id="scan={n}" defaultArrayLength="2">
+              <cvParam accession="MS:1000511" name="ms level" value="{level}"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="{rt}"
+                         unitAccession="UO:0000031" unitName="minute"/>
+                <cvParam accession="MS:1001581" name="FAIMS compensation voltage" value="{cv}"/>
+              </scan></scanList>
+              {precursor}
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+            rt = f64::from(n) / 10.0,
+            mzb = bda_plain("MS:1000514", &encode_f64_b64(&mz)),
+            intb = bda_plain("MS:1000515", &encode_f64_b64(&[7.0, 9.0])),
+        )
+    };
+    let levels = [1, 2, 3, 2, 3, 2];
+    let scans: String = (0..60u32)
+        .map(|n| {
+            let cv = if (n / 6) % 2 == 0 { -45.0 } else { -60.0 };
+            spectrum(n + 1, levels[n as usize % levels.len()], cv)
+        })
+        .collect();
+    let xml = wrap_spectra(&scans);
+    let mut reader = MzMLReader::new(Cursor::new(xml.clone()))
+        .with_ms_level_range(2, 2)
+        .with_run_ms1_capture(true)
+        .with_product_scan_capture(true)
+        .with_scan_context_capture(true)
+        .with_noise_capture(true);
+    let spectra: Vec<String> = reader.by_ref().map(|s| format!("{:?}", s.expect("parse"))).collect();
+    let run_ms1 = reader.take_run_ms1();
+    let products = reader.take_product_scans();
+    let contexts = reader.take_scan_contexts();
+    assert_eq!((spectra.len(), run_ms1.len(), products.len()), (30, 10, 20));
+    let path = std::env::temp_dir().join(format!("andes-ms3-pieces-{}.mzML", std::process::id()));
+    std::fs::write(&path, &xml).expect("write");
+    for piece in [500u64, 2_000, 1 << 30] {
+        for threads in [1, 3] {
+            let read = read_ms1_linked_in_pieces(&path, threads, (true, true, true), piece)
+                .expect("read")
+                .expect("no parse error");
+            let what = format!("piece {piece}, {threads} threads");
+            let got: Vec<String> = read.spectra.iter().map(|s| format!("{s:?}")).collect();
+            assert_eq!(got, spectra, "{what}");
+            assert_eq!(read.run_ms1, run_ms1, "{what}");
+            assert_eq!(read.product_scans, products, "{what}");
+            assert_eq!(read.contexts, contexts, "{what}");
         }
     }
     let _ = std::fs::remove_file(&path);

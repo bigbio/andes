@@ -161,7 +161,6 @@ pub(super) fn search_file<'a>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let FileInputs {
         cli,
-        params,
         file_params,
         spectrum_paths,
         bench_cap,
@@ -169,7 +168,6 @@ pub(super) fn search_file<'a>(
         chimeric_active,
         mono_active,
         ms1_input,
-        standalone,
         xl_ms3_capture,
         ..
     } = *file_inputs;
@@ -229,8 +227,9 @@ pub(super) fn search_file<'a>(
         title_prefix: &title_prefix,
         file_snap,
     };
-    let file_stats = if file_linked {
-        search_linked(
+    let route = read_route(file_inputs, quant.as_ref(), &locals, file_linked);
+    let file_stats = match route {
+        ReadRoute::Linked => search_linked(
             file_inputs,
             outputs,
             prepared,
@@ -238,27 +237,38 @@ pub(super) fn search_file<'a>(
             quant,
             &locals,
             &mut run_scans,
-        )?
-    } else if params.fragment_index_top_k > 0
-        && !standalone
-        && !cli.dia
-        && file_is_mzml
-        && !is_gzip_path(input_path)
-        && !quant
-            .as_ref()
-            .is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3())
-    {
-        search_indexed(file_inputs, outputs, prepared, measurer, quant, &locals)?
-    } else {
-        search_enumerated(
-            file_inputs,
-            outputs,
-            prepared,
-            measurer,
-            quant,
-            &locals,
-            &mut run_scans,
-        )?
+        )?,
+        ReadRoute::Indexed => {
+            search_indexed(file_inputs, outputs, prepared, measurer, quant, &locals)?
+        }
+        ReadRoute::IndexedMs1 | ReadRoute::Enumerated => {
+            let read_ms1 = route == ReadRoute::IndexedMs1;
+            let indexed = if read_ms1 {
+                search_indexed_ms1(
+                    file_inputs,
+                    outputs,
+                    prepared,
+                    measurer,
+                    quant,
+                    &locals,
+                    &mut run_scans,
+                )?
+            } else {
+                None
+            };
+            match indexed {
+                Some(stats) => stats,
+                None => search_enumerated(
+                    file_inputs,
+                    outputs,
+                    prepared,
+                    measurer,
+                    quant,
+                    &locals,
+                    &mut run_scans,
+                )?,
+            }
+        }
     };
     let FileOutputs {
         all_spectra,
@@ -377,6 +387,7 @@ fn parse_linked(
             threads,
             capture_context,
             capture_noise,
+            false,
         )
         .map_err(|e| format!("read mzML: {e}"))?
     } else {
@@ -755,6 +766,122 @@ fn search_indexed<'a>(
         error_count: errors.len(),
         first_errors: errors.into_iter().take(3).collect(),
     })
+}
+
+/// How a file is read and searched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReadRoute {
+    /// MS1-linked chunks on a parser thread (`search_linked`).
+    Linked,
+    /// An uncompressed mzML read in parallel pieces, MS2 only (`search_indexed`).
+    Indexed,
+    /// An uncompressed mzML read in parallel pieces with its MS1 (and MS3) scans, for
+    /// quantification (`search_indexed_ms1`).
+    IndexedMs1,
+    /// Streamed on a parser thread (`search_enumerated`).
+    Enumerated,
+}
+
+fn read_route(
+    file_inputs: &FileInputs<'_>,
+    quant: Option<&QuantCollector>,
+    locals: &FileLocals<'_>,
+    file_linked: bool,
+) -> ReadRoute {
+    let FileInputs {
+        cli,
+        params,
+        standalone,
+        ms_level_u32,
+        xl_ms3_capture,
+        ..
+    } = *file_inputs;
+    let path = locals.input_path;
+    let parallel_mzml = params.fragment_index_top_k > 0
+        && !standalone
+        && !cli.dia
+        && locals.file_is_mzml
+        && !is_gzip_path(path);
+    let needs_scans = quant.is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3());
+    if file_linked {
+        ReadRoute::Linked
+    } else if parallel_mzml && !needs_scans {
+        ReadRoute::Indexed
+    } else if parallel_mzml
+        && ms_level_u32 == 2
+        && locals.remaining_cap == usize::MAX
+        && !xl_ms3_capture
+    {
+        ReadRoute::IndexedMs1
+    } else {
+        ReadRoute::Enumerated
+    }
+}
+
+/// Reads an uncompressed mzML file in parallel pieces with its MS1 (and MS3) scans and searches
+/// it with the fragment-ion index: the spectra, run scans and contexts the streamed reader of
+/// `search_enumerated` gives, in the same order. `None` (nothing read or searched) when a piece
+/// fails to parse; the streamed reader then reads the file and counts its errors.
+fn search_indexed_ms1<'a>(
+    file_inputs: &FileInputs<'a>,
+    outputs: &mut FileOutputs,
+    prepared: &mut PreparedSearch<'a>,
+    measurer: &mut FragmentErrorMeasurer,
+    quant: &mut Option<QuantCollector>,
+    locals: &FileLocals<'_>,
+    run_scans: &mut RunScans,
+) -> Result<Option<ParseStats>, Box<dyn std::error::Error>> {
+    let FileInputs {
+        cli,
+        keep_peaks,
+        t_search_start,
+        ..
+    } = *file_inputs;
+    let FileLocals {
+        input_path,
+        title_prefix,
+        ..
+    } = *locals;
+    let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+    let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
+    let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
+    let Some(read) = input::mzml::read_ms1_linked_parallel(
+        input_path,
+        cli.threads,
+        quant.is_some(),
+        capture_noise,
+        capture_ms3,
+    )
+    .map_err(|e| format!("read mzML {}: {e}", input_path.display()))?
+    else {
+        return Ok(None);
+    };
+    let mut spectra = read.spectra;
+    if let Some(prefix) = title_prefix {
+        prefix_spectrum_titles(&mut spectra, prefix);
+    }
+    *run_scans = RunScans {
+        ms1: if capture_ms1 { read.run_ms1 } else { Vec::new() },
+        ms3: read.product_scans,
+        contexts: read.contexts,
+    };
+    let FileOutputs {
+        all_spectra,
+        all_queues,
+        ..
+    } = outputs;
+    score_mass_ordered(
+        prepared,
+        spectra,
+        index_chunk_span_da(cli.fragment_index_slice_da),
+        all_spectra,
+        all_queues,
+        t_search_start,
+        keep_peaks,
+        quant.as_mut(),
+        measurer,
+    );
+    Ok(Some(ParseStats::default()))
 }
 
 /// Reads a file on a parser thread and searches it chunk by chunk.

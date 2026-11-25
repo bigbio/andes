@@ -349,6 +349,8 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
                             &g.dir.join(format!("{}.{project}", g.name)),
                             &projects,
                             db.as_deref(),
+                            crate::cli::default_value::<CohortXlFdrArgs>("rescore_seed")
+                                .parse()?,
                         )?;
                     }
                 }
@@ -504,6 +506,7 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
         &args.output,
         &projects,
         args.database.as_deref(),
+        args.rescore_seed,
     )
 }
 
@@ -672,6 +675,7 @@ fn rescore(
     classes: &[xl::rollup::LinkClass],
     dropped: &[&str],
     what: &str,
+    seed: u64,
 ) -> Result<(), Box<dyn Error>> {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
@@ -761,7 +765,7 @@ fn rescore(
         memory: crate::memory::rescore_memory(None, dir.path().to_path_buf()),
     };
     let t = std::time::Instant::now();
-    let mut scored = match output::run_percolator_pooled(&backend, &pooled, &[]) {
+    let mut scored = match output::run_percolator_pooled(&backend, &pooled, &["--seed".into(), seed.to_string()]) {
         Ok(s) => s,
         Err(e) => {
             log::warn!(
@@ -864,6 +868,7 @@ fn xl_fdr_tables(
     output: &Path,
     projects: &Projects,
     database: Option<&Path>,
+    seed: u64,
 ) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
     for (k, t) in tables.iter().enumerate() {
@@ -882,12 +887,13 @@ fn xl_fdr_tables(
         &[xl::rollup::LinkClass::Intra],
         &[],
         "intra-protein links",
+        seed,
     )?;
     match database {
         Some(db) => {
             flag_ambiguous(&mut csms, db)?;
             for (classes, dropped) in inter_models(tables)? {
-                rescore(tables, &mut csms, &classes, &dropped, "inter-links")?;
+                rescore(tables, &mut csms, &classes, &dropped, "inter-links", seed)?;
             }
         }
         None => log::warn!(

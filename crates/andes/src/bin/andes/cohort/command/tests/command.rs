@@ -92,6 +92,7 @@ fn a_table_pin_is_its_sibling_and_without_one_intra_links_keep_the_pair_score() 
         &[xl::rollup::LinkClass::Intra],
         &[],
         "intra-protein links",
+        42,
     )
     .unwrap();
     assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
@@ -128,6 +129,7 @@ fn intra_links_keep_the_pair_score_when_percolator_cannot_train() {
         &[xl::rollup::LinkClass::Intra],
         &[],
         "intra-protein links",
+        42,
     )
     .unwrap();
     assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));

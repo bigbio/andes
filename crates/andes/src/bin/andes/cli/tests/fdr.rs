@@ -191,3 +191,21 @@ fn short_help_omits_the_advanced_flags() {
     assert!(long.contains(&line("--quant-transfer-fdr")));
     assert!(long.contains(&line("--proteoform-fdr")));
 }
+
+#[derive(Parser, Debug)]
+struct XlFdrWrap {
+    #[command(flatten)]
+    args: super::commands::CohortXlFdrArgs,
+}
+
+#[test]
+fn the_crosslink_rescoring_seed_defaults_to_the_pooled_percolator_seed_and_can_be_set() {
+    let base = ["andes", "t.xl.tsv", "-o", "out"];
+    let x = XlFdrWrap::try_parse_from(base).unwrap().args;
+    assert_eq!(x.rescore_seed, 42);
+    let x = XlFdrWrap::try_parse_from(base.iter().copied().chain(["--rescore-seed", "7"]))
+        .unwrap()
+        .args;
+    assert_eq!(x.rescore_seed, 7);
+    assert!(XlFdrWrap::try_parse_from(base.iter().copied().chain(["--rescore-seed", "0"])).is_err());
+}

@@ -105,7 +105,7 @@ pub(crate) fn rerank_pin(
         .max(c_label.unwrap_or(0))
         .max(c_run.unwrap_or(0))
         + 1;
-    let mut group_of: HashMap<String, u32> = HashMap::new();
+    let mut group_of: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
     let mut key = String::new();
     let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut group = Vec::new();
@@ -225,7 +225,12 @@ pub(crate) fn rerank_pin(
     }
     drop((rt_diff, target, run));
     let mut order: Vec<usize> = (0..n_rows).collect();
-    order.sort_by(|&a, &b| group[a].cmp(&group[b]).then(score[b].total_cmp(&score[a])));
+    order.par_sort_unstable_by(|&a, &b| {
+        group[a]
+            .cmp(&group[b])
+            .then(score[b].total_cmp(&score[a]))
+            .then(a.cmp(&b))
+    });
     let mut keep_row = vec![false; n_rows];
     let mut i = 0;
     while i < order.len() {

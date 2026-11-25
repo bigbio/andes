@@ -55,3 +55,12 @@ def test_finalize_counts_votes_written_on_first_residue():
     kept, st = finalize_rows([row], {"comet": vote, "sage": dict(vote), "msfragger": {}})
     assert st["kept"] == 1 and kept[0]["n_engines"] == 2
     assert kept[0]["agree_comet"] and kept[0]["agree_sage"] and kept[0]["agree_msfragger"] is False
+
+
+def test_finalize_joins_candidate_runs_with_extension():
+    row = {"run": "20160804_QE1_proteome_02.mzML", "scan": 11, "peptidoform": "PEPTIDEK", "hard": False,
+           "source_engine": "msnet", "intensities": np.zeros(1, np.float32)}
+    vote = {("20160804_QE1_proteome_02", 11): "PEPTIDEK"}
+    kept, st = finalize_rows([row], {"comet": vote, "sage": dict(vote)})
+    assert st["kept"] == 1 and kept[0]["n_engines"] == 2
+    assert kept[0]["run"] == "20160804_QE1_proteome_02.mzML"

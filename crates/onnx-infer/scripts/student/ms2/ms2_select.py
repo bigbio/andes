@@ -152,7 +152,8 @@ def finalize_rows(rows: list[dict], votes: dict):
     """Set the agreement columns and keep only multi-engine labels.
 
     ``votes`` maps each ``VOTE_SOURCES`` name to ``{(run, scan): peptidoform}`` of that source's confident
-    identifications, or to None when the source did not run (the column stays null). ``agree_<e>`` is True
+    identifications (run names without extension, as ``load_votes`` writes them; a row's run is matched
+    through ``run_stem`` too), or to None when the source did not run (the column stays null). ``agree_<e>`` is True
     when the source names the same identification, False when it names another or none. ``n_engines``
     counts the independent agreeing votes (see the module constants). ``msnet_agree`` is informational
     only: True for a row selected from MsNet, else from ``votes["msnet"]`` when given, else null. Kept: ``n_engines >= MIN_VOTES``, hard
@@ -162,7 +163,7 @@ def finalize_rows(rows: list[dict], votes: dict):
         st[f"agree_{e}_true"] = st[f"agree_{e}_false"] = st[f"agree_{e}_null"] = 0
     kept = []
     for r in rows:
-        key = (r["run"], int(r["scan"]))
+        key = (run_stem(r["run"]), int(r["scan"]))
         n = 0
         if str(r["source_engine"]).lower().startswith("msnet"):
             r["msnet_agree"] = True

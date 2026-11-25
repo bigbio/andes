@@ -894,34 +894,58 @@ const RT_MIN_ANCHORS: usize = 300;
 pub(crate) fn refine_rt(
     pin: &Path,
     spectra: &[Spectrum],
-    accepted: &dyn Fn(&str) -> bool,
+    accepted: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<bool, String> {
     use model_train::gbdt::train::{train_gbdt_regression, RegressionDataset, TrainParams};
 
     let t0 = Instant::now();
     let table = read_pin(pin, spectra, &[RT_REFINED.to_string()])?;
-    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = text.lines().filter(|l| !l.is_empty());
-    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
-    let at = |n: &str| h.iter().position(|c| *c == n);
-    let (Some(c_id), Some(c_file), Some(c_pred)) =
-        (at("SpecId"), at("FileName"), at("andesrt_predicted_rt"))
-    else {
-        return Ok(false);
-    };
-    let mut files: Vec<&str> = Vec::new();
+    let cols: std::cell::OnceCell<Option<(usize, usize, usize)>> = std::cell::OnceCell::new();
+    let mut files: Vec<String> = Vec::new();
     let mut run = Vec::with_capacity(table.rows.len());
     let mut anchor = Vec::with_capacity(table.rows.len());
     let mut pred = Vec::with_capacity(table.rows.len());
-    for line in lines {
-        let x: Vec<&str> = line.split('\t').collect();
-        let f = x[c_file];
-        run.push(files.iter().position(|g| *g == f).unwrap_or_else(|| {
-            files.push(f);
-            files.len() - 1
-        }));
-        anchor.push(accepted(x[c_id]));
-        pred.push(x[c_pred].parse::<f64>().unwrap_or(f64::NAN));
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let at = |n: &str| h.iter().position(|c| *c == n);
+            let _ = cols.set(
+                match (at("SpecId"), at("FileName"), at("andesrt_predicted_rt")) {
+                    (Some(a), Some(b), Some(c)) => Some((a, b, c)),
+                    _ => None,
+                },
+            );
+            Ok(())
+        },
+        |_, lines| {
+            let Some(&Some((c_id, c_file, c_pred))) = cols.get() else {
+                return Ok(());
+            };
+            let parsed: Vec<(&str, bool, f64)> = lines
+                .par_iter()
+                .map(|line| {
+                    let x: Vec<&str> = line.split('\t').collect();
+                    (
+                        x[c_file],
+                        accepted(x[c_id]),
+                        x[c_pred].parse::<f64>().unwrap_or(f64::NAN),
+                    )
+                })
+                .collect();
+            for (f, a, p) in parsed {
+                run.push(files.iter().position(|g| g == f).unwrap_or_else(|| {
+                    files.push(f.to_string());
+                    files.len() - 1
+                }));
+                anchor.push(a);
+                pred.push(p);
+            }
+            Ok(())
+        },
+    )?;
+    if !matches!(cols.get(), Some(Some(_))) {
+        return Ok(false);
     }
     if run.len() != table.rows.len() {
         return Err(format!("{}: rows changed while refining RT", pin.display()));

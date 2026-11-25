@@ -509,10 +509,7 @@ impl<'a> PreparedSearch<'a> {
             return (queue, Vec::new());
         }
 
-        let mut best_raw = i32::MIN;
-        let mut best_pep_key: u64 = 0;
-        let mut have_best = false;
-        let mut second_raw = i32::MIN;
+        let mut best_two = BestTwo::default();
         let mut ref_tracker = RefTracker::default();
         let track_ref = self.idx.has_alternative_entries;
 
@@ -530,7 +527,6 @@ impl<'a> PreparedSearch<'a> {
         }
         let scored_spec_for_charge = |z: u8| scored_spec(&scored_per_charge, z);
 
-        let shift_ppm = params.precursor_mass_shift_ppm;
         let ms1_gate = if params.dia {
             self.dia_ms1_scans(spec.rt_seconds)
         } else {
@@ -577,40 +573,8 @@ impl<'a> PreparedSearch<'a> {
             let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
             for &z in &charges_to_try {
                 let scored_spec = scored_spec_for_charge(z);
-                let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
-                if params.dia {
-                    let (lo, hi) = dia_windows
-                        .iter()
-                        .find(|w| w.0 == z)
-                        .map_or((f64::MAX, f64::MIN), |w| (w.1, w.2));
-                    let mass = cand.peptide.mass();
-                    let mono_mz = mass / z as f64 + PROTON;
-                    if (lo..=hi).contains(&mass)
-                        && ms1_gate
-                            .clone()
-                            .is_none_or(|r| self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm))
-                    {
-                        iso_errs.push(MassError {
-                            mass_error_da: 0.0,
-                            mass_error_ppm: 0.0,
-                            isotope_offset: 0,
-                        });
-                    }
-                } else {
-                    for offset in params.isotope_error_range.clone() {
-                        let matched = matches_precursor(
-                            spec,
-                            &cand.peptide,
-                            z,
-                            offset,
-                            &params.precursor_tolerance,
-                            shift_ppm,
-                        );
-                        if let Some(err) = matched {
-                            iso_errs.push(err);
-                        }
-                    }
-                }
+                let iso_errs =
+                    self.precursor_errors(spec, cand, z, params, &dia_windows, &ms1_gate);
                 if iso_errs.is_empty() {
                     continue;
                 }
@@ -671,21 +635,7 @@ impl<'a> PreparedSearch<'a> {
                     *tailor_hist.entry(s).or_insert(0) += 1;
                     tailor_total += 1;
                     strong_null_stats.push(pin_score);
-                    if s > second_raw {
-                        let mkey = peptidoform_key(&cand.peptide);
-                        if have_best && mkey == best_pep_key {
-                            if s > best_raw {
-                                best_raw = s;
-                            }
-                        } else if s > best_raw {
-                            second_raw = second_raw.max(best_raw);
-                            best_raw = s;
-                            best_pep_key = mkey;
-                            have_best = true;
-                        } else {
-                            second_raw = s;
-                        }
-                    }
+                    best_two.fold(s, || peptidoform_key(&cand.peptide));
                 }
 
                 let could_win = match per_charge_queues.get(&z) {
@@ -712,26 +662,7 @@ impl<'a> PreparedSearch<'a> {
                 );
                 let rank_score = pin_score + edge_i as f32;
 
-                let smaller_ppm = |a: &MassError, b: &MassError| {
-                    a.mass_error_ppm
-                        .abs()
-                        .partial_cmp(&b.mass_error_ppm.abs())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                };
-                let err = match open_iso {
-                    Some(want) => iso_errs
-                        .iter()
-                        .copied()
-                        .find(|e| e.isotope_offset == want)
-                        .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
-                    None if params.open_search.is_some() => iso_errs
-                        .iter()
-                        .copied()
-                        .find(|e| e.isotope_offset == 0)
-                        .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
-                    None => iso_errs.iter().copied().min_by(smaller_ppm),
-                }
-                .unwrap();
+                let err = chosen_error(&iso_errs, open_iso, params.open_search.is_some());
 
                 let features = PsmFeatures {
                     open_used_shift: mod_pep.is_some(),
@@ -770,8 +701,8 @@ impl<'a> PreparedSearch<'a> {
                 cand_slice,
                 queue,
                 per_charge_queues,
-                best_raw,
-                second_raw,
+                best_raw: best_two.best_raw,
+                second_raw: best_two.second_raw,
                 ref_tracker,
                 track_ref,
                 tailor_hist,
@@ -782,6 +713,55 @@ impl<'a> PreparedSearch<'a> {
                 open_wins,
             },
         )
+    }
+
+    /// The precursor mass errors at which candidate `cand` matches the spectrum at charge `z`:
+    /// under `--dia` inside the charge's isolation window (and an MS1 peak when the MS1 gate is
+    /// on), otherwise at each isotope offset of the range within the precursor tolerance.
+    fn precursor_errors(
+        &self,
+        spec: &Spectrum,
+        cand: &Candidate,
+        z: u8,
+        params: &SearchParams,
+        dia_windows: &DiaWindows,
+        ms1_gate: &Option<std::ops::Range<usize>>,
+    ) -> SmallVec<[MassError; 4]> {
+        let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
+        if params.dia {
+            let (lo, hi) = dia_windows
+                .iter()
+                .find(|w| w.0 == z)
+                .map_or((f64::MAX, f64::MIN), |w| (w.1, w.2));
+            let mass = cand.peptide.mass();
+            let mono_mz = mass / z as f64 + PROTON;
+            if (lo..=hi).contains(&mass)
+                && ms1_gate
+                    .clone()
+                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm))
+            {
+                iso_errs.push(MassError {
+                    mass_error_da: 0.0,
+                    mass_error_ppm: 0.0,
+                    isotope_offset: 0,
+                });
+            }
+        } else {
+            for offset in params.isotope_error_range.clone() {
+                let matched = matches_precursor(
+                    spec,
+                    &cand.peptide,
+                    z,
+                    offset,
+                    &params.precursor_tolerance,
+                    params.precursor_mass_shift_ppm,
+                );
+                if let Some(err) = matched {
+                    iso_errs.push(err);
+                }
+            }
+        }
+        iso_errs
     }
 
     /// The candidates of one spectrum and its DIA isolation windows per charge: from the
@@ -1113,4 +1093,73 @@ impl<'a> PreparedSearch<'a> {
         }
         (queue, retained_strong)
     }
+}
+
+/// The best and second-best raw scores among a spectrum's candidates; the second comes from a
+/// peptidoform other than the best's.
+struct BestTwo {
+    best_raw: i32,
+    best_pep_key: u64,
+    have_best: bool,
+    second_raw: i32,
+}
+
+impl Default for BestTwo {
+    fn default() -> Self {
+        BestTwo {
+            best_raw: i32::MIN,
+            best_pep_key: 0,
+            have_best: false,
+            second_raw: i32::MIN,
+        }
+    }
+}
+
+impl BestTwo {
+    /// Folds in raw score `s`; `key` (the candidate's peptidoform key) is computed only when `s`
+    /// beats the second-best score.
+    #[inline]
+    fn fold(&mut self, s: i32, key: impl FnOnce() -> u64) {
+        if s > self.second_raw {
+            let mkey = key();
+            if self.have_best && mkey == self.best_pep_key {
+                if s > self.best_raw {
+                    self.best_raw = s;
+                }
+            } else if s > self.best_raw {
+                self.second_raw = self.second_raw.max(self.best_raw);
+                self.best_raw = s;
+                self.best_pep_key = mkey;
+                self.have_best = true;
+            } else {
+                self.second_raw = s;
+            }
+        }
+    }
+}
+
+/// The precursor mass error a PSM reports: with `--open-search`, the error at the isotope
+/// offset its shift was localized at (`open_iso`, else offset 0); otherwise, and as the
+/// fallback, the smallest |ppm|.
+fn chosen_error(iso_errs: &[MassError], open_iso: Option<i8>, open_search: bool) -> MassError {
+    let smaller_ppm = |a: &MassError, b: &MassError| {
+        a.mass_error_ppm
+            .abs()
+            .partial_cmp(&b.mass_error_ppm.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    match open_iso {
+        Some(want) => iso_errs
+            .iter()
+            .copied()
+            .find(|e| e.isotope_offset == want)
+            .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+        None if open_search => iso_errs
+            .iter()
+            .copied()
+            .find(|e| e.isotope_offset == 0)
+            .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+        None => iso_errs.iter().copied().min_by(smaller_ppm),
+    }
+    .unwrap()
 }

@@ -14,7 +14,9 @@ use crate::acquisition::Acquisition;
 use model::{InstrumentType, Spectrum};
 use onnx_infer::predictors::calibration::RtCalibration;
 use onnx_infer::predictors::form::{Form, Mass};
-use onnx_infer::predictors::spectral::{ms2_features, FragmentTolerance, MS2_FEATURES};
+use onnx_infer::predictors::spectral::{
+    ms2_features, ms2_features_with, FragmentTolerance, MS2_FEATURES,
+};
 use onnx_infer::predictors::{
     DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
 };
@@ -449,7 +451,9 @@ impl Predictors {
                 );
             }
             for group in cols.chunks_mut(IMPUTE_COLUMNS_AT_ONCE) {
-                group.par_iter_mut().for_each(|col| impute_median(col, &miss));
+                group
+                    .par_iter_mut()
+                    .for_each(|col| impute_median(col, &miss));
             }
             blocks.push((cols, miss));
         }
@@ -592,21 +596,19 @@ impl Predictors {
         let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
             let spec = &spectra[r.spec as usize];
             let (_, mass) = &forms[r.form as usize];
-            let mut v =
-                ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
-            if let Some((slot, windows)) = &dia {
-                let (scans, center) =
-                    crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
-                v.extend(crate::dia::evidence(
-                    prediction,
-                    pred.ions(),
-                    mass,
-                    r.charge,
-                    &scans,
-                    center,
-                    tol,
-                ));
-            }
+            let Some((slot, windows)) = &dia else {
+                return ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol)
+                    .to_vec();
+            };
+            let (scans, center) = crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
+            let (frags, traces) =
+                crate::dia::fragment_evidence(prediction, pred.ions(), mass, r.charge, &scans, tol);
+            let ns = scans.len();
+            let mut v = ms2_features_with(prediction, pred.ions(), mass, r.charge, |k, _| {
+                traces[k * ns + center]
+            })
+            .to_vec();
+            v.extend(crate::dia::evidence_of(&frags, &traces, ns, center));
             v
         };
         let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
@@ -722,7 +724,12 @@ pub(super) fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
     m
 }
 
-pub(super) fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, scan: i32) -> u32 {
+pub(super) fn locate(
+    bases: &HashMap<String, u32>,
+    spectra: &[Spectrum],
+    spec_id: &str,
+    scan: i32,
+) -> u32 {
     let mut s = spec_id;
     for _ in 0..2 {
         let Some((head, _)) = s.rsplit_once('_') else {

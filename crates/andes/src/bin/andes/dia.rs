@@ -1,8 +1,8 @@
 pub(crate) mod blocks;
 pub(crate) mod joint;
 pub(crate) mod llr;
-pub(crate) mod pin;
 pub(crate) mod pass2;
+pub(crate) mod pin;
 pub(crate) mod rt;
 pub(crate) mod score;
 pub(crate) mod study;
@@ -572,6 +572,21 @@ pub(crate) fn evidence(
     center: usize,
     tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
+    let (frags, traces) = fragment_evidence(pred, ions, mass, charge, scans, tol);
+    evidence_of(&frags, &traces, scans.len(), center)
+}
+
+/// The predicted fragments of a row (`(m/z, predicted intensity)`, in the order of
+/// [`onnx_infer::predictors::spectral::ms2_features_with`]) and their [`fragment_traces`] over
+/// `scans`.
+pub(crate) fn fragment_evidence(
+    pred: &[f32],
+    ions: &[(bool, u8)],
+    mass: &Mass,
+    charge: u8,
+    scans: &[&[(f64, f32)]],
+    tol: FragmentTolerance,
+) -> (Vec<(f64, f64)>, Vec<f64>) {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
     let mut frags: Vec<(f64, f64)> = Vec::new();
@@ -587,12 +602,22 @@ pub(crate) fn evidence(
             frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
         }
     }
-    let ns = scans.len();
     let traces = fragment_traces(&frags, scans, tol);
+    (frags, traces)
+}
+
+/// The `EVIDENCE_COLUMNS` of a row from its [`fragment_evidence`]: `ns` scans per fragment
+/// trace, the row's own scan at `center`.
+pub(crate) fn evidence_of(
+    frags: &[(f64, f64)],
+    traces: &[f64],
+    ns: usize,
+    center: usize,
+) -> [f64; EVIDENCE_COLUMNS.len()] {
     let trace = |k: usize| &traces[k * ns..(k + 1) * ns];
     let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
     let lo = center.saturating_sub(1);
-    let hi = (center + 2).min(scans.len());
+    let hi = (center + 2).min(ns);
     let apex = (lo..hi)
         .max_by(|&x, &y| {
             let at = |s: usize| (0..frags.len()).map(|k| trace(k)[s] * p[k]).sum::<f64>();
@@ -601,7 +626,7 @@ pub(crate) fn evidence(
                 .then(y.abs_diff(center).cmp(&x.abs_diff(center)))
         })
         .unwrap_or(center);
-    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(scans.len()));
+    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(ns));
     let sum3: Vec<f64> = (0..frags.len())
         .map(|k| trace(k)[a..b].iter().sum())
         .collect();
@@ -632,7 +657,7 @@ pub(crate) fn evidence(
         })
         .collect();
     let mut v: Vec<f64> = Vec::with_capacity(norm.len());
-    let profile: Vec<f64> = (0..scans.len())
+    let profile: Vec<f64> = (0..ns)
         .map(|s| {
             v.clear();
             v.extend(norm.iter().map(|t| t[s]));

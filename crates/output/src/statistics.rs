@@ -64,27 +64,41 @@ impl RunStatistics {
         let mut unmodified_target_psms = 0usize;
         let mut ptm: BTreeMap<String, usize> = BTreeMap::new();
 
-        for q in queues {
-            if q.is_empty() {
-                continue;
-            }
-            spectra_with_match += 1;
-            let psms = q.clone().into_rank_sorted_vec();
-            let Some(best) = psms.first() else {
+        let best: Vec<Option<Option<(bool, BTreeSet<&str>)>>> = queues
+            .par_iter()
+            .map(|q| {
+                if q.is_empty() {
+                    return None;
+                }
+                let psms = q.clone().into_rank_sorted_vec();
+                let Some(best) = psms.first() else {
+                    return Some(None);
+                };
+                let cand = &candidates[best.primary_candidate_idx() as usize];
+                let mut names: BTreeSet<&str> = BTreeSet::new();
+                if !cand.is_decoy {
+                    for aa in &cand.peptide.residues {
+                        if let Some(m) = aa.mod_.as_ref() {
+                            names.insert(m.name.as_str());
+                        }
+                    }
+                }
+                Some(Some((cand.is_decoy, names)))
+            })
+            .collect();
+        for q in best {
+            let Some(q) = q else {
                 continue;
             };
-            let cand = &candidates[best.primary_candidate_idx() as usize];
-            if cand.is_decoy {
+            spectra_with_match += 1;
+            let Some((is_decoy, names)) = q else {
+                continue;
+            };
+            if is_decoy {
                 decoy_psms += 1;
                 continue;
             }
             target_psms += 1;
-            let mut names: BTreeSet<&str> = BTreeSet::new();
-            for aa in &cand.peptide.residues {
-                if let Some(m) = aa.mod_.as_ref() {
-                    names.insert(m.name.as_str());
-                }
-            }
             if names.is_empty() {
                 unmodified_target_psms += 1;
             }

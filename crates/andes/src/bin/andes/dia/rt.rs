@@ -447,8 +447,8 @@ impl Predictors {
                     100.0 * n_miss as f64 / n as f64
                 );
             }
-            for col in &mut cols {
-                impute_median(col, &miss);
+            for group in cols.chunks_mut(IMPUTE_COLUMNS_AT_ONCE) {
+                group.par_iter_mut().for_each(|col| impute_median(col, &miss));
             }
             blocks.push((cols, miss));
         }
@@ -670,6 +670,8 @@ impl Predictors {
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+/// Feature columns imputed at once; each holds a copy of its finite values while it runs.
+const IMPUTE_COLUMNS_AT_ONCE: usize = 4;
 /// Column prefix of the andes-rt source, whose calibrated prediction is `andesrt_predicted_rt`.
 const ANDES_RT_PREFIX: &str = "andesrt";
 

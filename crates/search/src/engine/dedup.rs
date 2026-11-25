@@ -86,17 +86,69 @@ pub(super) fn bare_residues(cand: &Candidate) -> Box<[u8]> {
         .collect()
 }
 
-pub(super) fn folded_set(spans: Vec<&[u8]>) -> FxHashSet<Box<[u8]>> {
-    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
-    set.extend(
-        spans
-            .into_iter()
-            .map(|s| s.iter().map(|&r| fold_isoleucine(r)).collect::<Box<[u8]>>()),
-    );
-    set
+/// A set of I/L-folded peptide sequences, split into shards by hash so that the shards are
+/// built in parallel. It only answers membership.
+#[derive(Default)]
+pub(crate) struct FoldedSet {
+    shards: Vec<FxHashSet<Box<[u8]>>>,
 }
 
-pub(super) fn relabel_collision_decoys_with(candidates: &mut [Candidate], target_seqs: &FxHashSet<Box<[u8]>>) {
+const FOLDED_SET_SHARD_BITS: u32 = 6;
+
+/// The shard of a sequence. SipHash rather than FxHash: the shard bits must not correlate with
+/// the hash a shard's own set probes by.
+fn folded_shard(seq: &[u8]) -> usize {
+    use std::hash::Hasher;
+    let mut h = std::hash::DefaultHasher::new();
+    h.write(seq);
+    (h.finish() >> (64 - FOLDED_SET_SHARD_BITS)) as usize
+}
+
+impl FoldedSet {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.shards.iter().all(FxHashSet::is_empty)
+    }
+
+    pub(crate) fn contains(&self, seq: &[u8]) -> bool {
+        self.shards
+            .get(folded_shard(seq))
+            .is_some_and(|shard| shard.contains(seq))
+    }
+}
+
+pub(super) fn folded_set(spans: Vec<&[u8]>) -> FoldedSet {
+    let n_shards = 1usize << FOLDED_SET_SHARD_BITS;
+    let buckets: Vec<Vec<Box<[u8]>>> = spans
+        .par_iter()
+        .fold(
+            || vec![Vec::new(); n_shards],
+            |mut buckets, s| {
+                let folded: Box<[u8]> = s.iter().map(|&r| fold_isoleucine(r)).collect();
+                buckets[folded_shard(&folded)].push(folded);
+                buckets
+            },
+        )
+        .reduce(
+            || vec![Vec::new(); n_shards],
+            |mut a, b| {
+                for (into, from) in a.iter_mut().zip(b) {
+                    into.extend(from);
+                }
+                a
+            },
+        );
+    let shards = buckets
+        .into_par_iter()
+        .map(|bucket| {
+            let mut set = FxHashSet::with_capacity_and_hasher(bucket.len(), Default::default());
+            set.extend(bucket);
+            set
+        })
+        .collect();
+    FoldedSet { shards }
+}
+
+pub(super) fn relabel_collision_decoys_with(candidates: &mut [Candidate], target_seqs: &FoldedSet) {
     if target_seqs.is_empty() {
         return;
     }
@@ -107,7 +159,7 @@ pub(super) fn relabel_collision_decoys_with(candidates: &mut [Candidate], target
     }
 }
 
-pub(super) fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSet<Box<[u8]>> {
+pub(super) fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FoldedSet {
     use crate::candidates::records::flags as rec_flags;
     let mut spans: Vec<&[u8]> = (0..mi.len())
         .into_par_iter()
@@ -131,7 +183,7 @@ pub(super) fn build_target_bare_seqs_where(
     db: &SearchIndex,
     params: &SearchParams,
     keep: &CandidateFilter,
-) -> FxHashSet<Box<[u8]>> {
+) -> FoldedSet {
     use crate::candidates::records::flags as rec_flags;
     let mut spans: Vec<&[u8]> = (0..mi.len())
         .into_par_iter()

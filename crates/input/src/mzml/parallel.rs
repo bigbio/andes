@@ -1,7 +1,7 @@
 //! Parallel mzML reading: the file is cut into byte pieces at `<spectrum` boundaries and
 //! each piece is parsed by its own reader; results come back in file order.
 
-use model::scan::{Ms1Scan, ScanContext};
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::Spectrum;
 
 use super::reader::MzMLReader;
@@ -170,19 +170,24 @@ pub struct Ms1LinkedRead {
     pub ms2_to_ms1: Vec<Option<usize>>,
     pub run_ms1: Vec<Ms1Scan>,
     pub contexts: Vec<ScanContext>,
+    /// The MS3+ scans, when the read captures them.
+    pub product_scans: Vec<ProductScan>,
 }
 
+/// Reads the MS2 scans of an uncompressed mzML file in parallel pieces, with the run's MS1 scans,
+/// each MS2 scan's link to its MS1 scan, the scan contexts and (with `capture_product`) the MS3+
+/// scans, all in file order. `None` when a piece fails to parse.
 pub fn read_ms1_linked_parallel(
     path: &std::path::Path,
     threads: usize,
     capture_context: bool,
     capture_noise: bool,
+    capture_product: bool,
 ) -> std::io::Result<Option<Ms1LinkedRead>> {
     read_ms1_linked_in_pieces(
         path,
         threads,
-        capture_context,
-        capture_noise,
+        (capture_context, capture_noise, capture_product),
         PARALLEL_PIECE_BYTES,
     )
 }
@@ -193,8 +198,7 @@ type Ms2Seen = (usize, Option<f32>);
 pub(super) fn read_ms1_linked_in_pieces(
     path: &std::path::Path,
     threads: usize,
-    capture_context: bool,
-    capture_noise: bool,
+    (capture_context, capture_noise, capture_product): (bool, bool, bool),
     piece_bytes_target: u64,
 ) -> std::io::Result<Option<Ms1LinkedRead>> {
     let pieces = spectrum_pieces(path, piece_bytes_target)?;
@@ -203,6 +207,7 @@ pub(super) fn read_ms1_linked_in_pieces(
         let mut reader = MzMLReader::new(bytes.as_slice())
             .with_ms_level_range(2, 2)
             .with_run_ms1_capture(true)
+            .with_product_scan_capture(capture_product)
             .with_scan_context_capture(capture_context)
             .with_noise_capture(capture_noise);
         let mut read = Ms1LinkedRead::default();
@@ -220,6 +225,7 @@ pub(super) fn read_ms1_linked_in_pieces(
         }
         read.run_ms1 = reader.take_run_ms1();
         read.contexts = reader.take_scan_contexts();
+        read.product_scans = reader.take_product_scans();
         Ok(Some((read, seen)))
     };
     let mut out = Ms1LinkedRead::default();
@@ -233,6 +239,7 @@ pub(super) fn read_ms1_linked_in_pieces(
         out.spectra.extend(piece.spectra);
         out.run_ms1.extend(piece.run_ms1);
         out.contexts.extend(piece.contexts);
+        out.product_scans.extend(piece.product_scans);
     }
     // Link in acquisition order across the pieces.
     let mut tracker = crate::ms1::Ms1Tracker::default();

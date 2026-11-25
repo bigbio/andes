@@ -58,6 +58,9 @@ pub(super) fn select_rank1_all<'a>(
     )
 }
 
+/// The rank-1 rows of each spectrum to quantify, in spectrum and row order. Each row that
+/// passes the rescoring filter takes the next PSM index, as the PIN rows do; the spectra are read
+/// in parallel and their rows numbered in spectrum order.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn select_rank1<'a>(
     collector: &QuantCollector,
@@ -69,78 +72,115 @@ pub(super) fn select_rank1<'a>(
     cutoffs: Option<&output::Cutoffs>,
     include_decoys: bool,
 ) -> Vec<Hit<'a>> {
+    use rayon::prelude::*;
+    let per_spectrum: Vec<(i64, Vec<Hit<'a>>)> = queues
+        .par_iter()
+        .enumerate()
+        .map(|(spec_idx, queue)| {
+            spectrum_hits(
+                collector,
+                (spec_idx, &spectra[spec_idx], queue),
+                candidates,
+                (rescore, omitted, cutoffs),
+                include_decoys,
+            )
+        })
+        .collect();
+    let mut hits = Vec::with_capacity(per_spectrum.iter().map(|(_, h)| h.len()).sum());
+    let mut psm_index: i64 = 0;
+    for (counted, spectrum_hits) in per_spectrum {
+        hits.extend(spectrum_hits.into_iter().map(|mut h| {
+            h.psm_index += psm_index;
+            h
+        }));
+        psm_index += counted;
+    }
+    hits
+}
+
+/// One spectrum's rows for `select_rank1`: how many rows pass the rescoring filter, and its
+/// selected rows with their PSM index counted from the spectrum's first such row.
+#[allow(clippy::type_complexity)]
+fn spectrum_hits<'a>(
+    collector: &QuantCollector,
+    (spec_idx, spec, queue): (usize, &Spectrum, &TopNQueue),
+    candidates: &'a [Candidate],
+    (rescore, omitted, cutoffs): (
+        Option<&HashMap<String, PercolatorPsm>>,
+        Option<&HashSet<String>>,
+        Option<&output::Cutoffs>,
+    ),
+    include_decoys: bool,
+) -> (i64, Vec<Hit<'a>>) {
     let s = &collector.settings;
     let mut hits = Vec::new();
     let mut psm_index: i64 = 0;
-    for (spec_idx, queue) in queues.iter().enumerate() {
-        if queue.is_empty() {
-            continue;
-        }
-        let spec = &spectra[spec_idx];
-        let sorted = queue.clone().into_rank_sorted_vec();
-        let rows = output::emitted_rows(spec, &sorted, candidates);
-        let multi_row = rows.len() > 1;
-        let mut best_rank: Vec<(Option<u64>, u32)> = Vec::new();
-        for (rank, psm) in &rows {
-            let key = psm.precursor_mz_override.map(f64::to_bits);
-            match best_rank.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, r)) => *r = (*r).min(*rank),
-                None => best_rank.push((key, *rank)),
-            }
-        }
-        let scan = spec.scan.unwrap_or(0);
-        let spec_id_base = if spec.title.is_empty() {
-            format!("scan={scan}")
-        } else {
-            spec.title.clone()
-        };
-        for (hit, (rank, psm)) in rows.into_iter().enumerate() {
-            let psm = psm.into_owned();
-            let cand = &candidates[psm.primary_candidate_idx() as usize];
-            let spec_id = output::format_spec_id(&spec_id_base, scan, rank, hit, multi_row);
-            let rescored = rescore.map(|m| m.get(&spec_id));
-            if omitted.is_some_and(|o| o.contains(&spec_id))
-                || (!cand.is_decoy && matches!(rescored, Some(None)))
-            {
-                continue;
-            }
-            let this_index = psm_index;
-            psm_index += 1;
-            let key = psm.precursor_mz_override.map(f64::to_bits);
-            if !best_rank.iter().any(|&(k, r)| k == key && r == rank) {
-                continue;
-            }
-            if cand.is_decoy && !include_decoys {
-                continue;
-            }
-            let (q_value, pep) = match rescored {
-                Some(Some(r)) => {
-                    let cutoff = cutoffs.map_or(s.psm_fdr, |c| c.or(&spec_id, s.psm_fdr));
-                    if r.q_value > cutoff || s.pep_cap.is_some_and(|c| r.pep > c) {
-                        continue;
-                    }
-                    (Some(r.q_value), Some(r.pep))
-                }
-                Some(None) => continue,
-                None => (None, None),
-            };
-            let Some(run_idx) = collector.run_of(spec_idx) else {
-                continue;
-            };
-            hits.push(Hit {
-                spec_idx,
-                co_isolated: key.is_some(),
-                run_idx,
-                psm,
-                cand,
-                spec_id,
-                q_value,
-                pep,
-                psm_index: this_index,
-            });
+    if queue.is_empty() {
+        return (0, hits);
+    }
+    let sorted = queue.clone().into_rank_sorted_vec();
+    let rows = output::emitted_rows(spec, &sorted, candidates);
+    let multi_row = rows.len() > 1;
+    let mut best_rank: Vec<(Option<u64>, u32)> = Vec::new();
+    for (rank, psm) in &rows {
+        let key = psm.precursor_mz_override.map(f64::to_bits);
+        match best_rank.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, r)) => *r = (*r).min(*rank),
+            None => best_rank.push((key, *rank)),
         }
     }
-    hits
+    let scan = spec.scan.unwrap_or(0);
+    let spec_id_base = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    for (hit, (rank, psm)) in rows.into_iter().enumerate() {
+        let psm = psm.into_owned();
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
+        let spec_id = output::format_spec_id(&spec_id_base, scan, rank, hit, multi_row);
+        let rescored = rescore.map(|m| m.get(&spec_id));
+        if omitted.is_some_and(|o| o.contains(&spec_id))
+            || (!cand.is_decoy && matches!(rescored, Some(None)))
+        {
+            continue;
+        }
+        let this_index = psm_index;
+        psm_index += 1;
+        let key = psm.precursor_mz_override.map(f64::to_bits);
+        if !best_rank.iter().any(|&(k, r)| k == key && r == rank) {
+            continue;
+        }
+        if cand.is_decoy && !include_decoys {
+            continue;
+        }
+        let (q_value, pep) = match rescored {
+            Some(Some(r)) => {
+                let cutoff = cutoffs.map_or(s.psm_fdr, |c| c.or(&spec_id, s.psm_fdr));
+                if r.q_value > cutoff || s.pep_cap.is_some_and(|c| r.pep > c) {
+                    continue;
+                }
+                (Some(r.q_value), Some(r.pep))
+            }
+            Some(None) => continue,
+            None => (None, None),
+        };
+        let Some(run_idx) = collector.run_of(spec_idx) else {
+            continue;
+        };
+        hits.push(Hit {
+            spec_idx,
+            co_isolated: key.is_some(),
+            run_idx,
+            psm,
+            cand,
+            spec_id,
+            q_value,
+            pep,
+            psm_index: this_index,
+        });
+    }
+    (psm_index, hits)
 }
 
 pub(super) fn peptidoform_of(cand: &Candidate) -> String {

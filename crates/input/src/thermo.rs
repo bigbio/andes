@@ -3,7 +3,7 @@ use std::path::Path;
 use std::collections::HashMap;
 
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
-use thermorawfilereader::{RawFileReader, RawSpectrum};
+use thermorawfilereader::{RawFileReader, RawSpectrum, TrailerValues};
 
 use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType};
@@ -31,6 +31,12 @@ fn runtime_hint(source: &std::io::Error) -> &'static str {
 
 pub struct ThermoRawReader {
     handle: RawFileReader,
+    path: std::path::PathBuf,
+    /// Further readers of the same file: a batch of scans is read and converted by `handle` and
+    /// these, each over its own contiguous part of the batch.
+    helpers: Vec<RawFileReader>,
+    /// Scans read and converted ahead, in scan order, not yet taken.
+    fetched: std::collections::VecDeque<FetchedScan>,
     next: usize,
     len: usize,
     ms_level_filter: Option<u8>,
@@ -41,6 +47,147 @@ pub struct ThermoRawReader {
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
     capture_noise: bool,
+}
+
+/// What a read converts from each scan besides the MS2 spectra.
+#[derive(Clone, Copy)]
+struct Capture {
+    /// The MS1 scans, for the run MS1 or (`linked`) the MS1 link of the MS2 scans.
+    ms1: bool,
+    product: bool,
+    context: bool,
+    noise: bool,
+    level: Option<u8>,
+}
+
+/// One scan, read and converted: what it gives the reader's outputs.
+struct FetchedScan {
+    level: u8,
+    faims_cv: Option<f32>,
+    ms1: Option<Ms1Scan>,
+    product: Option<ProductScan>,
+    ms2: Option<(Spectrum, Option<ScanContext>)>,
+}
+
+/// Scans each reader of a parallel read converts per batch.
+const FETCH_SCANS_PER_READER: usize = 2048;
+
+fn fetch_scan(handle: &RawFileReader, index: usize, cap: Capture) -> Option<FetchedScan> {
+    let raw = handle.get(index)?;
+    let level = raw.ms_level();
+    let faims = faims_cv(&raw);
+    let mut trailers = ScanTrailers::of(handle, index);
+    let ms1 = (level == 1 && cap.ms1).then(|| Ms1Scan {
+        rt: raw.time() * 60.0,
+        peaks: extract_peaks(&raw),
+        id: raw.native_id(),
+        faims_cv: faims,
+        mobility: Vec::new(),
+    });
+    if level >= 3 && cap.product {
+        return Some(FetchedScan {
+            level,
+            faims_cv: faims,
+            ms1,
+            product: Some(product_scan(&mut trailers, &raw, cap.noise)),
+            ms2: None,
+        });
+    }
+    let ms2 = cap
+        .level
+        .is_none_or(|want| want == level)
+        .then(|| ThermoRawReader::convert(&raw, &mut trailers))
+        .flatten()
+        .map(|spec| {
+            let context = cap
+                .context
+                .then(|| scan_context(&mut trailers, &raw, &spec, cap.noise));
+            (spec, context)
+        });
+    Some(FetchedScan {
+        level,
+        faims_cv: faims,
+        ms1,
+        product: None,
+        ms2,
+    })
+}
+
+/// The trailer values of one scan, read from the file at most once.
+struct ScanTrailers<'h> {
+    handle: &'h RawFileReader,
+    index: usize,
+    values: Option<Option<TrailerValues>>,
+}
+
+impl<'h> ScanTrailers<'h> {
+    fn of(handle: &'h RawFileReader, index: usize) -> Self {
+        Self {
+            handle,
+            index,
+            values: None,
+        }
+    }
+
+    fn values(&mut self) -> Option<&TrailerValues> {
+        self.values
+            .get_or_insert_with(|| self.handle.get_raw_trailers_for(self.index))
+            .as_ref()
+    }
+
+    fn master_scan(&mut self) -> Option<usize> {
+        master_scan_in(self.values()?)
+    }
+
+    fn isolation_width(&mut self, ms_level: u8) -> Option<f64> {
+        if ms_level < 2 {
+            return None;
+        }
+        isolation_width_in(self.values()?, ms_level)
+    }
+}
+
+fn scan_context(
+    trailers: &mut ScanTrailers<'_>,
+    raw: &RawSpectrum,
+    spec: &Spectrum,
+    noise: bool,
+) -> ScanContext {
+    ScanContext {
+        id: spec.title.clone(),
+        parent_id: trailers
+            .master_scan()
+            .map(|scan| with_scan_number(&spec.title, scan)),
+        scan_window: scan_window(raw),
+        faims_cv: faims_cv(raw),
+        noise: noise
+            .then(|| reporter_noise(trailers.handle, trailers.index))
+            .flatten(),
+        ion_mobility: None,
+    }
+}
+
+/// The MS3+ scan at `index`, linked to its parent scan by the master scan number.
+fn product_scan(trailers: &mut ScanTrailers<'_>, raw: &RawSpectrum, noise: bool) -> ProductScan {
+    let (handle, index) = (trailers.handle, trailers.index);
+    let parent_id = trailers
+        .master_scan()
+        .map(|scan| with_scan_number(&raw.native_id(), scan));
+    ProductScan {
+        id: raw.native_id(),
+        scan: Some(raw.index() as i32 + 1),
+        rt_seconds: Some(raw.time() * 60.0),
+        ms_level: raw.ms_level(),
+        parent_id,
+        precursor_mz: raw
+            .filter_string()
+            .and_then(last_reaction_mz)
+            .or_else(|| raw.precursor().map(|p| p.mz()))
+            .unwrap_or(0.0),
+        scan_window: scan_window(raw),
+        peaks: extract_peaks(raw),
+        noise: noise.then(|| reporter_noise(handle, index)).flatten(),
+    }
 }
 
 impl ThermoRawReader {
@@ -54,6 +201,9 @@ impl ThermoRawReader {
         let len = handle.len();
         Ok(Self {
             handle,
+            path: p.to_path_buf(),
+            helpers: Vec::new(),
+            fetched: std::collections::VecDeque::new(),
             next: 0,
             len,
             ms_level_filter: Some(2),
@@ -65,6 +215,29 @@ impl ThermoRawReader {
             scan_contexts: Vec::new(),
             capture_noise: false,
         })
+    }
+
+    /// Reads and converts the scans with `readers` readers of the file at once (one per
+    /// thread), each over its own part of a batch; the scans come out in scan order as with
+    /// one reader. A further reader that fails to open leaves the read with fewer readers.
+    pub fn with_parallel_reads(mut self, readers: usize) -> Self {
+        for _ in 1..readers {
+            match RawFileReader::open(&self.path) {
+                Ok(mut h) => {
+                    h.set_centroid_spectra(true);
+                    self.helpers.push(h);
+                }
+                Err(e) => {
+                    log::debug!(
+                        "{}: a further reader did not open ({e}); reading with {}",
+                        self.path.display(),
+                        1 + self.helpers.len()
+                    );
+                    break;
+                }
+            }
+        }
+        self
     }
 
     pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
@@ -87,28 +260,6 @@ impl ThermoRawReader {
         self
     }
 
-    fn record_scan_context(&mut self, i: usize, raw: &RawSpectrum, spec: &Spectrum) {
-        if !self.capture_scan_context {
-            return;
-        }
-        self.scan_contexts.push(ScanContext {
-            id: spec.title.clone(),
-            parent_id: master_scan_number(&self.handle, i)
-                .map(|scan| with_scan_number(&spec.title, scan)),
-            scan_window: scan_window(raw),
-            faims_cv: faims_cv(raw),
-            noise: self.noise_of(i),
-            ion_mobility: None,
-        });
-    }
-
-    fn noise_of(&self, index: usize) -> Option<NoiseProfile> {
-        if !self.capture_noise {
-            return None;
-        }
-        reporter_noise(&self.handle, index)
-    }
-
     pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
         std::mem::take(&mut self.scan_contexts)
     }
@@ -129,6 +280,66 @@ impl ThermoRawReader {
     pub fn with_ms_level(mut self, level: Option<u8>) -> Self {
         self.ms_level_filter = level;
         self
+    }
+
+    fn capture(&self, linked: bool) -> Capture {
+        Capture {
+            ms1: linked || self.capture_run_ms1,
+            product: self.capture_product_scans,
+            context: self.capture_scan_context,
+            noise: self.capture_noise,
+            level: if linked { Some(2) } else { self.ms_level_filter },
+        }
+    }
+
+    /// Reads and converts the next batch of scans into `fetched`: one scan with one reader,
+    /// else a batch split over the readers, each converting a contiguous part on its own thread.
+    fn fetch_batch(&mut self, cap: Capture) {
+        let lo = self.next;
+        if self.helpers.is_empty() {
+            self.next += 1;
+            self.fetched.extend(fetch_scan(&self.handle, lo, cap));
+            return;
+        }
+        let readers: Vec<&RawFileReader> =
+            std::iter::once(&self.handle).chain(&self.helpers).collect();
+        let hi = (lo + FETCH_SCANS_PER_READER * readers.len()).min(self.len);
+        self.next = hi;
+        let per = (hi - lo).div_ceil(readers.len());
+        let parts: Vec<Vec<FetchedScan>> = std::thread::scope(|s| {
+            let workers: Vec<_> = readers
+                .iter()
+                .enumerate()
+                .map(|(j, &reader)| {
+                    let (a, b) = ((lo + j * per).min(hi), (lo + (j + 1) * per).min(hi));
+                    s.spawn(move || {
+                        (a..b)
+                            .filter_map(|i| fetch_scan(reader, i, cap))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        });
+        for part in parts {
+            self.fetched.extend(part);
+        }
+    }
+
+    /// The next scan read and converted, in scan order; `None` after the last scan.
+    fn next_fetched(&mut self, cap: Capture) -> Option<FetchedScan> {
+        loop {
+            if let Some(f) = self.fetched.pop_front() {
+                return Some(f);
+            }
+            if self.next >= self.len {
+                return None;
+            }
+            self.fetch_batch(cap);
+        }
     }
 
     pub fn sample_level(&mut self, level: u8, n: usize) -> Vec<Spectrum> {
@@ -171,7 +382,7 @@ impl ThermoRawReader {
         self.len == 0
     }
 
-    fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
+    fn convert(raw: &RawSpectrum, trailers: &mut ScanTrailers<'_>) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         let p = raw.precursor()?;
@@ -188,7 +399,7 @@ impl ThermoRawReader {
         let (lo, up) = full_width_isolation_bounds(
             lo,
             w.upper(),
-            isolation_width_trailer(handle, raw.index(), raw.ms_level()),
+            trailers.isolation_width(raw.ms_level()),
         );
         let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
             if tg > 0.0 && up > lo {
@@ -213,27 +424,6 @@ impl ThermoRawReader {
         })
     }
 
-    /// The MS3+ scan at `index`, linked to its parent scan by the master scan number.
-    fn product_scan(&self, index: usize, raw: &RawSpectrum) -> ProductScan {
-        let parent_id = master_scan_number(&self.handle, index)
-            .map(|scan| with_scan_number(&raw.native_id(), scan));
-        ProductScan {
-            id: raw.native_id(),
-            scan: Some(raw.index() as i32 + 1),
-            rt_seconds: Some(raw.time() * 60.0),
-            ms_level: raw.ms_level(),
-            parent_id,
-            precursor_mz: raw
-                .filter_string()
-                .and_then(last_reaction_mz)
-                .or_else(|| raw.precursor().map(|p| p.mz()))
-                .unwrap_or(0.0),
-            scan_window: scan_window(raw),
-            peaks: extract_peaks(raw),
-            noise: self.noise_of(index),
-        }
-    }
-
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -249,51 +439,42 @@ impl ThermoRawReader {
         let mut tracker = crate::ms1::Ms1Tracker::default();
         let mut emitted_ms2 = 0usize;
         let mut skipped_higher_ms = 0usize;
+        let capture = self.capture(true);
 
-        for i in 0..self.len {
+        loop {
             let capped = cap > 0 && emitted_ms2 >= cap;
             if capped && !self.capture_product_scans {
                 break;
             }
-            let raw = match self.handle.get(i) {
-                Some(raw) => raw,
-                None => continue,
+            let Some(scan) = self.next_fetched(capture) else {
+                break;
             };
-            if capped && raw.ms_level() < 3 {
+            if capped && scan.level < 3 {
                 break;
             }
-            match raw.ms_level() {
+            match scan.level {
                 1 => {
+                    let Some(ms1) = scan.ms1 else { continue };
                     let idx = ms1_peaks.len();
-                    let peaks = extract_peaks(&raw);
                     if self.capture_run_ms1 {
-                        self.run_ms1.push(Ms1Scan {
-                            rt: raw.time() * 60.0,
-                            peaks: peaks.clone(),
-                            id: raw.native_id(),
-                            faims_cv: faims_cv(&raw),
-                            mobility: Vec::new(),
-                        });
-                    }
-                    ms1_peaks.push(peaks);
-                    tracker.push(idx, faims_cv(&raw));
-                }
-                level if level >= 3 => {
-                    if self.capture_product_scans {
-                        let p = self.product_scan(i, &raw);
-                        self.product_scans.push(p);
+                        ms1_peaks.push(ms1.peaks.clone());
+                        self.run_ms1.push(ms1);
                     } else {
-                        skipped_higher_ms += 1;
+                        ms1_peaks.push(ms1.peaks);
                     }
+                    tracker.push(idx, scan.faims_cv);
                 }
+                level if level >= 3 => match scan.product {
+                    Some(p) => self.product_scans.push(p),
+                    None => skipped_higher_ms += 1,
+                },
                 2 => {
-                    let spec = match Self::convert(&raw, &self.handle) {
-                        Some(spec) => spec,
-                        None => continue,
+                    let Some((spec, context)) = scan.ms2 else {
+                        continue;
                     };
-                    self.record_scan_context(i, &raw, &spec);
+                    self.scan_contexts.extend(context);
                     chunk.push(spec);
-                    ms2_to_ms1.push(tracker.link(faims_cv(&raw)));
+                    ms2_to_ms1.push(tracker.link(scan.faims_cv));
                     emitted_ms2 += 1;
                     if chunk.len() >= chunk_size {
                         // Carry the MS1 scans later MS2 scans can still link to.
@@ -334,8 +515,7 @@ impl ThermoRawReader {
     }
 }
 
-fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
-    let trailers = handle.get_raw_trailers_for(index)?;
+fn master_scan_in(trailers: &TrailerValues) -> Option<usize> {
     let value = trailers
         .iter()
         .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
@@ -343,11 +523,11 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
 }
 
 fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
-    if ms_level < 2 {
-        return None;
-    }
+    ScanTrailers::of(handle, index).isolation_width(ms_level)
+}
+
+fn isolation_width_in(trailers: &TrailerValues, ms_level: u8) -> Option<f64> {
     let label = format!("MS{ms_level} Isolation Width");
-    let trailers = handle.get_raw_trailers_for(index)?;
     let value = trailers.iter().find_map(|t| {
         (t.label.trim().trim_end_matches(':').trim() == label).then(|| t.value.trim().to_string())
     })?;
@@ -621,39 +801,18 @@ impl Iterator for ThermoRawReader {
     type Item = Result<Spectrum, ThermoParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.next < self.len {
-            let i = self.next;
-            self.next += 1;
-            let raw = match self.handle.get(i) {
-                Some(raw) => raw,
-                None => continue,
-            };
-            let level = raw.ms_level();
-            if level == 1 && self.capture_run_ms1 {
-                self.run_ms1.push(Ms1Scan {
-                    rt: raw.time() * 60.0,
-                    peaks: extract_peaks(&raw),
-                    id: raw.native_id(),
-                    faims_cv: faims_cv(&raw),
-                    mobility: Vec::new(),
-                });
+        let capture = self.capture(false);
+        while let Some(scan) = self.next_fetched(capture) {
+            if let Some(ms1) = scan.ms1 {
+                self.run_ms1.push(ms1);
             }
-            if level >= 3 && self.capture_product_scans {
-                let p = self.product_scan(i, &raw);
+            if let Some(p) = scan.product {
                 self.product_scans.push(p);
                 continue;
             }
-            if let Some(want) = self.ms_level_filter {
-                if level != want {
-                    continue;
-                }
-            }
-            match Self::convert(&raw, &self.handle) {
-                Some(spec) => {
-                    self.record_scan_context(i, &raw, &spec);
-                    return Some(Ok(spec));
-                }
-                None => continue,
+            if let Some((spec, context)) = scan.ms2 {
+                self.scan_contexts.extend(context);
+                return Some(Ok(spec));
             }
         }
         None

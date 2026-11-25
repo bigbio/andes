@@ -205,22 +205,31 @@ impl QuantCollector {
                 title_prefix,
             )?;
         }
-        let ms1 = ms1
-            .as_ref()
-            .map(|index| Ms1Cache::store(index, &stem, &self.settings.scratch_dir))
-            .transpose()
-            .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
-        if let Some(dir) = &self.settings.quant_dir {
-            let contexts_cv = |id: &str| contexts.get(id).and_then(|c| c.faims_cv);
-            write_run_ms2(
-                dir,
-                &stem,
-                title_prefix,
-                ms2,
-                self.settings.fragment_tol,
-                contexts_cv,
-            )?;
-        }
+        let settings = &self.settings;
+        let (ms1, ms2_written) = rayon::join(
+            || {
+                ms1.as_ref()
+                    .map(|index| Ms1Cache::store(index, &stem, &settings.scratch_dir))
+                    .transpose()
+                    .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))
+            },
+            || match &settings.quant_dir {
+                Some(dir) => {
+                    let contexts_cv = |id: &str| contexts.get(id).and_then(|c| c.faims_cv);
+                    write_run_ms2(
+                        dir,
+                        &stem,
+                        title_prefix,
+                        ms2,
+                        settings.fragment_tol,
+                        contexts_cv,
+                    )
+                }
+                None => Ok(()),
+            },
+        );
+        let ms1 = ms1?;
+        ms2_written?;
         self.runs.push(RunCapture {
             stem,
             title_prefix: title_prefix.map(str::to_string),

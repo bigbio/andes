@@ -420,6 +420,31 @@ fn write_pin_errors_on_duplicate_spec_id_base() {
 }
 
 #[test]
+fn the_duplicate_spec_id_error_names_the_first_base_seen_twice_in_spectrum_order() {
+    let params = make_params(2..=3);
+    let spectra = vec![
+        make_spectrum("a", 7, 500.0),
+        make_spectrum("b", 7, 600.0),
+        make_spectrum("b", 7, 700.0),
+        make_spectrum("a", 7, 800.0),
+    ];
+    let queues: Vec<TopNQueue> = (0..spectra.len())
+        .map(|_| {
+            let mut q = TopNQueue::new(10);
+            q.push(make_psm(0, 10.0, 10.0, 0, 2));
+            q
+        })
+        .collect();
+    let idx = make_empty_search_index();
+    let cands = vec![make_candidate(0, false)];
+    let mut buf = Vec::<u8>::new();
+    let err = write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx)
+        .expect_err("duplicate SpecId base must error");
+    assert!(err.to_string().contains("'b_7'"), "got: {err}");
+    assert!(buf.is_empty(), "nothing is written before the check");
+}
+
+#[test]
 fn write_pin_is_atomic() {
     let params = make_params(2..=3);
     let idx = make_empty_search_index();

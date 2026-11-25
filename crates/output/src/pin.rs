@@ -251,31 +251,7 @@ pub fn write_pin_to<W: Write>(
     search_index: &SearchIndex,
 ) -> io::Result<()> {
     let (min_charge, max_charge) = pin_charge_columns(params);
-
-    let mut seen_spec_bases: std::collections::HashSet<String> =
-        std::collections::HashSet::with_capacity(queues.len());
-    for (spec_idx, queue) in queues.iter().enumerate() {
-        if queue.is_empty() {
-            continue;
-        }
-        let spec = &spectra[spec_idx];
-        let scan = spec.scan.unwrap_or(0);
-        let base = if spec.title.is_empty() {
-            format!("scan={scan}_{scan}")
-        } else {
-            format!("{}_{scan}", spec.title)
-        };
-        if !seen_spec_bases.insert(base.clone()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "duplicate PIN SpecId base '{base}': two spectra share the same title and \
-                     scan, which would collide on the Percolator q-value/PEP join and silently \
-                     corrupt FDR. Ensure each spectrum has a unique title or scan number."
-                ),
-            ));
-        }
-    }
+    check_unique_spec_bases(spectra, queues)?;
 
     write_header(
         writer,
@@ -287,8 +263,8 @@ pub fn write_pin_to<W: Write>(
     let emitting: Vec<usize> = (0..queues.len())
         .filter(|&i| !queues[i].is_empty())
         .collect();
-    for batch in emitting.chunks(PIN_FORMAT_BATCH_SPECTRA) {
-        let buffers: Vec<io::Result<Vec<u8>>> = batch
+    let format_batch = |batch: &[usize]| -> Vec<io::Result<Vec<u8>>> {
+        batch
             .par_iter()
             .map(|&spec_idx| {
                 let mut buf = Vec::with_capacity(4096);
@@ -304,12 +280,67 @@ pub fn write_pin_to<W: Write>(
                 )?;
                 Ok(buf)
             })
-            .collect();
-        for buf in buffers {
-            writer.write_all(&buf?)?;
-        }
+            .collect()
+    };
+    let format_batch = &format_batch;
+    let mut batches = emitting.chunks(PIN_FORMAT_BATCH_SPECTRA);
+    let mut ready = batches.next().map(format_batch);
+    while let Some(current) = ready.take() {
+        let next = batches.next();
+        let mut formatted = None;
+        let slot = &mut formatted;
+        rayon::in_place_scope(|s| {
+            if let Some(batch) = next {
+                s.spawn(move |_| *slot = Some(format_batch(batch)));
+            }
+            current
+                .into_iter()
+                .try_for_each(|buf| writer.write_all(&buf?))
+        })?;
+        ready = formatted;
     }
     Ok(())
+}
+
+/// The SpecId base of a spectrum, `<title>_<scan>` (or `scan=<scan>_<scan>` without a title).
+fn spec_base(spec: &Spectrum) -> String {
+    let scan = spec.scan.unwrap_or(0);
+    if spec.title.is_empty() {
+        format!("scan={scan}_{scan}")
+    } else {
+        format!("{}_{scan}", spec.title)
+    }
+}
+
+/// Fails when two emitting spectra share a SpecId base, naming the base of the first spectrum (in
+/// spectrum order) whose base an earlier spectrum already has.
+fn check_unique_spec_bases(spectra: &[Spectrum], queues: &[TopNQueue]) -> io::Result<()> {
+    let mut bases: Vec<(String, usize)> = queues
+        .par_iter()
+        .enumerate()
+        .filter(|(_, q)| !q.is_empty())
+        .map(|(spec_idx, _)| (spec_base(&spectra[spec_idx]), spec_idx))
+        .collect();
+    bases.par_sort_unstable();
+    let first_repeat = bases
+        .par_windows(2)
+        .filter(|w| w[0].0 == w[1].0)
+        .map(|w| w[1].1)
+        .min();
+    match first_repeat {
+        None => Ok(()),
+        Some(spec_idx) => {
+            let base = spec_base(&spectra[spec_idx]);
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "duplicate PIN SpecId base '{base}': two spectra share the same title and \
+                     scan, which would collide on the Percolator q-value/PEP join and silently \
+                     corrupt FDR. Ensure each spectrum has a unique title or scan number."
+                ),
+            ))
+        }
+    }
 }
 
 fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {

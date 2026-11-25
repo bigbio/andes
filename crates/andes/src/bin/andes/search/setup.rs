@@ -248,6 +248,13 @@ pub(super) fn tmt_level_for(
     }
 }
 
+/// Whether the search captures MS3 scans for a cleavable cross-linker.
+pub(super) fn xl_ms3_capture(cli: &Cli) -> bool {
+    cli.xl
+        .as_ref()
+        .is_some_and(|x| x.0.iter().any(|l| l.cleavage.is_some()))
+}
+
 /// The precursor calibration prepass: a calibration per file (mass shift, tolerance) learned on a
 /// pass over each file, with the first file's applied to `params`; empty when calibration is off.
 pub(super) fn calibration_prepass(

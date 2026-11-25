@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use input::{MgfReader, Ms1Link, MzMLReader};
+use input::{Ms1Link, MzMLReader};
 use model::Spectrum;
 use search::fragments::index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
 use search::precursor::monoisotopic::{MonoCorrection, MonoParams};
@@ -13,6 +13,7 @@ use search::{PreparedSearch, SearchParams, TopNQueue};
 
 use super::calibrate::{calibrate_dia_rt, recalibrate_dia_ms1, FragmentErrorMeasurer};
 use super::outputs::xl_precursor_snap;
+use super::stream::{spawn_streamed, StreamSettings, StreamedRead, STREAM_CHANNEL_CHUNKS};
 use super::{Ms1Peaks, CHUNK_SIZE};
 use crate::cli::Cli;
 use crate::memory::available_memory_budget;
@@ -20,9 +21,13 @@ use crate::monoisotopic::{correct_chunk, MonoDump, MonoStats};
 use crate::quant::run::{QuantCollector, RunScans};
 use crate::report_search_progress;
 use crate::spectra::{
-    add_mzml_skipped, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
-    require_spectra, send_chunks, send_linked_chunks, title_prefix_for, ParseStats,
+    input_format_flags, merge_parse_stats, prefix_spectrum_titles, require_spectra,
+    send_linked_chunks, title_prefix_for, ParseStats,
 };
+
+/// The most readers a Thermo .raw read uses at once (each on its own thread).
+#[cfg(feature = "thermo")]
+pub(super) const THERMO_READERS_MAX: usize = 4;
 
 fn index_chunk_span_da(flag: Option<f64>) -> f64 {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -127,6 +132,8 @@ pub(super) struct FileOutputs {
     pub(super) mono_table: Vec<Option<MonoCorrection>>,
     pub(super) mono_stats: MonoStats,
     pub(super) mono_dump: Option<MonoDump>,
+    /// The first file's streamed read, started before the candidate index was built.
+    pub(super) prefetched: Option<StreamedRead>,
 }
 
 impl FileOutputs {
@@ -144,6 +151,7 @@ impl FileOutputs {
             mono_table: Vec::new(),
             mono_stats: MonoStats::default(),
             mono_dump,
+            prefetched: None,
         }
     }
 }
@@ -161,7 +169,6 @@ pub(super) fn search_file<'a>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let FileInputs {
         cli,
-        params,
         file_params,
         spectrum_paths,
         bench_cap,
@@ -169,7 +176,6 @@ pub(super) fn search_file<'a>(
         chimeric_active,
         mono_active,
         ms1_input,
-        standalone,
         xl_ms3_capture,
         ..
     } = *file_inputs;
@@ -203,8 +209,7 @@ pub(super) fn search_file<'a>(
     let file_ms1 = file_is_mzml || file_is_raw || file_is_d;
     let file_snap = xl_precursor_snap(cli.xl.is_some(), cli.ms_level, file_is_mzml, file_is_raw);
     outputs.xl_snap_files += usize::from(file_snap);
-    // This file reads its MS1 scans with its MS2 scans.
-    let file_linked = (ms1_input && file_ms1) || file_snap;
+    let file_linked = file_reads_linked(cli, ms1_input, input_path);
     if (chimeric_active || mono_active) && !file_ms1 {
         return Err(format!(
             "{} only supports mzML/.raw/.d inputs, got {}",
@@ -224,13 +229,14 @@ pub(super) fn search_file<'a>(
         input_path,
         remaining_cap,
         file_is_mzml,
-        file_is_raw,
         file_is_d,
         title_prefix: &title_prefix,
         file_snap,
     };
-    let file_stats = if file_linked {
-        search_linked(
+    let route = read_route(file_inputs, quant.as_ref(), &locals, file_linked);
+    let prefetched = outputs.prefetched.take().filter(|_| file_idx == 0);
+    let file_stats = match route {
+        ReadRoute::Linked => search_linked(
             file_inputs,
             outputs,
             prepared,
@@ -238,27 +244,39 @@ pub(super) fn search_file<'a>(
             quant,
             &locals,
             &mut run_scans,
-        )?
-    } else if params.fragment_index_top_k > 0
-        && !standalone
-        && !cli.dia
-        && file_is_mzml
-        && !is_gzip_path(input_path)
-        && !quant
-            .as_ref()
-            .is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3())
-    {
-        search_indexed(file_inputs, outputs, prepared, measurer, quant, &locals)?
-    } else {
-        search_enumerated(
-            file_inputs,
-            outputs,
-            prepared,
-            measurer,
-            quant,
-            &locals,
-            &mut run_scans,
-        )?
+        )?,
+        ReadRoute::Indexed => {
+            search_indexed(file_inputs, outputs, prepared, measurer, quant, &locals)?
+        }
+        ReadRoute::IndexedMs1 | ReadRoute::Enumerated => {
+            let read_ms1 = route == ReadRoute::IndexedMs1;
+            let indexed = if read_ms1 {
+                search_indexed_ms1(
+                    file_inputs,
+                    outputs,
+                    prepared,
+                    measurer,
+                    quant,
+                    &locals,
+                    &mut run_scans,
+                )?
+            } else {
+                None
+            };
+            match indexed {
+                Some(stats) => stats,
+                None => search_enumerated(
+                    file_inputs,
+                    outputs,
+                    prepared,
+                    measurer,
+                    quant,
+                    &locals,
+                    &mut run_scans,
+                    prefetched,
+                )?,
+            }
+        }
     };
     let FileOutputs {
         all_spectra,
@@ -317,13 +335,20 @@ pub(super) fn search_file<'a>(
     Ok(())
 }
 
+/// Whether a file reads its MS1 scans with its MS2 scans: MS1 input (chimeric, monoisotopic
+/// correction) of an mzML/.raw/.d file, or the cross-link precursor snap.
+pub(super) fn file_reads_linked(cli: &Cli, ms1_input: bool, path: &Path) -> bool {
+    let (is_mzml, is_raw, is_d, _) = input_format_flags(path);
+    (ms1_input && (is_mzml || is_raw || is_d))
+        || xl_precursor_snap(cli.xl.is_some(), cli.ms_level, is_mzml, is_raw)
+}
+
 /// The per-file values the read-and-search helpers of `search_file` share.
 #[derive(Clone, Copy)]
 struct FileLocals<'l> {
     input_path: &'l Path,
     remaining_cap: usize,
     file_is_mzml: bool,
-    file_is_raw: bool,
     file_is_d: bool,
     title_prefix: &'l Option<String>,
     file_snap: bool,
@@ -377,6 +402,7 @@ fn parse_linked(
             threads,
             capture_context,
             capture_noise,
+            false,
         )
         .map_err(|e| format!("read mzML: {e}"))?
     } else {
@@ -445,6 +471,7 @@ fn parse_linked(
         {
             let mut reader = input::ThermoRawReader::open(&spectrum_path)
                 .map_err(|e| format!("open Thermo .raw: {e}"))?
+                .with_parallel_reads(threads.clamp(1, THERMO_READERS_MAX))
                 .with_run_ms1_capture(capture_ms1)
                 .with_product_scan_capture(capture_product)
                 .with_scan_context_capture(capture_context)
@@ -757,7 +784,124 @@ fn search_indexed<'a>(
     })
 }
 
+/// How a file is read and searched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReadRoute {
+    /// MS1-linked chunks on a parser thread (`search_linked`).
+    Linked,
+    /// An uncompressed mzML read in parallel pieces, MS2 only (`search_indexed`).
+    Indexed,
+    /// An uncompressed mzML read in parallel pieces with its MS1 (and MS3) scans, for
+    /// quantification (`search_indexed_ms1`).
+    IndexedMs1,
+    /// Streamed on a parser thread (`search_enumerated`).
+    Enumerated,
+}
+
+fn read_route(
+    file_inputs: &FileInputs<'_>,
+    quant: Option<&QuantCollector>,
+    locals: &FileLocals<'_>,
+    file_linked: bool,
+) -> ReadRoute {
+    let FileInputs {
+        cli,
+        params,
+        standalone,
+        ms_level_u32,
+        xl_ms3_capture,
+        ..
+    } = *file_inputs;
+    let path = locals.input_path;
+    let parallel_mzml = params.fragment_index_top_k > 0
+        && !standalone
+        && !cli.dia
+        && locals.file_is_mzml
+        && !is_gzip_path(path);
+    let needs_scans = quant.is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3());
+    if file_linked {
+        ReadRoute::Linked
+    } else if parallel_mzml && !needs_scans {
+        ReadRoute::Indexed
+    } else if parallel_mzml
+        && ms_level_u32 == 2
+        && locals.remaining_cap == usize::MAX
+        && !xl_ms3_capture
+    {
+        ReadRoute::IndexedMs1
+    } else {
+        ReadRoute::Enumerated
+    }
+}
+
+/// Reads an uncompressed mzML file in parallel pieces with its MS1 (and MS3) scans and searches
+/// it with the fragment-ion index: the spectra, run scans and contexts the streamed reader of
+/// `search_enumerated` gives, in the same order. `None` (nothing read or searched) when a piece
+/// fails to parse; the streamed reader then reads the file and counts its errors.
+fn search_indexed_ms1<'a>(
+    file_inputs: &FileInputs<'a>,
+    outputs: &mut FileOutputs,
+    prepared: &mut PreparedSearch<'a>,
+    measurer: &mut FragmentErrorMeasurer,
+    quant: &mut Option<QuantCollector>,
+    locals: &FileLocals<'_>,
+    run_scans: &mut RunScans,
+) -> Result<Option<ParseStats>, Box<dyn std::error::Error>> {
+    let FileInputs {
+        cli,
+        keep_peaks,
+        t_search_start,
+        ..
+    } = *file_inputs;
+    let FileLocals {
+        input_path,
+        title_prefix,
+        ..
+    } = *locals;
+    let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+    let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
+    let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
+    let Some(read) = input::mzml::read_ms1_linked_parallel(
+        input_path,
+        cli.threads,
+        quant.is_some(),
+        capture_noise,
+        capture_ms3,
+    )
+    .map_err(|e| format!("read mzML {}: {e}", input_path.display()))?
+    else {
+        return Ok(None);
+    };
+    let mut spectra = read.spectra;
+    if let Some(prefix) = title_prefix {
+        prefix_spectrum_titles(&mut spectra, prefix);
+    }
+    *run_scans = RunScans {
+        ms1: if capture_ms1 { read.run_ms1 } else { Vec::new() },
+        ms3: read.product_scans,
+        contexts: read.contexts,
+    };
+    let FileOutputs {
+        all_spectra,
+        all_queues,
+        ..
+    } = outputs;
+    score_mass_ordered(
+        prepared,
+        spectra,
+        index_chunk_span_da(cli.fragment_index_slice_da),
+        all_spectra,
+        all_queues,
+        t_search_start,
+        keep_peaks,
+        quant.as_mut(),
+        measurer,
+    );
+    Ok(Some(ParseStats::default()))
+}
+
 /// Reads a file on a parser thread and searches it chunk by chunk.
+#[allow(clippy::too_many_arguments)]
 fn search_enumerated<'a>(
     file_inputs: &FileInputs<'a>,
     outputs: &mut FileOutputs,
@@ -766,6 +910,7 @@ fn search_enumerated<'a>(
     quant: &mut Option<QuantCollector>,
     locals: &FileLocals<'_>,
     run_scans: &mut RunScans,
+    prefetched: Option<StreamedRead>,
 ) -> Result<ParseStats, Box<dyn std::error::Error>> {
     let FileInputs {
         cli,
@@ -785,101 +930,25 @@ fn search_enumerated<'a>(
     let FileLocals {
         input_path,
         remaining_cap,
-        file_is_mzml,
-        file_is_raw,
         file_is_d,
         title_prefix,
         ..
     } = *locals;
-    let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
-    let spectrum_path = input_path.to_path_buf();
-    let capture_ms1 = cli.dia || quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
-    let capture_ms3 = xl_ms3_capture || quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
-    let capture_context = quant.is_some();
-    let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
-    #[cfg(feature = "timstof")]
-    let dia_mobility_slices = cli.dia_mobility_slices;
-    let parser_handle = thread::spawn(
-        move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
-            if file_is_mzml {
-                let mut reader = MzMLReader::new(
-                    input::open_buf_maybe_gz(&spectrum_path)
-                        .map_err(|e| format!("open mzML: {e}"))?,
-                )
-                .with_ms_level_range(ms_level_u32, ms_level_u32)
-                .with_run_ms1_capture(capture_ms1)
-                .with_product_scan_capture(capture_ms3)
-                .with_scan_context_capture(capture_context)
-                .with_noise_capture(capture_noise);
-                let mut stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
-                add_mzml_skipped(&mut stats, &reader);
-                let scans = RunScans {
-                    ms1: reader.take_run_ms1(),
-                    ms3: reader.take_product_scans(),
-                    contexts: reader.take_scan_contexts(),
-                };
-                Ok((stats, scans))
-            } else if file_is_raw {
-                #[cfg(feature = "thermo")]
-                {
-                    let mut reader = input::ThermoRawReader::open(&spectrum_path)
-                        .map_err(|e| format!("open Thermo .raw: {e}"))?
-                        .with_ms_level(Some(2))
-                        .with_run_ms1_capture(capture_ms1)
-                        .with_product_scan_capture(capture_ms3)
-                        .with_scan_context_capture(capture_context)
-                        .with_noise_capture(capture_noise);
-                    let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
-                    let scans = RunScans {
-                        ms1: reader.take_run_ms1(),
-                        ms3: reader.take_product_scans(),
-                        contexts: reader.take_scan_contexts(),
-                    };
-                    Ok((stats, scans))
-                }
-                #[cfg(not(feature = "thermo"))]
-                {
-                    Err("this andes build has no Thermo .raw support; \
-                         rebuild with `--features thermo` (and run with the \
-                         .NET 8 runtime installed). mzML/MGF inputs work without it."
-                        .into())
-                }
-            } else if file_is_d {
-                #[cfg(feature = "timstof")]
-                {
-                    let mut reader = input::TimsTofReader::open(&spectrum_path)
-                        .map_err(|e| format!("open Bruker .d: {e}"))?
-                        .with_dia_mobility_slices(dia_mobility_slices)
-                        .with_run_ms1_capture(capture_ms1)
-                        .with_ms1_mobility(true)
-                        .with_scan_context_capture(capture_context);
-                    let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
-                    let scans = RunScans {
-                        ms1: reader.take_run_ms1(),
-                        ms3: Vec::new(),
-                        contexts: reader.take_scan_contexts(),
-                    };
-                    Ok((stats, scans))
-                }
-                #[cfg(not(feature = "timstof"))]
-                {
-                    Err("this andes build has no Bruker .d (timsTOF) support; \
-                         rebuild with `--features timstof`. mzML/MGF inputs work \
-                         without it."
-                        .into())
-                }
-            } else {
-                let reader = MgfReader::new(
-                    input::open_buf_maybe_gz(&spectrum_path)
-                        .map_err(|e| format!("open MGF: {e}"))?,
-                );
-                Ok((
-                    send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
-                    RunScans::default(),
-                ))
-            }
-        },
-    );
+    let StreamedRead {
+        handle: parser_handle,
+        rx,
+    } = match prefetched {
+        Some(read) => read,
+        None => spawn_streamed(
+            StreamSettings::of(
+                cli,
+                xl_ms3_capture,
+                quant.as_ref(),
+                (input_path, ms_level_u32, remaining_cap),
+            ),
+            STREAM_CHANNEL_CHUNKS,
+        ),
+    };
 
     let mass_ordered = (params.fragment_index_top_k > 0 || cli.dia) && !standalone;
     let mut pending: Vec<Spectrum> = Vec::new();

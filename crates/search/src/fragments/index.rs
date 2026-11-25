@@ -745,6 +745,7 @@ pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize) {
 
 /// Keeps the `top_k` forms with the highest `key(form, votes)`, the vote intensity breaking
 /// ties and then the lower form id, sorted best first.
+#[cfg(test)]
 pub(crate) fn select_top_k_by(
     sel: &mut Vec<(u32, u16, f32)>,
     top_k: usize,

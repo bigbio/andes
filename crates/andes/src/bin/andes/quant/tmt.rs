@@ -20,6 +20,7 @@
 //! The reporter values are those of the run tables (raw or impurity-corrected, as the runs
 //! were searched); nothing is normalised here.
 
+mod join;
 pub(crate) mod mbr;
 
 use std::collections::HashMap;
@@ -33,15 +34,17 @@ use arrow::record_batch::RecordBatch;
 use output::features::{FeatureGroup, FeatureRecord};
 use output::quantities::{TMT_CORRECTED_KEY, TMT_MBR_KEY, TMT_PLEX_KEY, TMT_UNMIX_KEY};
 use output::tmt::{
-    is_tmt_study_table, RunDesignColumns, StudyGroup, TmtStudyLayout, TmtStudyRow, TmtStudyWriter,
+    is_tmt_study_table, RunDesignColumns, StudyGroup, TmtStudyLayout, TmtStudyRow,
     TMT_STUDY_PEP_KEY, TMT_STUDY_PROTEIN_FDR_KEY, TMT_STUDY_PSM_FDR_KEY, TMT_STUDY_RUNS_KEY,
     TMT_STUDY_SDRF_KEY,
 };
-use output::FeatureParquetWriter;
+use output::{FeatureParquetWriter, GroupAt};
 use quant::isobaric::Plex;
+use rayon::prelude::*;
 
 use crate::quant::{GroupTally, ProteinGroups};
 use crate::sdrf::{ChannelSample, IsobaricDesign};
+use join::StudyJoin;
 
 /// File-name suffix of a per-run isobaric table.
 pub(crate) const TMT_SUFFIX: &str = ".tmt.parquet";
@@ -398,7 +401,16 @@ pub(crate) struct StudyCounts {
     pub spec_prefixes: HashMap<String, String>,
 }
 
-/// Joins one run's rows to the pooled results, applies the gate and links the groups.
+/// What [`study_rows`] looks up for a run row, in parallel: its join key and, when the key is
+/// in the pooled results, its bare sequence, its place among the groups and its group columns.
+struct RowLookup<'g> {
+    key: u128,
+    joined: Option<(String, GroupAt<'g>, Option<StudyGroup>)>,
+}
+
+/// Joins one run's rows to the pooled results, applies the gate and links the groups. Keys and
+/// groups are looked up for all rows in parallel; the checks, counts and the join itself run
+/// in row order.
 pub(crate) fn study_rows(
     rows: Vec<RunRow>,
     pooled: &mut HashMap<u128, Pooled>,
@@ -406,26 +418,60 @@ pub(crate) fn study_rows(
     tally: &mut GroupTally,
     counts: &mut StudyCounts,
 ) -> Result<Vec<TmtStudyRow>, String> {
+    let at_q: &HashMap<u128, Pooled> = pooled;
+    let looked: Vec<RowLookup<'_>> = rows
+        .par_iter()
+        .with_min_len(256)
+        .map(|r| {
+            let key = psm_key(output::spec_id_run(&r.spec_id), &r.spec_id);
+            let joined = at_q.contains_key(&key).then(|| {
+                let (sequence, _) = crate::quant::parse_peptidoform(&r.peptide);
+                let at = groups.inf.group_at(&sequence, groups.max_q);
+                let group = match at {
+                    GroupAt::Group { group, unique } => Some(StudyGroup {
+                        accessions: group.accessions.join(";"),
+                        anchor: group.lead.clone(),
+                        unique,
+                        q_value: group.q_value,
+                    }),
+                    GroupAt::NoGroup | GroupAt::AboveCut => None,
+                };
+                (sequence, at, group)
+            });
+            RowLookup { key, joined }
+        })
+        .collect();
     let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
+    let mut last: Option<(String, String)> = None;
+    for (r, l) in rows.into_iter().zip(looked) {
         counts.run_rows += 1;
         let prefix = output::spec_id_run(&r.spec_id);
-        match counts.spec_prefixes.get(prefix) {
-            Some(run) if *run != r.filename => {
-                return Err(format!(
-                    "runs {run} and {} have SpecIds with the same prefix `{prefix}/` (e.g. {}); \
-                     the pooled results cannot be told apart by run",
-                    r.filename, r.spec_id
-                ));
+        let checked = last
+            .as_ref()
+            .is_some_and(|(p, f)| p == prefix && *f == r.filename);
+        if !checked {
+            match counts.spec_prefixes.get(prefix) {
+                Some(run) if *run != r.filename => {
+                    return Err(format!(
+                        "runs {run} and {} have SpecIds with the same prefix `{prefix}/` (e.g. {}); \
+                         the pooled results cannot be told apart by run",
+                        r.filename, r.spec_id
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    counts
+                        .spec_prefixes
+                        .insert(prefix.to_string(), r.filename.clone());
+                }
             }
-            Some(_) => {}
-            None => {
-                counts
-                    .spec_prefixes
-                    .insert(prefix.to_string(), r.filename.clone());
-            }
+            last = Some((prefix.to_string(), r.filename.clone()));
         }
-        let Some(p) = pooled.get_mut(&psm_key(prefix, &r.spec_id)) else {
+        let Some((sequence, at, group)) = l.joined else {
+            counts.not_at_q += 1;
+            continue;
+        };
+        let Some(p) = pooled.get_mut(&l.key) else {
             counts.not_at_q += 1;
             continue;
         };
@@ -434,21 +480,11 @@ pub(crate) fn study_rows(
         let passed = r.gate_passed;
         counts.kept += 1;
         counts.gate_passed += usize::from(passed);
-        let (sequence, _) = crate::quant::parse_peptidoform(&r.peptide);
-        let group = tally.assign(groups, &sequence).map(|(accessions, g)| {
+        tally.count(&at);
+        if let Some(g) = &group {
             counts.grouped += 1;
             counts.unique += usize::from(g.unique);
-            StudyGroup {
-                accessions: accessions
-                    .iter()
-                    .map(|a| a.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join(";"),
-                anchor: g.anchor,
-                unique: g.unique,
-                q_value: g.global_q,
-            }
-        });
+        }
         out.push(TmtStudyRow {
             filename: r.filename,
             scannr: r.scannr,
@@ -616,7 +652,7 @@ pub(crate) fn finalize(
         inf: &inf,
         max_q: a.proteins.protein_fdr,
     };
-    let (mut pooled, read) = pooled_rows.finish()?;
+    let (pooled, read) = pooled_rows.finish()?;
     let pooled_at_q = pooled.len();
     log::info!(
         target: "tmt",
@@ -629,7 +665,7 @@ pub(crate) fn finalize(
     if let Some(parent) = out_path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let mut features = match &a.output_parquet {
+    let features = match &a.output_parquet {
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let path = dir.join("quantms.feature.parquet");
@@ -637,116 +673,41 @@ pub(crate) fn finalize(
         }
         None => None,
     };
-    let mut writer: Option<(TmtStudyWriter, TmtStudyLayout, String)> = None;
-    let mut tally = GroupTally::default();
-    let mut counts = StudyCounts::default();
-    let mut runs: Vec<String> = Vec::new();
-    let mut no_mz = 0usize;
-    let mut feature_id = 0i64;
-    let mut spent = [std::time::Duration::ZERO; 4];
-    for path in tables {
-        let tic = std::time::Instant::now();
-        let table = read_run_table(path)?;
-        spent[0] += tic.elapsed();
-        match &writer {
-            None => {
-                let meta = study_meta(a, &table, psm_fdr, tables.len(), design.as_ref());
-                let w = TmtStudyWriter::create(&out_path, table.layout, &meta)?;
-                writer = Some((w, table.layout, table.unmix_mode.clone()));
-            }
-            Some((_, layout, mode)) if *layout != table.layout || *mode != table.unmix_mode => {
-                return Err(format!(
-                    "{}: {} (correction {}, unmixing {}) differs from the study's first table \
-                     ({}, correction {}, unmixing {}); search every run with the same --tmt, \
-                     --tmt-correction and --tmt-unmix",
-                    path.display(),
-                    table.layout.plex.name(),
-                    table.layout.corrected,
-                    table.unmix_mode,
-                    layout.plex.name(),
-                    layout.corrected,
-                    mode
-                ));
-            }
-            Some(_) => {}
-        }
-        let (w, layout, _) = writer.as_mut().expect("opened above");
-        let mut by_run: Vec<(String, Vec<RunRow>)> = Vec::new();
-        for r in table.rows {
-            match by_run.iter_mut().find(|(n, _)| *n == r.filename) {
-                Some((_, v)) => v.push(r),
-                None => by_run.push((r.filename.clone(), vec![r])),
-            }
-        }
-        for (run, rows) in by_run {
-            if runs.contains(&run) {
-                return Err(format!(
-                    "{}: run {run} is also in another table of {}",
-                    path.display(),
-                    a.quant_dir.display()
-                ));
-            }
-            let d = run_design(design.as_ref(), &run, layout.plex)?;
-            let before = counts.clone();
-            let tic = std::time::Instant::now();
-            let rows = study_rows(rows, &mut pooled, &groups, &mut tally, &mut counts)?;
-            spent[1] += tic.elapsed();
-            if rows.is_empty() && counts.run_rows > before.run_rows {
-                log::warn!(
-                    "run {run}: none of its {} PSMs is in the pooled results at q <= {psm_fdr}; \
-                     were its PIN rows rescored with the others?",
-                    counts.run_rows - before.run_rows
-                );
-            }
-            log::info!(
-                target: "tmt",
-                "run {run}: {} PSMs with reporters, {} at pooled q <= {psm_fdr}, {} passing the \
-                 gate, {} in a protein group at q <= {}{}",
-                counts.run_rows - before.run_rows,
-                counts.kept - before.kept,
-                counts.gate_passed - before.gate_passed,
-                counts.grouped - before.grouped,
-                a.proteins.protein_fdr,
-                d.plex.map_or(String::new(), |p| format!(
-                    " (plex {p}, fraction {})",
-                    d.fraction.as_deref().unwrap_or("none")
-                ))
-            );
-            let tic = std::time::Instant::now();
-            w.push_run(&rows, &d)?;
-            spent[2] += tic.elapsed();
-            let tic = std::time::Instant::now();
-            if let Some((fw, fpath)) = features.as_mut() {
-                let mut recs = Vec::new();
-                let unit = d.plex.map_or_else(|| run.clone(), |p| format!("plex {p}"));
-                for r in rows.iter().filter(|r| r.group.is_some()) {
-                    feature_id += 1;
-                    match feature_record(r, layout.plex, feature_id) {
-                        Some(f) => {
-                            tally.quantify(&f, &unit)?;
-                            recs.push(f)
-                        }
-                        None => {
-                            feature_id -= 1;
-                            no_mz += 1;
-                        }
-                    }
-                }
-                fw.push(recs)
-                    .map_err(|e| format!("write {}: {e}", fpath.display()))?;
-            }
-            spent[3] += tic.elapsed();
-            runs.push(run);
-        }
-    }
+    let mut join = StudyJoin {
+        a,
+        design: design.as_ref(),
+        groups: &groups,
+        out_path: &out_path,
+        n_tables: tables.len(),
+        pooled,
+        writer: None,
+        features,
+        tally: GroupTally::default(),
+        counts: StudyCounts::default(),
+        runs: Vec::new(),
+        no_mz: 0,
+        feature_id: 0,
+        spent: [std::time::Duration::ZERO; 3],
+    };
+    join.run(tables)?;
     log::debug!(
         target: "tmt",
-        "run loop: read {:.1} s, join {:.1} s, study table {:.1} s, features {:.1} s",
-        spent[0].as_secs_f64(),
-        spent[1].as_secs_f64(),
-        spent[2].as_secs_f64(),
-        spent[3].as_secs_f64()
+        "run loop: join {:.1} s, study table {:.1} s, features {:.1} s",
+        join.spent[0].as_secs_f64(),
+        join.spent[1].as_secs_f64(),
+        join.spent[2].as_secs_f64()
     );
+    let StudyJoin {
+        pooled,
+        writer,
+        features,
+        tally,
+        counts,
+        runs,
+        no_mz,
+        feature_id,
+        ..
+    } = join;
     let (w, _, _) =
         writer.ok_or_else(|| format!("{}: no TMT run tables", a.quant_dir.display()))?;
     let written = w.rows();

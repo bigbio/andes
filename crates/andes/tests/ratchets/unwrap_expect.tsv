@@ -14,7 +14,6 @@ crates/andes/src/bin/andes/quant/finalize/wrong.rs	1
 crates/andes/src/bin/andes/quant/mbr.rs	1
 crates/andes/src/bin/andes/quant/run/labels.rs	2
 crates/andes/src/bin/andes/quant/scores.rs	1
-crates/andes/src/bin/andes/quant/tmt.rs	1
 crates/andes/src/bin/andes/quant/tmt/mbr.rs	4
 crates/andes/src/bin/andes/sdrf.rs	1
 crates/andes/src/bin/andes/search.rs	1

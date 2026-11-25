@@ -82,47 +82,7 @@ pub(crate) fn run_train_from_search(
         )
     })?;
 
-    let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
-    for (i, spectra_path) in args.spectra.iter().enumerate() {
-        log::info!("loading spectra from {} ...", spectra_path.display());
-        let mut spectra = load_spectra_for_train(spectra_path)?;
-        log::info!("loaded {} spectra", spectra.len());
-        if let Some(act) = activation {
-            let n = spectra.len();
-            spectra.retain(|s| s.activation_method.is_none_or(|a| a == act));
-            log::info!(
-                "kept {} of {n} spectra with activation {} (or none recorded)",
-                spectra.len(),
-                act.name()
-            );
-        }
-        let labels = if let Some(labels_path) = args.labels.get(i) {
-            let aa_set = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
-            load_labels_from_tsv(labels_path, &spectra, &aa_set)?
-        } else {
-            let database = args
-                .database
-                .clone()
-                .ok_or("--database is required for initial training (or pass --labels)")?;
-            let search_params = build_train_search_params(&args)?;
-            log::info!("running seed search (train-fdr = {}) ...", args.train_fdr);
-            bootstrap_labels(
-                &spectra,
-                &database,
-                &seed_scorer,
-                &search_params,
-                args.train_fdr,
-                &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
-            )
-            .map_err(|e| format!("bootstrap_labels: {e}"))?
-        };
-        log::info!(
-            "{} confident labels from {}",
-            labels.len(),
-            spectra_path.display()
-        );
-        runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
-    }
+    let runs = load_runs(&args, activation, &seed_scorer)?;
     let n_labels: usize = runs.iter().map(|r| r.labels.len()).sum();
     log::info!("{n_labels} confident labels from {} run(s)", runs.len());
 
@@ -255,28 +215,7 @@ pub(crate) fn run_train_from_search(
         .join(", ");
 
     let store_path = &args.out_store;
-    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-    if store_path.exists() {
-        let store = ModelStore::open(store_path)
-            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-        for id in store.model_ids() {
-            if id == model_id {
-                log::info!("overwriting existing model '{id}' in store");
-                continue;
-            }
-            let p = store
-                .load_param(&id)
-                .map_err(|e| format!("reading model '{id}': {e}"))?;
-            let src_ledgers = store.load_sources(&id).unwrap_or_default();
-            let mut src = Vec::new();
-            for l in src_ledgers {
-                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                    src.push((l, s));
-                }
-            }
-            existing_other.push((id, p, src));
-        }
-    }
+    let existing_other = existing_models(store_path, &model_id)?;
 
     let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
     all_entries.push((model_id.clone(), trained_param.clone(), sources));
@@ -307,7 +246,6 @@ pub(crate) fn run_train_from_search(
 
     Ok(())
 }
-
 pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
 
@@ -508,31 +446,11 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     let model_id = args.model_id.clone();
 
     {
-        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
-        if store_path.exists() {
-            let store = ModelStore::open(store_path)
-                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-            for id in store.model_ids() {
-                if id == model_id {
-                    log::info!("overwriting existing model '{id}' in store");
-                    continue;
-                }
-                let p = store
-                    .load_param(&id)
-                    .map_err(|e| format!("reading model '{id}': {e}"))?;
-                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
-                let src_ledgers = store.load_sources(&id).unwrap_or_default();
-                let mut src = Vec::new();
-                for l in src_ledgers {
-                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                        src.push((l, s));
-                    }
-                }
-                existing_other.push((id, p, src));
-                existing_blobs.push(blob);
-            }
-        }
+        let existing_other = existing_models(store_path, &model_id)?;
+        let existing_blobs: Vec<Option<Vec<u8>>> = existing_other
+            .iter()
+            .map(|(_, p, _)| p.gbdt_peak_model.as_ref().map(|m| m.to_bytes()))
+            .collect();
 
         let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
         all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
@@ -563,6 +481,88 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     );
 
     Ok(())
+}
+
+/// Each `--spectra` run with its confident labels: from its `--labels` TSV, else from a seed
+/// search of `--database` at `--train-fdr`; spectra of another activation are dropped first.
+fn load_runs(
+    args: &TrainFromSearchArgs,
+    activation: Option<ActivationMethod>,
+    seed_scorer: &RankScorer,
+) -> Result<Vec<TrainRun>, Box<dyn std::error::Error>> {
+    let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
+    for (i, spectra_path) in args.spectra.iter().enumerate() {
+        log::info!("loading spectra from {} ...", spectra_path.display());
+        let mut spectra = load_spectra_for_train(spectra_path)?;
+        log::info!("loaded {} spectra", spectra.len());
+        if let Some(act) = activation {
+            let n = spectra.len();
+            spectra.retain(|s| s.activation_method.is_none_or(|a| a == act));
+            log::info!(
+                "kept {} of {n} spectra with activation {} (or none recorded)",
+                spectra.len(),
+                act.name()
+            );
+        }
+        let labels = if let Some(labels_path) = args.labels.get(i) {
+            let aa_set = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
+            load_labels_from_tsv(labels_path, &spectra, &aa_set)?
+        } else {
+            let database = args
+                .database
+                .clone()
+                .ok_or("--database is required for initial training (or pass --labels)")?;
+            let search_params = build_train_search_params(args)?;
+            log::info!("running seed search (train-fdr = {}) ...", args.train_fdr);
+            bootstrap_labels(
+                &spectra,
+                &database,
+                seed_scorer,
+                &search_params,
+                args.train_fdr,
+                &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
+            )
+            .map_err(|e| format!("bootstrap_labels: {e}"))?
+        };
+        log::info!(
+            "{} confident labels from {}",
+            labels.len(),
+            spectra_path.display()
+        );
+        runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
+    }
+    Ok(runs)
+}
+
+/// The models of the store at `store_path` other than `model_id`, with their sources; none when
+/// the store does not exist yet.
+fn existing_models(
+    store_path: &std::path::Path,
+    model_id: &str,
+) -> Result<Vec<ModelEntryOwned>, Box<dyn std::error::Error>> {
+    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+    if store_path.exists() {
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+        for id in store.model_ids() {
+            if id == model_id {
+                log::info!("overwriting existing model '{id}' in store");
+                continue;
+            }
+            let p = store
+                .load_param(&id)
+                .map_err(|e| format!("reading model '{id}': {e}"))?;
+            let src_ledgers = store.load_sources(&id).unwrap_or_default();
+            let mut src = Vec::new();
+            for l in src_ledgers {
+                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                    src.push((l, s));
+                }
+            }
+            existing_other.push((id, p, src));
+        }
+    }
+    Ok(existing_other)
 }
 
 pub(crate) fn run_train_update(

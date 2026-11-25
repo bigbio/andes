@@ -228,6 +228,29 @@ fn ecoli_rescore_path_reports_fdr_levels() {
     let dir = tempfile::tempdir().expect("tempdir");
     run_rescore(1, dir.path());
     let log = dir.path().join("run.statistics.log");
-    let len = std::fs::metadata(&log).expect("statistics log exists").len();
-    assert!(len > 0, "run.statistics.log is empty");
+    let text = std::fs::read_to_string(&log).expect("statistics log exists");
+    assert!(!text.is_empty(), "run.statistics.log is empty");
+    for title in ["Inputs", "Parameters", "Stages", "Counts", "Software", "Methods", "References"]
+    {
+        let header = format!("──────── {title} ────────");
+        assert!(text.contains(&header), "no {header} in run.statistics.log:\n{text}");
+    }
+    let fasta = workspace_root().join("test-fixtures/ecoli.fasta");
+    let sha = search::decoy::file_sha256(&fasta).expect("hash the fixture FASTA");
+    let database = text
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("database"))
+        .nth(1)
+        .unwrap_or_default();
+    assert!(database.contains(&format!("sha256 {sha}")), "database checksum line: {database}");
+    assert!(text.contains("Percolator ["), "no Percolator citation in:\n{text}");
+    let parquet = std::fs::File::open(dir.path().join("run.statistics.parquet"))
+        .expect("run.statistics.parquet exists");
+    let rows: usize = ParquetRecordBatchReaderBuilder::try_new(parquet)
+        .expect("read run.statistics.parquet")
+        .build()
+        .expect("parquet batches")
+        .map(|b| b.expect("read batch").num_rows())
+        .sum();
+    assert!(rows > 100, "run.statistics.parquet has {rows} rows; every parameter is a row");
 }

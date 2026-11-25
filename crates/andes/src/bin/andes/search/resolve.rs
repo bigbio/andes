@@ -52,6 +52,8 @@ pub(super) struct SearchDatabase {
     pub(super) extra_enzymes: Vec<model::enzyme::Enzyme>,
     pub(super) proteases: search::decoy::Proteases,
     pub(super) decoy_strategy: search::decoy::DecoyStrategy,
+    /// The decoy key of the searched decoys; `None` without decoys.
+    pub(super) decoy_key: Option<String>,
 }
 
 /// What the first spectrum file and the flags say about the input.

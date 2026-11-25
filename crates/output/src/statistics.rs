@@ -64,7 +64,8 @@ impl RunStatistics {
         let mut unmodified_target_psms = 0usize;
         let mut ptm: BTreeMap<String, usize> = BTreeMap::new();
 
-        let best: Vec<Option<Option<(bool, BTreeSet<&str>)>>> = queues
+        type Best<'c> = Option<Option<(bool, BTreeSet<&'c str>)>>;
+        let best: Vec<Best<'_>> = queues
             .par_iter()
             .map(|q| {
                 if q.is_empty() {

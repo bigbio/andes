@@ -308,8 +308,9 @@ mod simd {
     use std::arch::x86_64::*;
 
     const BLOCK: usize = 256;
+    const LANES: usize = 8;
     const GROUPS: usize = 4;
-    const STEP: usize = 8 * GROUPS;
+    const STEP: usize = LANES * GROUPS;
 
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn add_all(packed: &PackedTrees, rows: &[&[f32]], out: &mut [f32]) {
@@ -332,7 +333,8 @@ mod simd {
         let mut acc = [0.0f32; BLOCK];
         for (rows, out) in rows.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
             let n = rows.len();
-            let n_pad = n.div_ceil(STEP) * STEP;
+            let n_pad = n.div_ceil(LANES) * LANES;
+            let full = n_pad / STEP * STEP;
             table.clear();
             table.resize(nf * n_pad, f32::NAN);
             for f in 0..nf {
@@ -345,8 +347,11 @@ mod simd {
             for (t, perfect) in packed.trees.iter().zip(&packed.perfect) {
                 match perfect {
                     Some(p) => {
-                        for row0 in (0..n_pad).step_by(STEP) {
-                            walk(p, table.as_ptr(), n_pad as i32, row0, acc.as_mut_ptr());
+                        for row0 in (0..full).step_by(STEP) {
+                            walk::<GROUPS>(p, table.as_ptr(), n_pad as i32, row0, acc.as_mut_ptr());
+                        }
+                        for row0 in (full..n_pad).step_by(LANES) {
+                            walk::<1>(p, table.as_ptr(), n_pad as i32, row0, acc.as_mut_ptr());
                         }
                     }
                     None => {
@@ -362,19 +367,25 @@ mod simd {
 
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn walk(p: &PerfectTree, xs: *const f32, n_pad: i32, row0: usize, acc: *mut f32) {
+    unsafe fn walk<const G: usize>(
+        p: &PerfectTree,
+        xs: *const f32,
+        n_pad: i32,
+        row0: usize,
+        acc: *mut f32,
+    ) {
         let nodes = p.nodes.as_ptr() as *const i32;
         let lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
         let two = _mm256_set1_epi32(2);
         let all_but_sign = _mm256_set1_epi32(!(DEFAULT_LEFT_BIT as i32));
         let stride = _mm256_set1_epi32(n_pad);
-        let mut idx = [_mm256_setzero_si256(); GROUPS];
-        let mut row = [_mm256_setzero_si256(); GROUPS];
+        let mut idx = [_mm256_setzero_si256(); G];
+        let mut row = [_mm256_setzero_si256(); G];
         for (g, r) in row.iter_mut().enumerate() {
-            *r = _mm256_add_epi32(_mm256_set1_epi32((row0 + 8 * g) as i32), lane);
+            *r = _mm256_add_epi32(_mm256_set1_epi32((row0 + LANES * g) as i32), lane);
         }
         for _ in 0..p.depth {
-            for g in 0..GROUPS {
+            for g in 0..G {
                 let threshold = _mm256_i32gather_ps::<8>(nodes as *const f32, idx[g]);
                 let feature = _mm256_i32gather_epi32::<8>(nodes.add(1), idx[g]);
                 let at = _mm256_add_epi32(
@@ -396,7 +407,7 @@ mod simd {
         let first_leaf = _mm256_set1_epi32(p.nodes.len() as i32);
         for (g, &i) in idx.iter().enumerate() {
             let leaf = _mm256_i32gather_ps::<4>(p.leaves.as_ptr(), _mm256_sub_epi32(i, first_leaf));
-            let a = acc.add(row0 + 8 * g);
+            let a = acc.add(row0 + LANES * g);
             _mm256_storeu_ps(a, _mm256_add_ps(_mm256_loadu_ps(a), leaf));
         }
     }

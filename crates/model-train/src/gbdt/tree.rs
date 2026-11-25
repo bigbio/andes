@@ -4,7 +4,8 @@ use scoring_crate::gbdt::Tree;
 /// Nodes with fewer rows than this build their histograms on the calling thread.
 const PAR_MIN_ROWS: usize = 4096;
 
-/// Features per histogram task: each task reads a node's gradients once for its block.
+/// Most features per histogram task: each task reads a node's gradients once for its block.
+/// Fewer features share a task when the blocks would not give every thread one.
 const FEATURE_BLOCK: usize = 4;
 
 pub struct TreeParams {
@@ -129,8 +130,9 @@ impl<'a> Builder<'a> {
     fn histograms(&self, rows: &[usize]) -> Vec<BinHist> {
         let nf = self.params.n_features;
         let nb = self.params.n_bins;
+        let per_task = (nf / rayon::current_num_threads().max(1)).clamp(1, FEATURE_BLOCK);
         let block = |first: usize| -> Vec<BinHist> {
-            let feats = first..(first + FEATURE_BLOCK).min(nf);
+            let feats = first..(first + per_task).min(nf);
             let cols: Vec<&[u8]> = feats.clone().map(|f| self.col(f)).collect();
             let mut hists: Vec<BinHist> = feats.map(|_| BinHist::new(nb)).collect();
             for &r in rows {
@@ -141,7 +143,7 @@ impl<'a> Builder<'a> {
             }
             hists
         };
-        let firsts: Vec<usize> = (0..nf).step_by(FEATURE_BLOCK).collect();
+        let firsts: Vec<usize> = (0..nf).step_by(per_task).collect();
         if rows.len() < PAR_MIN_ROWS {
             firsts.into_iter().flat_map(block).collect()
         } else {

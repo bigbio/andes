@@ -916,25 +916,82 @@ fn build_source_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-fn build_stat_batch(
-    schema: &Arc<Schema>,
-    model_id: &str,
-    sources: &[(SourceLedger, CountStats)],
-) -> Result<RecordBatch, TrainError> {
-    let mut record_kinds: Vec<String> = Vec::new();
-    let mut model_ids: Vec<String> = Vec::new();
-    let mut source_ids: Vec<String> = Vec::new();
-    let mut part_charges: Vec<Option<i32>> = Vec::new();
-    let mut part_mass_bits_col: Vec<Option<i32>> = Vec::new();
-    let mut part_segs: Vec<Option<i32>> = Vec::new();
-    let mut ion_kinds: Vec<Option<String>> = Vec::new();
-    let mut ion_charges: Vec<Option<i32>> = Vec::new();
-    let mut ion_offset_bits: Vec<Option<i32>> = Vec::new();
-    let mut ion_loss_classes_stat: Vec<Option<i32>> = Vec::new();
-    let mut table_kinds: Vec<Option<String>> = Vec::new();
-    let mut all_counts: Vec<Option<Vec<i64>>> = Vec::new();
-    let mut all_charge_keys: Vec<Option<Vec<i32>>> = Vec::new();
+/// The `stat` records of the model store, one entry per row in each column.
+#[derive(Default)]
+struct StatRows {
+    record_kinds: Vec<String>,
+    model_ids: Vec<String>,
+    source_ids: Vec<String>,
+    part_charges: Vec<Option<i32>>,
+    part_mass_bits_col: Vec<Option<i32>>,
+    part_segs: Vec<Option<i32>>,
+    ion_kinds: Vec<Option<String>>,
+    ion_charges: Vec<Option<i32>>,
+    ion_offset_bits: Vec<Option<i32>>,
+    ion_loss_classes_stat: Vec<Option<i32>>,
+    table_kinds: Vec<Option<String>>,
+    all_counts: Vec<Option<Vec<i64>>>,
+    all_charge_keys: Vec<Option<Vec<i32>>>,
+}
 
+/// One `stat` record: its source, partition key, ion key, table kind and counts.
+struct StatRow<'a> {
+    model_id: &'a str,
+    source_id: &'a str,
+    charge: i32,
+    mass_bits: i32,
+    seg: i32,
+    ion: (&'a str, i32, i32, Option<i32>),
+    kind: &'a str,
+    counts: Vec<i64>,
+    charge_keys: Option<Vec<i32>>,
+}
+
+impl StatRows {
+    fn push(&mut self, row: StatRow<'_>) {
+        let (ion_kind, ion_charge, ion_offset_bits, ion_loss_class) = row.ion;
+        self.record_kinds.push("stat".to_string());
+        self.model_ids.push(row.model_id.to_string());
+        self.source_ids.push(row.source_id.to_string());
+        self.part_charges.push(Some(row.charge));
+        self.part_mass_bits_col.push(Some(row.mass_bits));
+        self.part_segs.push(Some(row.seg));
+        self.ion_kinds.push(Some(ion_kind.to_string()));
+        self.ion_charges.push(Some(ion_charge));
+        self.ion_offset_bits.push(Some(ion_offset_bits));
+        self.ion_loss_classes_stat.push(ion_loss_class);
+        self.table_kinds.push(Some(row.kind.to_string()));
+        self.all_counts.push(Some(row.counts));
+        self.all_charge_keys.push(row.charge_keys);
+    }
+
+    /// A partition's row with no ion key.
+    fn push_partition(
+        &mut self,
+        model_id: &str,
+        source_id: &str,
+        part: &Partition,
+        kind: &str,
+        counts: Vec<i64>,
+    ) {
+        self.push(StatRow {
+            model_id,
+            source_id,
+            charge: part.charge,
+            mass_bits: f32_to_i32_bits(part.parent_mass),
+            seg: part.seg_num,
+            ion: ("-", 0, 0, None),
+            kind,
+            counts,
+            charge_keys: None,
+        });
+    }
+}
+
+/// The `stat` records of every source of `model_id`: rank, error, noise-error and existence
+/// counts per partition, then the charge histogram, in that order per source.
+fn stat_rows(model_id: &str, sources: &[(SourceLedger, CountStats)]) -> StatRows {
+    let mut rows = StatRows::default();
     for (ledger, stats) in sources {
         let sid = &ledger.source_id;
 
@@ -946,39 +1003,24 @@ fn build_stat_batch(
         for (part, ion) in rank_keys {
             let counts_vec = &stats.rank[&(*part, *ion)];
             let (kind_str, ic, iob, lc) = encode_ion_type_str(ion);
-            record_kinds.push("stat".to_string());
-            model_ids.push(model_id.to_string());
-            source_ids.push(sid.clone());
-            part_charges.push(Some(part.charge));
-            part_mass_bits_col.push(Some(f32_to_i32_bits(part.parent_mass)));
-            part_segs.push(Some(part.seg_num));
-            ion_kinds.push(Some(kind_str.to_string()));
-            ion_charges.push(Some(ic));
-            ion_offset_bits.push(Some(iob));
-            ion_loss_classes_stat.push(Some(lc));
-            table_kinds.push(Some("rank".to_string()));
-            all_counts.push(Some(counts_vec.iter().map(|&c| c as i64).collect()));
-            all_charge_keys.push(None);
+            rows.push(StatRow {
+                model_id,
+                source_id: sid,
+                charge: part.charge,
+                mass_bits: f32_to_i32_bits(part.parent_mass),
+                seg: part.seg_num,
+                ion: (kind_str, ic, iob, Some(lc)),
+                kind: "rank",
+                counts: counts_vec.iter().map(|&c| c as i64).collect(),
+                charge_keys: None,
+            });
         }
 
         let mut error_keys: Vec<_> = stats.error.keys().collect();
         error_keys.sort();
         for part in error_keys {
             let counts_vec = &stats.error[part];
-            push_partition_stat_row(
-                &mut record_kinds,
-                &mut model_ids,
-                &mut source_ids,
-                &mut part_charges,
-                &mut part_mass_bits_col,
-                &mut part_segs,
-                &mut ion_kinds,
-                &mut ion_charges,
-                &mut ion_offset_bits,
-                &mut ion_loss_classes_stat,
-                &mut table_kinds,
-                &mut all_counts,
-                &mut all_charge_keys,
+            rows.push_partition(
                 model_id,
                 sid,
                 part,
@@ -991,20 +1033,7 @@ fn build_stat_batch(
         ne_keys.sort();
         for part in ne_keys {
             let counts_vec = &stats.noise_error[part];
-            push_partition_stat_row(
-                &mut record_kinds,
-                &mut model_ids,
-                &mut source_ids,
-                &mut part_charges,
-                &mut part_mass_bits_col,
-                &mut part_segs,
-                &mut ion_kinds,
-                &mut ion_charges,
-                &mut ion_offset_bits,
-                &mut ion_loss_classes_stat,
-                &mut table_kinds,
-                &mut all_counts,
-                &mut all_charge_keys,
+            rows.push_partition(
                 model_id,
                 sid,
                 part,
@@ -1030,26 +1059,7 @@ fn build_stat_batch(
             for &(idx, count) in entries {
                 flat[idx as usize] = count as i64;
             }
-            push_partition_stat_row(
-                &mut record_kinds,
-                &mut model_ids,
-                &mut source_ids,
-                &mut part_charges,
-                &mut part_mass_bits_col,
-                &mut part_segs,
-                &mut ion_kinds,
-                &mut ion_charges,
-                &mut ion_offset_bits,
-                &mut ion_loss_classes_stat,
-                &mut table_kinds,
-                &mut all_counts,
-                &mut all_charge_keys,
-                model_id,
-                sid,
-                &part,
-                "existence",
-                flat,
-            );
+            rows.push_partition(model_id, sid, &part, "existence", flat);
         }
 
         if !stats.charge.is_empty() {
@@ -1058,22 +1068,42 @@ fn build_stat_batch(
             charge_kv.sort_by_key(|(k, _)| *k);
             let keys: Vec<i32> = charge_kv.iter().map(|(k, _)| *k).collect();
             let counts: Vec<i64> = charge_kv.iter().map(|(_, v)| *v as i64).collect();
-
-            record_kinds.push("stat".to_string());
-            model_ids.push(model_id.to_string());
-            source_ids.push(sid.clone());
-            part_charges.push(Some(0));
-            part_mass_bits_col.push(Some(0));
-            part_segs.push(Some(0));
-            ion_kinds.push(Some("-".to_string()));
-            ion_charges.push(Some(0));
-            ion_offset_bits.push(Some(0));
-            ion_loss_classes_stat.push(None);
-            table_kinds.push(Some("charge".to_string()));
-            all_counts.push(Some(counts));
-            all_charge_keys.push(Some(keys));
+            rows.push(StatRow {
+                model_id,
+                source_id: sid,
+                charge: 0,
+                mass_bits: 0,
+                seg: 0,
+                ion: ("-", 0, 0, None),
+                kind: "charge",
+                counts,
+                charge_keys: Some(keys),
+            });
         }
     }
+    rows
+}
+
+fn build_stat_batch(
+    schema: &Arc<Schema>,
+    model_id: &str,
+    sources: &[(SourceLedger, CountStats)],
+) -> Result<RecordBatch, TrainError> {
+    let StatRows {
+        record_kinds,
+        model_ids,
+        source_ids,
+        part_charges,
+        part_mass_bits_col,
+        part_segs,
+        ion_kinds,
+        ion_charges,
+        ion_offset_bits,
+        ion_loss_classes_stat,
+        table_kinds,
+        all_counts,
+        all_charge_keys,
+    } = stat_rows(model_id, sources);
 
     let nrows = record_kinds.len();
     if nrows == 0 {
@@ -1213,42 +1243,6 @@ fn build_stat_batch_empty(schema: &Arc<Schema>) -> Result<RecordBatch, TrainErro
         })
         .collect();
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_partition_stat_row(
-    record_kinds: &mut Vec<String>,
-    model_ids: &mut Vec<String>,
-    source_ids: &mut Vec<String>,
-    part_charges: &mut Vec<Option<i32>>,
-    part_mass_bits_col: &mut Vec<Option<i32>>,
-    part_segs: &mut Vec<Option<i32>>,
-    ion_kinds: &mut Vec<Option<String>>,
-    ion_charges: &mut Vec<Option<i32>>,
-    ion_offset_bits: &mut Vec<Option<i32>>,
-    ion_loss_classes_stat: &mut Vec<Option<i32>>,
-    table_kinds: &mut Vec<Option<String>>,
-    all_counts: &mut Vec<Option<Vec<i64>>>,
-    all_charge_keys: &mut Vec<Option<Vec<i32>>>,
-    model_id: &str,
-    source_id: &str,
-    part: &Partition,
-    table_kind: &str,
-    counts: Vec<i64>,
-) {
-    record_kinds.push("stat".to_string());
-    model_ids.push(model_id.to_string());
-    source_ids.push(source_id.to_string());
-    part_charges.push(Some(part.charge));
-    part_mass_bits_col.push(Some(f32_to_i32_bits(part.parent_mass)));
-    part_segs.push(Some(part.seg_num));
-    ion_kinds.push(Some("-".to_string()));
-    ion_charges.push(Some(0));
-    ion_offset_bits.push(Some(0));
-    ion_loss_classes_stat.push(None);
-    table_kinds.push(Some(table_kind.to_string()));
-    all_counts.push(Some(counts));
-    all_charge_keys.push(None);
 }
 
 fn encode_ion_type_str(ion: &IonType) -> (&'static str, i32, i32, i32) {

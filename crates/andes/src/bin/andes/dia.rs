@@ -107,7 +107,7 @@ pub(crate) fn rerank_pin(
         + 1;
     let mut group_of: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
     let mut key = String::new();
-    let mut run_of: HashMap<String, u32> = HashMap::new();
+    let mut run_of: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
     let mut group = Vec::new();
     let mut raw = Vec::new();
     let mut ms2 = Vec::new();
@@ -449,14 +449,15 @@ pub(crate) fn add_to_pin(
     let rt = |i: u32| spectra[i as usize].rt_seconds.unwrap_or(0.0);
     let (slot, windows) = windows(spectra, run_ends);
 
-    let mut best_of_spec: HashMap<u32, f64> = HashMap::new();
+    let mut best_of_spec: rustc_hash::FxHashMap<u32, f64> = rustc_hash::FxHashMap::default();
     for r in &table.rows {
         if r.spec != NONE {
             let b = best_of_spec.entry(r.spec).or_insert(f64::NEG_INFINITY);
             *b = b.max(r.score);
         }
     }
-    let mut by_precursor: HashMap<(u32, u8, u32), Vec<(u32, bool)>> = HashMap::new();
+    let mut by_precursor: rustc_hash::FxHashMap<(u32, u8, u32), Vec<(u32, bool)>> =
+        rustc_hash::FxHashMap::default();
     for r in &table.rows {
         if r.spec == NONE || r.form == NONE {
             continue;
@@ -528,6 +529,7 @@ pub(crate) fn add_to_pin(
         })
         .collect();
     let values: Vec<Vec<f64>> = (0..COLUMNS.len())
+        .into_par_iter()
         .map(|c| feats.iter().map(|f| f[c]).collect())
         .collect();
     write_pin(pin, &table, &cols, &values)?;

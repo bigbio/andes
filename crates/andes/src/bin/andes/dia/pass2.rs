@@ -185,6 +185,59 @@ impl Pass2 {
     }
 }
 
+/// The row of the highest pool LLR per (peptidoform, charge, run) among the rows above
+/// `NOMINATE_MIN_LLR`, the first such row on ties, as sorted row indices. Without a NaN LLR the
+/// rows are ranked by one parallel sort; with one, they are walked in order (a NaN never
+/// replaces the best row and is replaced by none).
+fn best_rows(
+    table: &PinTable,
+    llr: &[f64],
+    run_of: &(impl Fn(usize) -> usize + Sync),
+) -> Vec<usize> {
+    let eligible = |i: usize| {
+        let r = &table.rows[i];
+        !(r.spec == NONE || r.form == NONE || r.charge == 0 || llr[i] <= NOMINATE_MIN_LLR)
+    };
+    let key = |i: usize| {
+        let r = &table.rows[i];
+        (r.form, r.charge, run_of(r.spec as usize))
+    };
+    let mut want: Vec<usize> = if llr.par_iter().any(|v| v.is_nan()) {
+        let mut best: HashMap<(u32, u8, usize), usize> = HashMap::new();
+        for i in (0..table.rows.len()).filter(|&i| eligible(i)) {
+            let e = best.entry(key(i)).or_insert(i);
+            if llr[i] > llr[*e] {
+                *e = i;
+            }
+        }
+        best.into_values().collect()
+    } else {
+        let mut rows: Vec<(u32, u8, usize, usize)> = (0..table.rows.len())
+            .into_par_iter()
+            .filter(|&i| eligible(i))
+            .map(|i| {
+                let (form, charge, run) = key(i);
+                (form, charge, run, i)
+            })
+            .collect();
+        rows.par_sort_unstable_by(|a, b| {
+            (a.0, a.1, a.2)
+                .cmp(&(b.0, b.1, b.2))
+                .then(
+                    llr[b.3]
+                        .partial_cmp(&llr[a.3])
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+                .then(a.3.cmp(&b.3))
+        });
+        rows.chunk_by(|a, b| (a.0, a.1, a.2) == (b.0, b.1, b.2))
+            .map(|g| g[0].3)
+            .collect()
+    };
+    want.par_sort_unstable();
+    want
+}
+
 /// The best pool row of every (run, peptidoform, charge) with `llr` above the nomination
 /// threshold. `llr` is the pool `dia_llr` of each PIN row of `table`.
 pub(crate) fn nominate(
@@ -204,20 +257,7 @@ pub(crate) fn nominate(
             table.forms.len()
         ));
     }
-    let mut best: HashMap<(u32, u8, usize), usize> = HashMap::new();
-    for (i, r) in table.rows.iter().enumerate() {
-        if r.spec == NONE || r.form == NONE || r.charge == 0 || llr[i] <= NOMINATE_MIN_LLR {
-            continue;
-        }
-        let e = best
-            .entry((r.form, r.charge, run_of(r.spec as usize)))
-            .or_insert(i);
-        if llr[i] > llr[*e] {
-            *e = i;
-        }
-    }
-    let mut want: Vec<usize> = best.into_values().collect();
-    want.sort_unstable();
+    let want = best_rows(table, llr, &run_of);
     predicted.keep_only(want.iter().map(|&i| (table.rows[i].form, table.rows[i].charge)));
     crate::memory::release_free_memory();
     let predicted = &*predicted;

@@ -10,7 +10,6 @@ crates/andes/src/bin/andes/glyco/quantities/tables.rs::write_rollup_tables	291
 crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	299
 crates/andes/src/bin/andes/quant/tmt.rs::finalize	278
 crates/andes/src/bin/andes/search.rs::run	297
-crates/andes/src/bin/andes/search/finish.rs::after_rescoring	279
 crates/andes/src/bin/andes/train.rs::run_train	256
 crates/andes/src/bin/andes/train.rs::run_train_from_search	273
 crates/input/src/annotations.rs::add_claims	253

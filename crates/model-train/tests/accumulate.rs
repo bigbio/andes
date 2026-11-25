@@ -142,12 +142,8 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     let count = stats.rank_count(&expected_partition, expected_ion, rank_index);
     assert!(
         count >= 1,
-        "expected rank_count({:?}, {:?}, rank_index={}) >= 1, got {}. \
+        "expected rank_count({expected_partition:?}, {expected_ion:?}, rank_index={rank_index}) >= 1, got {count}. \
          Ion list may be empty or partition mismatch.",
-        expected_partition,
-        expected_ion,
-        rank_index,
-        count
     );
 
     let charge_count = stats.charge.get(&(charge as i32)).copied().unwrap_or(0);

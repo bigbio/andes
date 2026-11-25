@@ -231,16 +231,12 @@ fn estimated_param_is_scorable_and_finite() {
             let s = scorer.node_score(part, ion, 1);
             assert!(
                 s.is_finite(),
-                "node_score({:?}, {:?}, rank=1) = {s} is not finite",
-                part,
-                ion
+                "node_score({part:?}, {ion:?}, rank=1) = {s} is not finite",
             );
             let m = scorer.missing_ion_score(part, ion);
             assert!(
                 m.is_finite(),
-                "missing_ion_score({:?}, {:?}) = {m} is not finite",
-                part,
-                ion
+                "missing_ion_score({part:?}, {ion:?}) = {m} is not finite",
             );
             checked += 1;
         }
@@ -265,16 +261,13 @@ fn empty_partition_backs_off_not_zero() {
     for (&part, ion_table) in &param.rank_dist_table {
         assert!(
             ion_table.contains_key(&IonType::Noise),
-            "partition {:?} missing Noise entry in rank_dist_table",
-            part
+            "partition {part:?} missing Noise entry in rank_dist_table",
         );
         for (&ion, freqs) in ion_table {
             for (i, &f) in freqs.iter().enumerate() {
                 assert!(
                     f > 0.0,
-                    "freq[{i}] = {f} <= 0 for partition {:?} ion {:?}",
-                    part,
-                    ion
+                    "freq[{i}] = {f} <= 0 for partition {part:?} ion {ion:?}",
                 );
             }
             if ion.is_noise() {
@@ -283,9 +276,7 @@ fn empty_partition_backs_off_not_zero() {
             let s = scorer.node_score(part, ion, 1);
             assert!(
                 s.is_finite(),
-                "node_score for {:?} {:?} = {s} is not finite after empty-count backoff",
-                part,
-                ion
+                "node_score for {part:?} {ion:?} = {s} is not finite after empty-count backoff",
             );
             checked += 1;
         }
@@ -347,8 +338,7 @@ fn dense_counts_recover_empirical_within_tolerance() {
     assert!(
         (estimated - empirical).abs() <= tol,
         "estimated rank-1 freq {estimated:.4} deviates from empirical {empirical:.4} by more than {tol} \
-         for partition {:?} ion {:?}",
-        best_part, best_ion
+         for partition {best_part:?} ion {best_ion:?}",
     );
 }
 

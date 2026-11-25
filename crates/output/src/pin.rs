@@ -398,7 +398,7 @@ fn write_header<W: Write>(
 ) -> io::Result<()> {
     let mut cols: Vec<String> = PIN_LEAD_COLUMNS.iter().map(|c| c.to_string()).collect();
     for c in min_charge..=max_charge {
-        cols.push(format!("charge{}", c));
+        cols.push(format!("charge{c}"));
     }
     cols.extend(PIN_FEATURE_COLUMNS.iter().map(|c| c.to_string()));
     cols.extend(
@@ -435,7 +435,7 @@ fn write_header<W: Write>(
 pub fn format_feature_value(value: f64, fmt: FeatureFmt) -> String {
     match fmt {
         FeatureFmt::Int => format!("{}", value.round() as i64),
-        FeatureFmt::Fixed6 => format!("{:.6}", value),
+        FeatureFmt::Fixed6 => format!("{value:.6}"),
         FeatureFmt::Double => {
             let mut buf = Vec::with_capacity(16);
             write_double(&mut buf, value).expect("write_double to Vec is infallible");
@@ -538,8 +538,8 @@ fn write_psm_row<W: Write>(
     write_mass(writer, calc_mass)?;
     write!(writer, "\t{}\t", spec_id_run(&ctx.spec_id))?;
     write_double(writer, mass)?;
-    write!(writer, "\t{}", raw_score)?;
-    write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
+    write!(writer, "\t{raw_score}")?;
+    write!(writer, "\t{isotope_error}\t{peplen}\t")?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
@@ -551,7 +551,7 @@ fn write_psm_row<W: Write>(
     }
 
     let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
-    write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
+    write!(writer, "\t{enz_n}\t{enz_c}\t{enz_int}")?;
 
     let _ = matched_ion_ratio;
     let features = psm_feature_values(psm, rank);
@@ -561,7 +561,7 @@ fn write_psm_row<W: Write>(
         writer.write_all(b"\t")?;
         match fmt {
             FeatureFmt::Int => write!(writer, "{}", value.round() as i64)?,
-            FeatureFmt::Fixed6 => write!(writer, "{:.6}", value)?,
+            FeatureFmt::Fixed6 => write!(writer, "{value:.6}")?,
             FeatureFmt::Double => write_double(writer, value)?,
         }
     }
@@ -588,7 +588,7 @@ fn write_psm_row<W: Write>(
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
         let accession = crate::rows::resolve_accession(cand_for_acc, search_index);
-        write!(writer, "\t{}", accession)?;
+        write!(writer, "\t{accession}")?;
     }
     writeln!(writer)
 }
@@ -618,7 +618,7 @@ fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     let mut buf = [0u8; 32];
     let len = {
         let mut cursor = &mut buf[..];
-        write!(cursor, "{:.6}", v)?;
+        write!(cursor, "{v:.6}")?;
         32 - cursor.len()
     };
     write_trim_fixed(writer, &buf[..len])
@@ -634,7 +634,7 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if !(1e-4..1e6).contains(&abs) {
         let len = {
             let mut cursor = &mut buf[..];
-            write!(cursor, "{:.5e}", v)?;
+            write!(cursor, "{v:.5e}")?;
             32 - cursor.len()
         };
         write_trim_scientific(writer, &buf[..len])
@@ -643,7 +643,7 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
         let decimal_places = (6 - digits_before_decimal).max(0) as usize;
         let len = {
             let mut cursor = &mut buf[..];
-            write!(cursor, "{:.prec$}", v, prec = decimal_places)?;
+            write!(cursor, "{v:.decimal_places$}")?;
             32 - cursor.len()
         };
         write_trim_fixed(writer, &buf[..len])
@@ -688,7 +688,7 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
 
     let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
     let exp_val: i32 = exp_str.parse().unwrap_or(0);
-    write!(writer, "e{:+03}", exp_val)
+    write!(writer, "e{exp_val:+03}")
 }
 
 #[cfg(test)]

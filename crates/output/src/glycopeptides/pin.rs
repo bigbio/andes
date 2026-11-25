@@ -50,7 +50,7 @@ fn write_glyco_header<W: Write>(
 ) -> io::Result<()> {
     let mut cols: Vec<String> = PIN_LEAD_COLUMNS.iter().map(|c| c.to_string()).collect();
     for c in min_charge..=max_charge {
-        cols.push(format!("charge{}", c));
+        cols.push(format!("charge{c}"));
     }
     cols.push("chargeHi".to_string());
     cols.extend(PIN_FEATURE_COLUMNS.iter().map(|c| c.to_string()));
@@ -108,7 +108,7 @@ fn write_glyco_psm_row<W: Write>(
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
 
-    write!(writer, "{}\t{}\t{}\t", spec_id, label, scan)?;
+    write!(writer, "{spec_id}\t{label}\t{scan}\t")?;
     write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
     write_mass(writer, calc_mass)?;
@@ -118,7 +118,7 @@ fn write_glyco_psm_row<W: Write>(
         write_double(writer, mass)?;
     }
 
-    write!(writer, "\t{}\t{}\t{}\t", raw_score, isotope_error, peplen)?;
+    write!(writer, "\t{raw_score}\t{isotope_error}\t{peplen}\t")?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
@@ -136,7 +136,7 @@ fn write_glyco_psm_row<W: Write>(
     writer.write_all(&[b'\t', charge_hi])?;
 
     let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
-    write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
+    write!(writer, "\t{enz_n}\t{enz_c}\t{enz_int}")?;
 
     let features = psm_feature_values(psm, 1);
     debug_assert_eq!(features[0].0, "RankScore");
@@ -148,7 +148,7 @@ fn write_glyco_psm_row<W: Write>(
         writer.write_all(b"\t")?;
         match fmt {
             FeatureFmt::Int => write!(writer, "{}", value.round() as i64)?,
-            FeatureFmt::Fixed6 => write!(writer, "{:.6}", value)?,
+            FeatureFmt::Fixed6 => write!(writer, "{value:.6}")?,
             FeatureFmt::Double => write_double(writer, value)?,
         }
     }
@@ -180,7 +180,7 @@ fn write_glyco_psm_row<W: Write>(
         write_double_tab(writer, key.glycan_mass)?;
     }
     if glyco_col_kept("IsGlycanDb") {
-        write!(writer, "\t{}", is_glycan_db)?;
+        write!(writer, "\t{is_glycan_db}")?;
     }
     if glyco_col_kept("Y0Y1Anchor") {
         write_double_tab(writer, key.y0y1_anchor_score as f64)?;
@@ -235,7 +235,7 @@ fn write_glyco_psm_row<W: Write>(
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
         let accession = crate::rows::resolve_accession(cand_for_acc, search_index);
-        write!(writer, "\t{}", accession)?;
+        write!(writer, "\t{accession}")?;
     }
     writeln!(writer)
 }
@@ -466,7 +466,7 @@ fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     let mut buf = [0u8; 32];
     let len = {
         let mut cursor = &mut buf[..];
-        write!(cursor, "{:.6}", v)?;
+        write!(cursor, "{v:.6}")?;
         32 - cursor.len()
     };
     write_trim_fixed(writer, &buf[..len])
@@ -481,7 +481,7 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if !(1e-4..1e6).contains(&abs) {
         let len = {
             let mut cursor = &mut buf[..];
-            write!(cursor, "{:.5e}", v)?;
+            write!(cursor, "{v:.5e}")?;
             32 - cursor.len()
         };
         write_trim_scientific(writer, &buf[..len])
@@ -490,7 +490,7 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
         let decimal_places = (6 - digits_before_decimal).max(0) as usize;
         let len = {
             let mut cursor = &mut buf[..];
-            write!(cursor, "{:.prec$}", v, prec = decimal_places)?;
+            write!(cursor, "{v:.decimal_places$}")?;
             32 - cursor.len()
         };
         write_trim_fixed(writer, &buf[..len])
@@ -533,7 +533,7 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     writer.write_all(&mantissa[..mantissa_end])?;
     let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
     let exp_val: i32 = exp_str.parse().unwrap_or(0);
-    write!(writer, "e{:+03}", exp_val)
+    write!(writer, "e{exp_val:+03}")
 }
 
 #[cfg(test)]
@@ -684,9 +684,7 @@ mod tests {
         let peptide_pos = cols.iter().position(|&c| c == "Peptide").unwrap();
         assert!(
             glycan_pos < peptide_pos,
-            "GlycanMass col ({}) must come before Peptide col ({})",
-            glycan_pos,
-            peptide_pos
+            "GlycanMass col ({glycan_pos}) must come before Peptide col ({peptide_pos})",
         );
     }
 
@@ -865,19 +863,14 @@ mod tests {
 
         assert!(
             (calc_mass - intact_neutral).abs() < 0.05,
-            "CalcMass must equal peptide.mass() + glycan_mass ({:.4}), got {:.4} \
-             (bare peptide mass alone would be {:.4})",
-            intact_neutral,
-            calc_mass,
-            peptide_neutral_mass
+            "CalcMass must equal peptide.mass() + glycan_mass ({intact_neutral:.4}), got {calc_mass:.4} \
+             (bare peptide mass alone would be {peptide_neutral_mass:.4})",
         );
         assert!(
             dm.abs() < 0.05,
             "dm should be ~0 for a precursor matched to the intact glycopeptide mass \
-             once CalcMass includes the glycan; got dm={:.6} (bug: CalcMass omitting \
-             glycan_mass would produce dm ~= -{:.4})",
-            dm,
-            glycan_mass
+             once CalcMass includes the glycan; got dm={dm:.6} (bug: CalcMass omitting \
+             glycan_mass would produce dm ~= -{glycan_mass:.4})",
         );
     }
 

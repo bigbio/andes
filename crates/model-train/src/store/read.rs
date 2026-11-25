@@ -571,8 +571,7 @@ fn read_table_row(
             let len = flat.len();
             if len % 4 != 0 {
                 return Err(TrainError::Other(format!(
-                    "frag_off flat length {} not multiple of 4",
-                    len
+                    "frag_off flat length {len} not multiple of 4",
                 )));
             }
 

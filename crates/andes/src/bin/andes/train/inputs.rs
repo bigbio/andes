@@ -206,7 +206,7 @@ pub(crate) fn load_labels_from_tsv(
                 delta += c_term;
             }
             if delta != 0.0 {
-                d.push_str(&format!("+{:.5}", delta));
+                d.push_str(&format!("+{delta:.5}"));
             }
         }
         d.push_str(".-");

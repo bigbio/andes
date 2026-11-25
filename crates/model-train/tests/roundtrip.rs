@@ -218,13 +218,11 @@ fn loss_class_survives_store_round_trip() {
     let all_loss_classes: Vec<u8> = frags.iter().map(|f| f.ion_type.loss_class()).collect();
     assert!(
         all_loss_classes.contains(&2),
-        "frag_off_table must contain an entry with loss_class=2; got {:?}",
-        all_loss_classes
+        "frag_off_table must contain an entry with loss_class=2; got {all_loss_classes:?}",
     );
     assert!(
         all_loss_classes.contains(&255),
-        "frag_off_table must contain an entry with loss_class=255; got {:?}",
-        all_loss_classes
+        "frag_off_table must contain an entry with loss_class=255; got {all_loss_classes:?}",
     );
 }
 
@@ -299,9 +297,7 @@ fn bundled_store_ion_types_have_zero_loss_class() {
                 assert_eq!(
                     ion.loss_class(),
                     0,
-                    "bundled model {id} partition {:?}: ion {:?} has non-zero loss_class",
-                    part,
-                    ion
+                    "bundled model {id} partition {part:?}: ion {ion:?} has non-zero loss_class",
                 );
             }
         }
@@ -377,7 +373,7 @@ fn multi_model_write_preserves_blobs_and_sources() {
 
     let store = ModelStore::open(&store_path).unwrap();
     let ids = store.model_ids();
-    assert_eq!(ids.len(), 2, "must have 2 models; got {:?}", ids);
+    assert_eq!(ids.len(), 2, "must have 2 models; got {ids:?}");
     assert!(ids.contains(&"model_a".to_string()), "model_a missing");
     assert!(ids.contains(&"model_b".to_string()), "model_b missing");
 

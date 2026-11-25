@@ -27,7 +27,7 @@ fn each_protein_well_formed() {
     let file = File::open(&path).unwrap();
     let db = FastaReader::load_all(BufReader::new(file)).unwrap();
     for (i, p) in db.iter().enumerate() {
-        assert!(!p.accession.is_empty(), "protein {} has empty accession", i);
+        assert!(!p.accession.is_empty(), "protein {i} has empty accession");
         assert!(
             !p.sequence.is_empty(),
             "protein {} ({}) has empty sequence",

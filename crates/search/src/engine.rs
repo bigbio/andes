@@ -200,7 +200,7 @@ pub struct PreparedSearch<'a> {
     pub aa_set_for_scoring: AminoAcidSet,
     pub ms1_link: Option<Ms1Link>,
     pub dia_ms1: Vec<model::scan::Ms1Scan>,
-    target_bare_seqs: FxHashSet<Box<[u8]>>,
+    target_bare_seqs: FoldedSet,
     candidate_filter: Option<CandidateFilter>,
     open_index: Option<Box<ChunkFragmentIndex>>,
     per_scan: Option<PerScanScorers>,

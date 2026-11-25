@@ -68,12 +68,31 @@ def run_stem(name: str) -> str:
     return RAW_EXT.sub("", os.path.basename(str(name)))
 
 
-def _ident_key(peptidoform: str):
+def peptidoform_key(peptidoform: str):
+    """Canonical identity of a ProForma peptidoform: ``(sequence, sorted ((pos, unimod id), ...)))``, or None
+    when it does not parse.
+
+    Engines write an N-terminal modification either as ``[X]-PEP...`` (pos 0) or on the first residue
+    (``P[X]EP...``, pos 1): ``[UNIMOD:737]-K[UNIMOD:737]ILQ`` and ``K[UNIMOD:737][UNIMOD:737]ILQ`` are the same
+    TMT-labelled peptide, as are ``[UNIMOD:1]-AHEH`` and ``A[UNIMOD:1]HEH``. Every modification at pos 0 or 1
+    therefore moves to one sorted multiset at pos 0, for any Unimod id; every other position is kept as
+    written. The multiset keeps counts, so one tag on residue 1 never equals two. The one ambiguity this
+    accepts: a modification on residue 1's side chain and the same modification on the N-terminus (e.g.
+    ``S[UNIMOD:21]`` versus ``[UNIMOD:21]-S``) get the same key. Both have the same mass and differ only
+    in where the first fragment carries it."""
     p = parse_proforma(peptidoform)
     if p is None:
         return None
     seq, mods = p
-    return seq.replace("I", "L"), tuple(sorted(m for m in mods if m[1] != CARBAMIDOMETHYL))
+    return seq, tuple(sorted((0 if pos <= 1 else pos, uid) for pos, uid in mods))
+
+
+def _ident_key(peptidoform: str):
+    k = peptidoform_key(peptidoform)
+    if k is None:
+        return None
+    seq, mods = k
+    return seq.replace("I", "L"), tuple(m for m in mods if m[1] != CARBAMIDOMETHYL)
 
 
 def same_identification(a: str, b: str) -> bool:

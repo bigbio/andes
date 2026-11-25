@@ -748,8 +748,8 @@ mod tests {
     use arrow::datatypes::{Field, Fields as ArrowFields, Schema};
     use model::Enzyme;
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use parquet::format::KeyValue;
 
     type EditRow<'a> = (i64, i64, &'a str, &'a str);
     type ModRow<'a> = (i64, &'a str, f64, &'a str);

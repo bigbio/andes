@@ -926,9 +926,9 @@ mod tests {
         let n = b.len();
         let footer = u32::from_le_bytes(b[n - 8..n - 4].try_into().unwrap()) as usize;
         let data = &b[4..n - 8 - footer];
-        assert_eq!(data.len(), 5460);
+        assert_eq!(data.len(), 4742);
         let h = model::hash::fnv1a64(data);
-        assert_eq!(h, 0xade2_cf2b_3c40_c827, "hash {h:#018x}");
+        assert_eq!(h, 0x731f_e14f_a72d_f5d3, "hash {h:#018x}");
 
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&p).unwrap()).unwrap();

@@ -9,8 +9,8 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-use parquet::format::KeyValue;
 
 use crate::atomic::partial_path;
 
@@ -28,7 +28,7 @@ pub(crate) struct TableVersion {
 pub(crate) fn zstd_props(row_group_rows: usize, meta: Vec<KeyValue>) -> WriterPropertiesBuilder {
     WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_max_row_group_size(row_group_rows)
+        .set_max_row_group_row_count(Some(row_group_rows))
         .set_key_value_metadata(Some(meta))
 }
 

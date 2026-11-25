@@ -13,11 +13,11 @@ quick-xml = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
 byteorder = { workspace = true }
-arrow = "53"
-parquet = "53"
+arrow = "60"
+parquet = "60"
 md-5 = "0.10"
 thermorawfilereader = { version = "0.7.0", optional = true }
-timsrust = { version = "0.4.2", optional = true }
+timsrust = { version = "0.4.2", default-features = false, features = ["tdf"], optional = true }
 # The `.d` precursor and frame tables (the MS1 m/z calibration) and the
 # parallel MS1 frame decoding; both already in timsrust's dependency tree.
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }

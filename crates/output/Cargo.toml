@@ -17,8 +17,8 @@ rayon = "1.10"
 memchr = "2"
 # QPX `.idparquet` writer (quantms-compatible). Versions pinned to the ones
 # already in the workspace lockfile (see crates/model-train) so no lockfile bump.
-arrow = "53"
-parquet = "53"
+arrow = "60"
+parquet = "60"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]

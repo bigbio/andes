@@ -11,8 +11,8 @@ use model::stats::{median_mut, Even};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::Encoding;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
 use quant::ms1::{Ms1RunIndex, Ms1Scan};
 

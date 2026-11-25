@@ -786,8 +786,8 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
 mod tests {
     use super::*;
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use parquet::format::KeyValue;
 
     fn evidence(i: usize) -> Evidence {
         let f = i as f64;

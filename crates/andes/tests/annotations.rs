@@ -6,8 +6,8 @@ use arrow::array::{Array, ArrayRef, Int64Array, ListArray, RecordBatch, StringAr
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

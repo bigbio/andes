@@ -563,6 +563,7 @@ fn angle(p: &[f64], o: &[f64]) -> f64 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn evidence(
     pred: &[f32],
     ions: &[(bool, u8)],

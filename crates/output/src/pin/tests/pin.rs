@@ -916,7 +916,7 @@ fn pin_writes_decoy_prefix_for_decoy_protein() {
         .iter()
         .position(|c| c == "Proteins")
         .expect("Proteins column missing");
-    let expected_decoy = format!("XXX_{}", accession);
+    let expected_decoy = format!("XXX_{accession}");
     assert_eq!(
         rows[0][prot_idx], expected_decoy,
         "Proteins column should carry decoy prefix for decoy PSM"

@@ -108,8 +108,6 @@ fn tryp_pig_bov_generates_more_candidates_than_bsa() {
 
     assert!(
         tpb_count > bsa_count,
-        "Tryp_Pig_Bov ({} candidates) should generate more than BSA ({})",
-        tpb_count,
-        bsa_count
+        "Tryp_Pig_Bov ({tpb_count} candidates) should generate more than BSA ({bsa_count})",
     );
 }

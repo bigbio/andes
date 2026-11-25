@@ -47,7 +47,7 @@ pub fn fmt_g(v: f64, precision: usize) -> String {
 pub fn fmt_fixed(v: f64, precision: usize) -> String {
     match non_finite(v) {
         Some(s) => s,
-        None => format!("{:.*}", precision, v),
+        None => format!("{v:.precision$}"),
     }
 }
 

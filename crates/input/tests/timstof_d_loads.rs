@@ -39,5 +39,5 @@ fn reads_real_d_when_env_set() {
         count += 1;
     }
     assert!(count > 0, "no spectra were read from the .d");
-    eprintln!("read {count} MS2 spectra from {:?}", path);
+    eprintln!("read {count} MS2 spectra from {path:?}");
 }

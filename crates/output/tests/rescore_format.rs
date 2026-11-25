@@ -142,7 +142,7 @@ fn results_parse_with_output_crate() {
         assert!(close(p.q_value, q[i]), "{} q {} vs {}", id, p.q_value, q[i]);
         assert!(close(p.pep, pep[i]), "{} pep {} vs {}", id, p.pep, pep[i]);
         let sc = p.score.unwrap();
-        assert!(close(sc, scores[i]) || sc == scores[i], "{} score {sc}", id);
+        assert!(close(sc, scores[i]) || sc == scores[i], "{id} score {sc}");
         assert_eq!(p.peptide, format!("K.PEP{}K.R", triples[i].3));
     }
     assert_eq!(parsed["a_1"].proteins, "P1;P2");

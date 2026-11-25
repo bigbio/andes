@@ -161,8 +161,7 @@ mod tests {
             let f = schema.field_with_name("model_id").unwrap();
             assert!(
                 !f.is_nullable(),
-                "model_id must be non-null in {:?}",
-                schema
+                "model_id must be non-null in {schema:?}",
             );
         }
     }
@@ -182,7 +181,7 @@ mod tests {
                     assert!(fields.find("count").is_some());
                 }
             }
-            other => panic!("charge_hist must be List, got {:?}", other),
+            other => panic!("charge_hist must be List, got {other:?}"),
         }
     }
 
@@ -201,7 +200,7 @@ mod tests {
                     assert!(fields.find("freq").is_some());
                 }
             }
-            other => panic!("offsets must be List, got {:?}", other),
+            other => panic!("offsets must be List, got {other:?}"),
         }
     }
 
@@ -213,7 +212,7 @@ mod tests {
             DataType::List(inner) => {
                 assert_eq!(inner.data_type(), &DataType::Float32);
             }
-            other => panic!("values must be List<Float32>, got {:?}", other),
+            other => panic!("values must be List<Float32>, got {other:?}"),
         }
     }
 }

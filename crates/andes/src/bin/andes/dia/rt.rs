@@ -407,17 +407,22 @@ impl Predictors {
                             .iter()
                             .map(|&(i, _, _)| (i, rt_fold(&table.rows[i])))
                             .collect();
-                        for (i, r) in table.rows.iter().enumerate() {
-                            if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
-                                continue;
-                            }
-                            let p = raw[r.form as usize] as f64;
-                            if p.is_finite() && obs[i].is_finite() {
-                                let own = fold_of.get(&i).and_then(|&k| held_out[k].as_ref());
-                                cal_rt[i] = own.unwrap_or(&c).apply(p);
-                                diff[i] = (obs[i] - cal_rt[i]).abs();
-                            }
-                        }
+                        cal_rt
+                            .par_iter_mut()
+                            .zip(diff.par_iter_mut())
+                            .enumerate()
+                            .for_each(|(i, (cal_i, diff_i))| {
+                                let r = &table.rows[i];
+                                if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
+                                    return;
+                                }
+                                let p = raw[r.form as usize] as f64;
+                                if p.is_finite() && obs[i].is_finite() {
+                                    let own = fold_of.get(&i).and_then(|&k| held_out[k].as_ref());
+                                    *cal_i = own.unwrap_or(&c).apply(p);
+                                    *diff_i = (obs[i] - *cal_i).abs();
+                                }
+                            });
                     }
                 }
                 for (m, d) in miss.iter_mut().zip(&diff) {

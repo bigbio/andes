@@ -111,7 +111,12 @@ mod tests {
                 Ok(())
             },
             |first, lines| {
-                rows.extend(lines.iter().enumerate().map(|(i, l)| (first + i, l.to_string())));
+                rows.extend(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| (first + i, l.to_string())),
+                );
                 Ok(())
             },
         )

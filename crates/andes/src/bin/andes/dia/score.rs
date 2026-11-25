@@ -332,7 +332,11 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
                         return None;
                     }
                     let file = l.c_file.map_or("", |c| x[c]);
-                    let z = l.charge.iter().find(|(i, _)| x[*i] == "1").map_or(0, |c| c.1);
+                    let z = l
+                        .charge
+                        .iter()
+                        .find(|(i, _)| x[*i] == "1")
+                        .map_or(0, |c| c.1);
                     let v: Vec<f32> = l
                         .numeric
                         .iter()
@@ -392,15 +396,19 @@ pub(crate) fn percolator_seed(args: &[String]) -> u64 {
 
 /// SpecIds of every row of a PIN.
 pub(crate) fn pin_ids(pin: &Path) -> Result<std::collections::HashSet<String>, String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let f = std::fs::File::open(pin).map_err(|e| err(&e))?;
     let mut ids = std::collections::HashSet::new();
-    for line in BufReader::new(f).lines().skip(1) {
-        let line = line.map_err(|e| err(&e))?;
-        if let Some(id) = line.split('\t').next().filter(|s| !s.is_empty()) {
-            ids.insert(id.to_string());
-        }
-    }
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |_, lines| {
+            let block: Vec<&str> = lines
+                .par_iter()
+                .filter_map(|l| l.split('\t').next().filter(|s| !s.is_empty()))
+                .collect();
+            ids.extend(block.into_iter().map(str::to_string));
+            Ok(())
+        },
+    )?;
     Ok(ids)
 }
 
@@ -492,36 +500,48 @@ pub(crate) fn write_precursor_pin(
         degenerate_folds: learned.degenerate_folds,
         learned: gb.is_some(),
     };
-    let mut line = String::new();
+    let order: Vec<usize> = (0..n).collect();
+    for batch in order.chunks(64 * crate::dia::blocks::LINES_PER_TASK) {
+        let chunks: Vec<String> = batch
+            .par_chunks(crate::dia::blocks::LINES_PER_TASK)
+            .map(|rows| {
+                use std::fmt::Write as _;
+                let mut line = String::new();
+                for &i in rows {
+                    let p = p1_of[i];
+                    let _ = write!(
+                        line,
+                        "{}\t{}\t{}\t{}",
+                        t.spec_id[i],
+                        if t.decoy[i] { -1 } else { 1 },
+                        i + 1,
+                        p1.run_file.get(&t.run[i]).map_or("", String::as_str),
+                    );
+                    if let Some(gb) = gb {
+                        let _ = write!(line, "\t{:.5}", gb[i]);
+                    }
+                    for v in &x[i * nf..(i + 1) * nf] {
+                        let _ = write!(line, "\t{v}");
+                    }
+                    for v in p.unwrap_or(&zeros) {
+                        let _ = write!(line, "\t{v}");
+                    }
+                    let _ = writeln!(
+                        line,
+                        "\t{}\t{}\t{}",
+                        u8::from(p.is_some()),
+                        t.peptide[i],
+                        t.proteins[i].replace(';', "\t")
+                    );
+                }
+                line
+            })
+            .collect();
+        for c in &chunks {
+            out.write_all(c.as_bytes()).map_err(|e| err(&e))?;
+        }
+    }
     for i in 0..n {
-        use std::fmt::Write as _;
-        line.clear();
-        let p = p1_of[i];
-        let _ = write!(
-            line,
-            "{}\t{}\t{}\t{}",
-            t.spec_id[i],
-            if t.decoy[i] { -1 } else { 1 },
-            i + 1,
-            p1.run_file.get(&t.run[i]).map_or("", String::as_str),
-        );
-        if let Some(gb) = gb {
-            let _ = write!(line, "\t{:.5}", gb[i]);
-        }
-        for v in &x[i * nf..(i + 1) * nf] {
-            let _ = write!(line, "\t{v}");
-        }
-        for v in p.unwrap_or(&zeros) {
-            let _ = write!(line, "\t{v}");
-        }
-        let _ = write!(
-            line,
-            "\t{}\t{}\t{}",
-            u8::from(p.is_some()),
-            t.peptide[i],
-            t.proteins[i].replace(';', "\t")
-        );
-        writeln!(out, "{line}").map_err(|e| err(&e))?;
         if t.decoy[i] {
             ids.decoys.push(t.spec_id[i].clone());
         } else {

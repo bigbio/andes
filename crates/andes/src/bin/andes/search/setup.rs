@@ -44,6 +44,23 @@ pub(super) fn prepare_cli(cli: Cli) -> Result<Cli, Box<dyn std::error::Error>> {
     Ok(cli)
 }
 
+/// The input files of the run report, as `(role, path)`: each spectrum file as the user gave it,
+/// the database, and the SDRF and config file when given.
+pub(super) fn report_inputs(
+    cli: &Cli,
+    spectra: &[PathBuf],
+    database: &std::path::Path,
+) -> Vec<(String, PathBuf)> {
+    let role = |r: &str, p: &std::path::Path| (r.to_string(), p.to_path_buf());
+    spectra
+        .iter()
+        .map(|p| role("spectrum", p))
+        .chain(std::iter::once(role("database", database)))
+        .chain(cli.sdrf.iter().map(|p| role("sdrf", p)))
+        .chain(cli.config.iter().map(|p| role("config", p)))
+        .collect()
+}
+
 /// Warns that `--ms-level` has no effect on an MGF input, which carries no MS level.
 pub(super) fn warn_mgf_ms_level(cli: &Cli, is_mgf: bool) {
     if is_mgf && cli.ms_level != 2 {

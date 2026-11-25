@@ -2040,6 +2040,33 @@ window. The `Fragment error:` line at the start of each run prints it.
   ───────────────────────────────────
 ```
 
+The run report follows the summary in the same file, in seven sections:
+
+- **Inputs**: each spectrum file, the database, and the SDRF and config file when given, with
+  the size and SHA-256 of each (`checksum unavailable: <reason>` when a file could not be read;
+  the run does not fail). The files are hashed on a thread of their own while the search runs.
+- **Parameters**: every parameter not at its default, with its value and where the value came
+  from (`config`, `SDRF` or `command line`; a flag typed with its default value is `command
+  line`). All parameters, defaults included, are in the Parquet twin.
+- **Stages**: the wall time of each stage and the peak memory of the process at its end. The
+  `hash inputs` row is the wait for the input checksums, if any.
+- **Counts**: spectra, rank-1 target PSMs, and with `--rescore` the target PSMs, distinct
+  peptidoforms and protein groups at q ≤ 0.001, 0.01, 0.05 and the `--psm-fdr` threshold.
+- **Software**: the andes version, the command line, the scoring model, the decoy method and
+  the decoy key (the key `andes database` writes for the same decoys).
+- **Methods**: a paragraph ready for a paper, with numbered citations.
+- **References**: the cited works, from `docs/citations.yaml`.
+
+| File | Schema key | Columns |
+|---|---|---|
+| `<stem>.statistics.parquet` | `andes.run_report.schema` `1.0` | `section`, `key`, `value`, `source` (nullable), `number` (float64, nullable), `fdr` (float64, nullable) |
+
+One row per input (`section` `input`: `key` the path, `value` the checksum, `source` the role,
+`number` the bytes), parameter (`parameter`: `source` where the value came from, `number` the
+value when it is a number), stage (`stage_seconds` and `stage_peak_rss_bytes`), count (`count`:
+`number` the count, `fdr` the q-value threshold), model (`model`), software field (`software`),
+the Methods paragraph (`methods`) and reference (`reference`: `number` its citation number).
+
 ### 3e. QPX `.idparquet` bundle (`--output-parquet`)
 
 `--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`, `proteins.parquet`,

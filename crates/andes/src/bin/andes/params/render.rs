@@ -507,6 +507,36 @@ fn source_text(source: Source) -> &'static str {
     }
 }
 
+/// The run report's row of every parameter that changes the run, in table order: its value
+/// as one line of YAML (the recorded value, else the clap default, else what unset means) and
+/// the source of that value as `ParamSources` recorded it.
+pub fn report_rows(sources: &ParamSources) -> Vec<output::ParamRow> {
+    let cmd = command();
+    PARAMS
+        .iter()
+        .filter(|p| !NOT_RUN_SETTINGS.contains(&p.id))
+        .filter_map(|p| {
+            let arg = cmd.get_arguments().find(|a| a.get_id() == p.id)?;
+            let source = sources.source(p.id);
+            let value = match source {
+                Source::Default => default_value(arg, p),
+                _ => sources.value(p.id).cloned(),
+            };
+            let text = match (&value, source) {
+                (Some(v), _) => flow(v),
+                (None, Source::Default) => format!("unset: {}", unset_text(p.unset)),
+                (None, _) => "no config form of the value".to_string(),
+            };
+            Some(output::ParamRow {
+                id: p.id.to_string(),
+                value: text,
+                source: source_text(source).to_string(),
+                number: value.as_ref().and_then(Value::as_f64),
+            })
+        })
+        .collect()
+}
+
 /// The command-line-only settings that change the run and were set, as the command-line text
 /// that sets them again (`--xl-oracle 5`). A config file has no key for them.
 pub fn command_line_only(sources: &ParamSources) -> Vec<String> {

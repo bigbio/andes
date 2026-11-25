@@ -164,6 +164,7 @@ pub(crate) fn load_search_database(
             extra_enzymes,
             proteases,
             decoy_strategy,
+            decoy_key: Some(settings.decoy_key),
         });
     }
     if decoy_strategy == search::decoy::DecoyStrategy::Mutate
@@ -193,23 +194,25 @@ pub(crate) fn load_search_database(
                 .into(),
         );
     }
+    let mut decoy_key = None;
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
             warn_search(&warning);
         }
         let suffix = cli.db.decoy_suffix.as_deref().filter(|s| !s.is_empty());
-        log::info!(target: "database",
-            "decoy key {} (the key of these decoys; andes database writes the same decoys \
-             for these settings)",
-            search::decoy::decoy_key(
-                &search::decoy::targets_sha256(&target_db, &cli.db.decoy_prefix, suffix),
-                decoy_strategy,
-                cli.decoy_seed,
-                &cli.db.decoy_prefix,
-                suffix,
-                std::slice::from_ref(&proteases),
-            )
+        let key = search::decoy::decoy_key(
+            &search::decoy::targets_sha256(&target_db, &cli.db.decoy_prefix, suffix),
+            decoy_strategy,
+            cli.decoy_seed,
+            &cli.db.decoy_prefix,
+            suffix,
+            std::slice::from_ref(&proteases),
         );
+        log::info!(target: "database",
+            "decoy key {key} (the key of these decoys; andes database writes the same decoys \
+             for these settings)"
+        );
+        decoy_key = Some(key);
     }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
@@ -232,6 +235,7 @@ pub(crate) fn load_search_database(
         extra_enzymes,
         proteases,
         decoy_strategy,
+        decoy_key,
     })
 }
 

@@ -17,6 +17,7 @@ mod monoisotopic;
 mod optimize;
 mod params;
 mod quant;
+mod report;
 mod sdrf;
 mod search;
 mod spectra;
@@ -258,10 +259,13 @@ fn main() -> ExitCode {
                      to rescore with Percolator, or feed the PIN to Percolator yourself)."
                 );
             }
-            run(Cli {
-                database: Some(database),
-                ..search
-            })
+            run(
+                Cli {
+                    database: Some(database),
+                    ..search
+                },
+                sources,
+            )
         }
     };
     match result {

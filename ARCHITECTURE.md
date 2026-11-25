@@ -93,6 +93,9 @@ library crates and binary alike.
    subcommand (`crates/andes/src/bin/andes/quant.rs` and its `quant/` modules).
 9. **Write.** `output::write_qpx` and `write_pg_parquet` write the views; the quantification
    tables come from `quant_out.rs`.
+10. **Report.** `output::report` (`crates/output/src/report.rs`) renders the run report into
+    `<stem>.statistics.log` and its Parquet twin; the binary's `report` module
+    (`crates/andes/src/bin/andes/report.rs`) times the stages, hashes the inputs and builds it.
 
 The binary's subcommands live in `crates/andes/src/bin/andes/`: the default search
 (`search.rs`), `quant` (`quant_cmd.rs`), `cohort` (`cohort_cmd.rs`), `inference`

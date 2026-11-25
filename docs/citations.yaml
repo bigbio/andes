@@ -1,3 +1,9 @@
+- key: elias2007_target_decoy
+  authors: Elias JE, Gygi SP
+  title: Target-decoy search strategy for increased confidence in large-scale protein identifications by mass spectrometry
+  year: 2007
+  journal: Nature Methods
+  doi: 10.1038/nmeth1019
 - key: kall2007_percolator
   authors: Käll L, Canterbury JD, Weston J, Noble WS, MacCoss MJ
   title: Semi-supervised learning for peptide identification from shotgun proteomics datasets

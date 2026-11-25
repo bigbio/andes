@@ -127,6 +127,40 @@ pub(crate) fn release_free_memory() {
     }
 }
 
+/// The highest process peak read by `mark_stage` before it reset the kernel's peak counter, in
+/// bytes; 0 when no mark reset it. The run report's peak memory is never below it.
+static PEAK_BEFORE_RESET_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The peak resident memory of the process so far, in bytes: `getrusage`'s `ru_maxrss` (KiB on
+/// Linux, bytes on macOS), and never below a peak `mark_stage` read before it reset the
+/// counter. `None` where `getrusage` is not available or fails.
+pub(crate) fn peak_rss_bytes() -> Option<u64> {
+    let before = PEAK_BEFORE_RESET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+    rusage_max_rss_bytes().map(|b| b.max(before))
+}
+
+#[cfg(unix)]
+fn rusage_max_rss_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage writes a whole `rusage` into the pointer it is given and reads nothing.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: getrusage returned 0, so it filled the struct.
+    let max_rss = u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).ok()?;
+    Some(if cfg!(target_os = "macos") {
+        max_rss
+    } else {
+        max_rss.saturating_mul(1024)
+    })
+}
+
+#[cfg(not(unix))]
+fn rusage_max_rss_bytes() -> Option<u64> {
+    None
+}
+
 /// Logs, at debug level (`--verbose`), the resident memory at the end of `stage` and the peak
 /// since the previous mark, then resets the kernel's peak counter so the next mark reports
 /// its own stage. Reads `/proc/self/status`; does nothing where that file is missing.
@@ -140,6 +174,7 @@ pub(crate) fn mark_stage(stage: &str) {
     else {
         return;
     };
+    PEAK_BEFORE_RESET_BYTES.fetch_max(hwm, std::sync::atomic::Ordering::Relaxed);
     let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
     log::debug!(
         target: "memory",

@@ -49,7 +49,12 @@ fn scratch_tempdir(prefix: &str, scratch_dir: &Path) -> Result<tempfile::TempDir
         .map_err(|e| crate::cli::scratch_dir_error(scratch_dir, &e))
 }
 
-pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run(
+    cli: Cli,
+    sources: crate::params::sources::ParamSources,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut clock = crate::report::StageClock::new();
+    clock.stage("inputs");
     let mut cli = setup::prepare_cli(cli)?;
     let RunPaths {
         scratch_dir,
@@ -60,9 +65,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } = prepare_run(&mut cli)?;
     let standalone = cli.glyco || cli.xl.is_some();
     let database_path: PathBuf = cli.database.clone().expect("database validated in main");
+    let hasher = crate::report::InputHasher::start(setup::report_inputs(
+        &cli,
+        &original_spectrum_paths,
+        &database_path,
+    ));
 
     let t_total = std::time::Instant::now();
+    clock.stage("database");
     let db = load_search_database(&cli, &database_path)?;
+    clock.stage("model");
 
     let mut aa = search_aa_set(&cli.db, None)?;
     let inputs = detect_inputs(&cli, &aa)?;
@@ -83,6 +95,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         idx,
         search_enzyme,
         decoy_strategy,
+        decoy_key,
         ..
     } = db;
     let ScoringModel {
@@ -114,6 +127,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let bench_cap = setup::bench_cap(&cli, is_raw || is_d);
     let ms_level_u32 = cli.ms_level as u32;
 
+    let mut trace = crate::report::build::Trace {
+        clock,
+        hasher,
+        sources,
+        command_line: crate::report::command_line(),
+        models: vec![("scoring".to_string(), resolved_model_id.clone())],
+        decoy_strategy,
+        decoy_key,
+    };
+    trace.clock.stage("calibration");
     let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
     let index_path = index_cache_path(&idx, &params, &cache_dir);
     let file_cal = setup::calibration_prepass(
@@ -135,6 +158,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let file_params = setup::file_params(&params, &file_cal);
+    trace.clock.stage("index");
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
@@ -217,6 +241,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spectrum_paths.len(),
         setup::open_mono_dump(&cli, mono_active, &mono_params)?,
     );
+    trace.clock.stage("search");
     setup::search_files(
         &file_inputs,
         &mut outputs,
@@ -250,6 +275,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spectrum_paths,
     )?;
 
+    trace.clock.stage(if cli.refine { "refine" } else { "post-search" });
     let Some((spectra, mut queues, refine_output)) = post_search(
         &PostSearch {
             t_phase,
@@ -344,6 +370,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ipf_scoring,
         pin_candidates,
         pin_index,
+        trace,
     })
 }
 

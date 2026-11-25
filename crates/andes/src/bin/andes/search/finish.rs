@@ -227,6 +227,7 @@ pub(super) struct AfterRescoring<'a> {
     pub(super) dia_precursor_ids: HashSet<String>,
     pub(super) pin_candidates: Vec<search::candidates::Candidate>,
     pub(super) pin_index: search::SearchIndex,
+    pub(super) trace: crate::report::build::Trace,
 }
 
 /// The steps after rescoring: the DIA study tables, the refined rows and IPF, protein groups and
@@ -270,6 +271,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        mut trace,
     } = state;
     let spectrum_paths = &cli.spectrum;
 
@@ -311,6 +313,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
             map,
         )?;
     }
+    trace.clock.stage("protein inference");
     let protein_groups = rescore_map.as_ref().map(|map| {
         infer_and_write_groups(
             map,
@@ -328,34 +331,20 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         .as_ref()
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
-    let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
-    let mut open_search_summary: Option<String> = None;
-    if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
-        let fdr = fdr_threshold;
-        let (stem, dir) = report_stem(&report_base);
-        let q_tag = format!("{fdr}").replace('.', "p");
-        let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
-        let accepted = accepted_psms(&cli, map, cutoffs, &knockoff_rows, protein_groups.as_ref());
-        let pep_note = cut_note(&cli, &pin_index, fdr, proteoform_fdr);
-        match write_filtered_tsv(&filtered_path, &accepted, protein_groups.as_ref()) {
-            Ok(()) => log::info!(
-                target: "output",
-                "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
-                filtered_path.display(),
-                accepted.len(),
-                fdr,
-                pep_note
-            ),
-            Err(e) => {
-                log::warn!(target: "output", "could not write {}: {e}", filtered_path.display())
-            }
-        }
-        if cli.open_search {
-            open_search_summary =
-                write_open_offsets(&output_pin_path, dir, &stem, &accepted, &rescore_decoy_psms);
-        }
-        identified = Some((accepted, pep_note));
-    }
+    let (identified, mut open_search_summary) = write_filtered(
+        rescore_map.as_ref(),
+        &Filtered {
+            cli: &cli,
+            cutoffs: cutoffs.as_ref(),
+            knockoff_rows: &knockoff_rows,
+            protein_groups: protein_groups.as_ref(),
+            pin_index: &pin_index,
+            fdrs: (fdr_threshold, proteoform_fdr),
+            report_base: &report_base,
+            output_pin_path: &output_pin_path,
+            decoys: &rescore_decoy_psms,
+        },
+    );
 
     let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
@@ -430,7 +419,20 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         summary.open_search = open_search_summary.take();
     }
     log::info!(target: "summary", "{}", run_stats.render_with(id_summary.as_ref()));
-    write_statistics(&run_stats, id_summary.as_ref(), &report_base);
+    let report = crate::report::build::run_report(
+        trace,
+        &crate::report::build::Results {
+            cli: &cli,
+            params: &params,
+            fragment_tolerance: scorer.feature_match_tolerance(),
+            spectra: spectra.len(),
+            rank1_target_psms: run_stats.target_psms,
+            rescored: rescore_map.as_ref(),
+            protein_groups: protein_groups.as_ref(),
+        },
+        &report_files(&report_base).1,
+    );
+    write_statistics(&run_stats, id_summary.as_ref(), &report, &report_base);
 
     knockoff_rows.extend(rerank_dropped);
     if !dia_precursor_ids.is_empty() {
@@ -478,6 +480,58 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         protein_groups,
         cutoffs,
     })
+}
+
+/// What the filtered TSV and the open-search offsets read.
+struct Filtered<'a> {
+    cli: &'a Cli,
+    cutoffs: Option<&'a output::Cutoffs>,
+    knockoff_rows: &'a HashSet<String>,
+    protein_groups: Option<&'a output::Inference>,
+    pin_index: &'a search::SearchIndex,
+    /// The PSM and proteoform q-value thresholds.
+    fdrs: (f64, f64),
+    report_base: &'a Path,
+    output_pin_path: &'a Path,
+    decoys: &'a HashMap<String, output::PercolatorPsm>,
+}
+
+/// Writes the filtered `<stem>.q<fdr>.tsv` and, under `--open-search`, the offsets; returns the
+/// accepted PSMs with the note on their cut, and the open-search summary. Nothing without
+/// rescored PSMs.
+fn write_filtered<'m>(
+    rescore_map: Option<&'m HashMap<String, output::PercolatorPsm>>,
+    f: &Filtered<'_>,
+) -> (Option<(Vec<&'m output::PercolatorPsm>, String)>, Option<String>) {
+    let (Some(map), Some(cutoffs)) = (rescore_map, f.cutoffs) else {
+        return (None, None);
+    };
+    let cli = f.cli;
+    let (fdr, proteoform_fdr) = f.fdrs;
+    let (stem, dir) = report_stem(f.report_base);
+    let q_tag = format!("{fdr}").replace('.', "p");
+    let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
+    let accepted = accepted_psms(cli, map, cutoffs, f.knockoff_rows, f.protein_groups);
+    let pep_note = cut_note(cli, f.pin_index, fdr, proteoform_fdr);
+    match write_filtered_tsv(&filtered_path, &accepted, f.protein_groups) {
+        Ok(()) => log::info!(
+            target: "output",
+            "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
+            filtered_path.display(),
+            accepted.len(),
+            fdr,
+            pep_note
+        ),
+        Err(e) => {
+            log::warn!(target: "output", "could not write {}: {e}", filtered_path.display())
+        }
+    }
+    let mut open_search_summary = None;
+    if cli.open_search {
+        open_search_summary =
+            write_open_offsets(f.output_pin_path, dir, &stem, &accepted, f.decoys);
+    }
+    (Some((accepted, pep_note)), open_search_summary)
 }
 
 /// The report's file stem (`andes` without one) and its directory.
@@ -534,19 +588,34 @@ fn cut_note(cli: &Cli, pin_index: &search::SearchIndex, fdr: f64, proteoform_fdr
     pep_note
 }
 
-/// Writes `<stem>.statistics.log` beside the report.
+/// The paths of `<stem>.statistics.log` and its Parquet twin `<stem>.statistics.parquet`,
+/// beside the report, and the twin's file name.
+fn report_files(report_base: &Path) -> (PathBuf, String, PathBuf) {
+    let (stem, dir) = report_stem(report_base);
+    let parquet_name = format!("{stem}.statistics.parquet");
+    (
+        dir.join(format!("{stem}.statistics.log")),
+        parquet_name.clone(),
+        dir.join(parquet_name),
+    )
+}
+
+/// Writes `<stem>.statistics.log` (the run summary, then the run report) and the run report's
+/// Parquet twin `<stem>.statistics.parquet` beside the report.
 fn write_statistics(
     run_stats: &output::RunStatistics,
     id_summary: Option<&output::IdentificationSummary>,
+    report: &output::RunReport,
     report_base: &Path,
 ) {
-    let stats_path = {
-        let (stem, dir) = report_stem(report_base);
-        dir.join(format!("{stem}.statistics.log"))
-    };
-    match output::write_statistics_log(run_stats, id_summary, &stats_path) {
+    let (stats_path, _, parquet_path) = report_files(report_base);
+    match output::write_statistics_log(run_stats, id_summary, &report.render(), &stats_path) {
         Ok(()) => log::info!(target: "output", "Wrote statistics: {}", stats_path.display()),
         Err(e) => log::warn!(target: "output", "could not write {}: {e}", stats_path.display()),
+    }
+    match report.write_parquet(&parquet_path) {
+        Ok(()) => log::info!(target: "output", "Wrote run report: {}", parquet_path.display()),
+        Err(e) => log::warn!(target: "output", "could not write {}: {e}", parquet_path.display()),
     }
 }
 
@@ -580,6 +649,7 @@ pub(super) struct PinAndRescore<'a> {
     pub(super) ipf_scoring: Option<search::engine::IpfScoring<'a>>,
     pub(super) pin_candidates: Vec<search::candidates::Candidate>,
     pub(super) pin_index: search::SearchIndex,
+    pub(super) trace: crate::report::build::Trace,
 }
 
 /// Writes the PIN (with the RT and provenance features), the run statistics, the DIA predictor pass
@@ -615,7 +685,9 @@ pub(super) fn write_pin_and_rescore(
         ipf_scoring,
         pin_candidates,
         pin_index,
+        mut trace,
     } = state;
+    trace.clock.stage("PIN");
     output::populate_rt_features_per_run(&spectra, &mut queues, &pin_candidates, &run_ends);
 
     output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
@@ -763,6 +835,7 @@ pub(super) fn write_pin_and_rescore(
     }
     let mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
+    trace.clock.stage("rescore");
     let rescoring = rescoring::rescore_pin(
         &rescoring::RescoreInputs {
             cli: &cli,
@@ -824,6 +897,7 @@ pub(super) fn write_pin_and_rescore(
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        trace,
     })
 }
 

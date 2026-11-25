@@ -441,9 +441,8 @@ fn fragment_traces_match_a_binary_search_per_fragment() {
                 })
                 .collect();
             let refs: Vec<&[(f64, f32)]> = scans.iter().map(Vec::as_slice).collect();
-            let mut frags: Vec<(f64, f64)> = (0..120)
-                .map(|_| (100.0 + 400.0 * next(), next()))
-                .collect();
+            let mut frags: Vec<(f64, f64)> =
+                (0..120).map(|_| (100.0 + 400.0 * next(), next())).collect();
             frags.push(frags[3]);
             frags.push((refs[2][10].0, 1.0));
             let got = fragment_traces(&frags, &refs, tol);
@@ -468,7 +467,9 @@ fn ms2_features_from_the_centre_trace_equal_a_search_of_the_scan() {
     let (_, mass) = parse_peptide("K.PEPTIDEKLRAGM.A").unwrap();
     let ions = [(true, 1u8), (false, 1u8), (true, 2u8), (false, 2u8)];
     let n = mass.res.len() - 1;
-    let pred: Vec<f32> = (0..n * ions.len()).map(|i| ((i * 37) % 11) as f32).collect();
+    let pred: Vec<f32> = (0..n * ions.len())
+        .map(|i| ((i * 37) % 11) as f32)
+        .collect();
     let mut x = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = || {
         x ^= x << 13;

@@ -6,7 +6,6 @@
 # These functions are reported in CI, not gated; any other function over 250 lines fails no_new_function_over_the_budget.
 crates/andes/src/bin/andes/cohort.rs::plan	299
 crates/andes/src/bin/andes/dia/llr.rs::add_to_pin	264
-crates/andes/src/bin/andes/dia/study.rs::finalize	286
 crates/andes/src/bin/andes/glyco/quantities/tables.rs::write_rollup_tables	291
 crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	299
 crates/andes/src/bin/andes/quant/run/labels.rs::quantify	285

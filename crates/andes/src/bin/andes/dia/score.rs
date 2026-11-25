@@ -6,7 +6,7 @@
 //! and no row is scored by a model that saw it.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use model_train::gbdt::train::{train_gbdt_from, Dataset, TrainParams, MIN_VAL_AUC};

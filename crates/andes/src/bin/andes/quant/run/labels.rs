@@ -99,48 +99,8 @@ pub(super) fn quantify(
         )?;
     }
 
-    let calib: Vec<(f64, f64)> = (0..n_runs)
-        .map(|r| {
-            let v: Vec<f64> = fitted
-                .iter()
-                .filter(|f| f.run == r && f.transfer_q.is_none())
-                .flat_map(|f| {
-                    (0..n_ch)
-                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
-                        .filter_map(|c| f.fit.channels[c].mass_err_ppm)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            if v.len() < MIN_WIDTH_FITS {
-                return (0.0, tol / 3.0);
-            }
-            let (m, mad) = median_mad(&finite_vec(&v), Even::Mean).unwrap_or((f64::NAN, f64::NAN));
-            (m, (MAD_TO_SD * mad).max(0.5))
-        })
-        .collect();
-    let offset_sd: Vec<f64> = (0..n_runs)
-        .map(|r| {
-            let v: Vec<f64> = fitted
-                .iter()
-                .filter(|f| f.run == r && f.transfer_q.is_none())
-                .flat_map(|f| {
-                    (0..n_ch)
-                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
-                        .map(|c| f.fit.channels[c].apex_offset)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            let dt = run_scales
-                .get(r)
-                .and_then(|s| s.iter().flatten().map(|x| x.dt).reduce(f64::min))
-                .unwrap_or(1.0);
-            if v.len() < MIN_WIDTH_FITS {
-                return dt;
-            }
-            let mad = median_mad(&finite_vec(&v), Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
-            (MAD_TO_SD * mad).max(0.25 * dt)
-        })
-        .collect();
+    let calib = mass_calibration(&fitted, n_runs, n_ch, tol);
+    let offset_sd = apex_offset_sd(&fitted, &run_scales, n_runs, n_ch);
     for (r, (m, sd)) in calib.iter().enumerate() {
         log::info!(
             target: "label",
@@ -167,54 +127,7 @@ pub(super) fn quantify(
         meta = stats;
     }
 
-    let mut channel_q: HashMap<(usize, usize), f64> = HashMap::new();
-    for run_idx in 0..n_runs {
-        let mut rows: Vec<(f64, f64)> = Vec::new();
-        let mut at: Vec<((usize, usize), usize)> = Vec::new();
-        for (fi, f) in fitted.iter().enumerate() {
-            if f.run != run_idx || f.transfer_q.is_some() || groups[f.gid].identity_decoy {
-                continue;
-            }
-            for c in 0..n_ch {
-                if f.ids[c].is_some() || f.decoy_scores[c].is_empty() {
-                    continue;
-                }
-                at.push(((fi, c), rows.len()));
-                let (center, sigma) = calib[f.run];
-                let expected = {
-                    let v: Vec<f64> = (0..n_ch)
-                        .filter(|&k| f.ids[k].is_some())
-                        .filter_map(|k| f.fit.channels[k].mass_err_ppm)
-                        .collect();
-                    if v.is_empty() {
-                        center
-                    } else {
-                        median(v)
-                    }
-                };
-                let sd = sigma * std::f64::consts::SQRT_2;
-                let ch = &f.fit.channels[c];
-                let st = offset_sd[f.run] * std::f64::consts::SQRT_2;
-                rows.push((
-                    channel_score(ch)
-                        * mass_factor(ch.mass_err_ppm, expected, sd)
-                        * coelution_factor(ch.apex_offset, st),
-                    0.0,
-                ));
-                let w = 1.0 / f.decoy_scores[c].len() as f64;
-                rows.extend(f.decoy_scores[c].iter().map(|&(d, e, o)| {
-                    (
-                        d * mass_factor(e, expected, sd) * coelution_factor(o, st),
-                        w,
-                    )
-                }));
-            }
-        }
-        let q = weighted_qvalues(&rows);
-        for (key, row) in at {
-            channel_q.insert(key, q[row]);
-        }
-    }
+    let channel_q = unidentified_channel_q(&fitted, &groups, &calib, &offset_sd, n_runs, n_ch);
 
     let r = spec.reference;
     let status_of = |fi: usize, f: &Fitted| -> Vec<ChannelStatus> {
@@ -241,27 +154,7 @@ pub(super) fn quantify(
         .enumerate()
         .map(|(fi, f)| status_of(fi, f))
         .collect();
-    let mut offsets: HashMap<(usize, usize), f64> = HashMap::new();
-    for run_idx in 0..n_runs {
-        for c in (0..n_ch).filter(|&c| c != r) {
-            let v: Vec<f64> = fitted
-                .iter()
-                .zip(&statuses)
-                .filter(|(f, st)| {
-                    f.run == run_idx
-                        && f.transfer_q.is_none()
-                        && !groups[f.gid].identity_decoy
-                        && st[c] == ChannelStatus::Identified
-                        && st[r] == ChannelStatus::Identified
-                })
-                .filter_map(|(f, _)| log2_ratio(&f.fit.channels[c], &f.fit.channels[r]))
-                .map(|x| x.0)
-                .collect();
-            if v.len() >= MIN_NORM_RATIOS {
-                offsets.insert((run_idx, c), quant::label::median(v));
-            }
-        }
-    }
+    let offsets = channel_offsets(&fitted, &statuses, &groups, n_runs, n_ch, r);
 
     let mut order: Vec<usize> = (0..fitted.len()).collect();
     order.sort_by_key(|&i| (fitted[i].run, fitted[i].gid));
@@ -325,6 +218,158 @@ pub(super) fn quantify(
         );
     }
     Ok((rows, records, meta))
+}
+
+/// Each run's mass error of the identified channels (median and robust spread, ppm); a run with
+/// fewer than `MIN_WIDTH_FITS` channel fits gets `(0, tol / 3)`.
+fn mass_calibration(fitted: &[Fitted], n_runs: usize, n_ch: usize, tol: f64) -> Vec<(f64, f64)> {
+    (0..n_runs)
+        .map(|r| {
+            let v: Vec<f64> = fitted
+                .iter()
+                .filter(|f| f.run == r && f.transfer_q.is_none())
+                .flat_map(|f| {
+                    (0..n_ch)
+                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
+                        .filter_map(|c| f.fit.channels[c].mass_err_ppm)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            if v.len() < MIN_WIDTH_FITS {
+                return (0.0, tol / 3.0);
+            }
+            let (m, mad) = median_mad(&finite_vec(&v), Even::Mean).unwrap_or((f64::NAN, f64::NAN));
+            (m, (MAD_TO_SD * mad).max(0.5))
+        })
+        .collect()
+}
+
+/// Each run's robust spread of the identified channels' apex offsets (s), floored at a quarter
+/// of the run's scan spacing; the spacing itself with fewer than `MIN_WIDTH_FITS` fits.
+fn apex_offset_sd(
+    fitted: &[Fitted],
+    run_scales: &[Vec<Option<Scales>>],
+    n_runs: usize,
+    n_ch: usize,
+) -> Vec<f64> {
+    (0..n_runs)
+        .map(|r| {
+            let v: Vec<f64> = fitted
+                .iter()
+                .filter(|f| f.run == r && f.transfer_q.is_none())
+                .flat_map(|f| {
+                    (0..n_ch)
+                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
+                        .map(|c| f.fit.channels[c].apex_offset)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let dt = run_scales
+                .get(r)
+                .and_then(|s| s.iter().flatten().map(|x| x.dt).reduce(f64::min))
+                .unwrap_or(1.0);
+            if v.len() < MIN_WIDTH_FITS {
+                return dt;
+            }
+            let mad = median_mad(&finite_vec(&v), Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
+            (MAD_TO_SD * mad).max(0.25 * dt)
+        })
+        .collect()
+}
+
+/// The q-value of each unidentified channel of each identified group fit, from its channel score
+/// (weighted by mass error and coelution) against the channel's decoy probes, per run.
+fn unidentified_channel_q(
+    fitted: &[Fitted],
+    groups: &[Group],
+    calib: &[(f64, f64)],
+    offset_sd: &[f64],
+    n_runs: usize,
+    n_ch: usize,
+) -> HashMap<(usize, usize), f64> {
+    let mut channel_q: HashMap<(usize, usize), f64> = HashMap::new();
+    for run_idx in 0..n_runs {
+        let mut rows: Vec<(f64, f64)> = Vec::new();
+        let mut at: Vec<((usize, usize), usize)> = Vec::new();
+        for (fi, f) in fitted.iter().enumerate() {
+            if f.run != run_idx || f.transfer_q.is_some() || groups[f.gid].identity_decoy {
+                continue;
+            }
+            for c in 0..n_ch {
+                if f.ids[c].is_some() || f.decoy_scores[c].is_empty() {
+                    continue;
+                }
+                at.push(((fi, c), rows.len()));
+                let (center, sigma) = calib[f.run];
+                let expected = {
+                    let v: Vec<f64> = (0..n_ch)
+                        .filter(|&k| f.ids[k].is_some())
+                        .filter_map(|k| f.fit.channels[k].mass_err_ppm)
+                        .collect();
+                    if v.is_empty() {
+                        center
+                    } else {
+                        median(v)
+                    }
+                };
+                let sd = sigma * std::f64::consts::SQRT_2;
+                let ch = &f.fit.channels[c];
+                let st = offset_sd[f.run] * std::f64::consts::SQRT_2;
+                rows.push((
+                    channel_score(ch)
+                        * mass_factor(ch.mass_err_ppm, expected, sd)
+                        * coelution_factor(ch.apex_offset, st),
+                    0.0,
+                ));
+                let w = 1.0 / f.decoy_scores[c].len() as f64;
+                rows.extend(f.decoy_scores[c].iter().map(|&(d, e, o)| {
+                    (
+                        d * mass_factor(e, expected, sd) * coelution_factor(o, st),
+                        w,
+                    )
+                }));
+            }
+        }
+        let q = weighted_qvalues(&rows);
+        for (key, row) in at {
+            channel_q.insert(key, q[row]);
+        }
+    }
+    channel_q
+}
+
+/// Each run's median log2 ratio of each channel to the reference channel `r` over the groups
+/// identified in both, when at least `MIN_NORM_RATIOS` groups give one.
+fn channel_offsets(
+    fitted: &[Fitted],
+    statuses: &[Vec<ChannelStatus>],
+    groups: &[Group],
+    n_runs: usize,
+    n_ch: usize,
+    r: usize,
+) -> HashMap<(usize, usize), f64> {
+    let mut offsets: HashMap<(usize, usize), f64> = HashMap::new();
+    for run_idx in 0..n_runs {
+        for c in (0..n_ch).filter(|&c| c != r) {
+            let v: Vec<f64> = fitted
+                .iter()
+                .zip(statuses)
+                .filter(|(f, st)| {
+                    f.run == run_idx
+                        && f.transfer_q.is_none()
+                        && !groups[f.gid].identity_decoy
+                        && st[c] == ChannelStatus::Identified
+                        && st[r] == ChannelStatus::Identified
+                })
+                .filter_map(|(f, _)| log2_ratio(&f.fit.channels[c], &f.fit.channels[r]))
+                .map(|x| x.0)
+                .collect();
+            if v.len() >= MIN_NORM_RATIOS {
+                offsets.insert((run_idx, c), quant::label::median(v));
+            }
+        }
+    }
+    offsets
 }
 
 /// The identified hits of a label group in one run, per channel.

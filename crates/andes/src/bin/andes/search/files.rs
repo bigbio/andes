@@ -24,6 +24,10 @@ use crate::spectra::{
     require_spectra, send_chunks, send_linked_chunks, title_prefix_for, ParseStats,
 };
 
+/// The most readers a Thermo .raw read uses at once (each on its own thread).
+#[cfg(feature = "thermo")]
+const THERMO_READERS_MAX: usize = 8;
+
 fn index_chunk_span_da(flag: Option<f64>) -> f64 {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     match flag {
@@ -456,6 +460,7 @@ fn parse_linked(
         {
             let mut reader = input::ThermoRawReader::open(&spectrum_path)
                 .map_err(|e| format!("open Thermo .raw: {e}"))?
+                .with_parallel_reads(threads.clamp(1, THERMO_READERS_MAX))
                 .with_run_ms1_capture(capture_ms1)
                 .with_product_scan_capture(capture_product)
                 .with_scan_context_capture(capture_context)
@@ -924,6 +929,8 @@ fn search_enumerated<'a>(
     let capture_ms3 = xl_ms3_capture || quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
     let capture_context = quant.is_some();
     let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
+    #[cfg(feature = "thermo")]
+    let threads = cli.threads;
     #[cfg(feature = "timstof")]
     let dia_mobility_slices = cli.dia_mobility_slices;
     let parser_handle = thread::spawn(
@@ -951,6 +958,7 @@ fn search_enumerated<'a>(
                 {
                     let mut reader = input::ThermoRawReader::open(&spectrum_path)
                         .map_err(|e| format!("open Thermo .raw: {e}"))?
+                        .with_parallel_reads(threads.clamp(1, THERMO_READERS_MAX))
                         .with_ms_level(Some(2))
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)

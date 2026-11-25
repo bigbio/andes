@@ -422,37 +422,10 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
             Some(v) => mass_error_ppm.append_value(v),
             None => mass_error_ppm.append_null(),
         }
-        {
-            let sb = additional_scores.values();
-            for (name, value, higher) in &r.additional_scores {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(name);
-                sb.field_builder::<Float64Builder>(1)
-                    .unwrap()
-                    .append_value(*value);
-                sb.field_builder::<BooleanBuilder>(2)
-                    .unwrap()
-                    .append_value(*higher);
-                sb.append(true);
-            }
-            additional_scores.append(true);
-        }
+        append_scores(&mut additional_scores, &r.additional_scores);
         predicted_rt.append_null();
         run_file_name.append_value(&r.run_file_name);
-        {
-            let sb = cv_params.values();
-            for (name, value) in &r.cv_params {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(name);
-                sb.field_builder::<StringBuilder>(1)
-                    .unwrap()
-                    .append_value(value);
-                sb.append(true);
-            }
-            cv_params.append(true);
-        }
+        append_cv_params(&mut cv_params, &r.cv_params);
         for s in &r.scan {
             scan.values().append_value(*s);
         }
@@ -466,63 +439,9 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
             Some(v) => missed_cleavages.append_value(v),
             None => missed_cleavages.append_null(),
         }
-        {
-            let sb = intensities.values();
-            for (label, value) in &r.intensities {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(label);
-                sb.field_builder::<Float32Builder>(1)
-                    .unwrap()
-                    .append_value(*value);
-                sb.append(true);
-            }
-            intensities.append(true);
-        }
-        {
-            let sb = additional_intensities.values();
-            for (label, entries) in &r.additional_intensities {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(label);
-                let inner = sb.field_builder::<ListBuilder<StructBuilder>>(1).unwrap();
-                let ib = inner.values();
-                for (name, value) in entries {
-                    ib.field_builder::<StringBuilder>(0)
-                        .unwrap()
-                        .append_value(name);
-                    ib.field_builder::<Float32Builder>(1)
-                        .unwrap()
-                        .append_value(*value);
-                    ib.append(true);
-                }
-                inner.append(true);
-                sb.append(true);
-            }
-            additional_intensities.append(true);
-        }
-        {
-            let sb = pg_accessions.values();
-            for (acc, start, end, pre, post) in &r.proteins {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(acc);
-                sb.field_builder::<Int32Builder>(1)
-                    .unwrap()
-                    .append_option(*start);
-                sb.field_builder::<Int32Builder>(2)
-                    .unwrap()
-                    .append_option(*end);
-                sb.field_builder::<StringBuilder>(3)
-                    .unwrap()
-                    .append_option(pre.as_deref());
-                sb.field_builder::<StringBuilder>(4)
-                    .unwrap()
-                    .append_option(post.as_deref());
-                sb.append(true);
-            }
-            pg_accessions.append(true);
-        }
+        append_intensities(&mut intensities, &r.intensities);
+        append_additional_intensities(&mut additional_intensities, &r.additional_intensities);
+        append_pg_accessions(&mut pg_accessions, &r.proteins);
         match (&r.group, r.proteins.first()) {
             (Some(g), _) => {
                 anchor_protein.append_value(&g.anchor);
@@ -540,24 +459,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
                 pg_global_qvalue.append_null();
             }
         }
-        {
-            let sb = pg_positions.values();
-            for (acc, start, end, _, _) in &r.proteins {
-                if let (Some(s), Some(e)) = (start, end) {
-                    sb.field_builder::<StringBuilder>(0)
-                        .unwrap()
-                        .append_value(acc);
-                    sb.field_builder::<Int32Builder>(1)
-                        .unwrap()
-                        .append_value(*s);
-                    sb.field_builder::<Int32Builder>(2)
-                        .unwrap()
-                        .append_value(*e);
-                    sb.append(true);
-                }
-            }
-            pg_positions.append(true);
-        }
+        append_pg_positions(&mut pg_positions, &r.proteins);
         im_start.append_null();
         im_stop.append_null();
         gg_accessions.append_null();
@@ -635,6 +537,134 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         columns.push(Arc::new(claim_co_apex.finish()));
     }
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Appends one record's additional scores (name, value, higher-is-better) to their list column.
+fn append_scores(
+    additional_scores: &mut ListBuilder<StructBuilder>,
+    scores: &[(String, f64, bool)],
+) {
+    let sb = additional_scores.values();
+    for (name, value, higher) in scores {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(name);
+        sb.field_builder::<Float64Builder>(1)
+            .unwrap()
+            .append_value(*value);
+        sb.field_builder::<BooleanBuilder>(2)
+            .unwrap()
+            .append_value(*higher);
+        sb.append(true);
+    }
+    additional_scores.append(true);
+}
+
+/// Appends one record's CV parameters (name, value) to their list column.
+fn append_cv_params(cv_params: &mut ListBuilder<StructBuilder>, cv: &[(String, String)]) {
+    let sb = cv_params.values();
+    for (name, value) in cv {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(name);
+        sb.field_builder::<StringBuilder>(1)
+            .unwrap()
+            .append_value(value);
+        sb.append(true);
+    }
+    cv_params.append(true);
+}
+
+/// Appends one record's channel intensities (label, value) to their list column.
+fn append_intensities(intensities: &mut ListBuilder<StructBuilder>, values: &[(String, f32)]) {
+    let sb = intensities.values();
+    for (label, value) in values {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(label);
+        sb.field_builder::<Float32Builder>(1)
+            .unwrap()
+            .append_value(*value);
+        sb.append(true);
+    }
+    intensities.append(true);
+}
+
+/// Appends one record's additional intensities (per label, a list of name and value).
+fn append_additional_intensities(
+    additional_intensities: &mut ListBuilder<StructBuilder>,
+    values: &[(String, Vec<(String, f32)>)],
+) {
+    let sb = additional_intensities.values();
+    for (label, entries) in values {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(label);
+        let inner = sb.field_builder::<ListBuilder<StructBuilder>>(1).unwrap();
+        let ib = inner.values();
+        for (name, value) in entries {
+            ib.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value(name);
+            ib.field_builder::<Float32Builder>(1)
+                .unwrap()
+                .append_value(*value);
+            ib.append(true);
+        }
+        inner.append(true);
+        sb.append(true);
+    }
+    additional_intensities.append(true);
+}
+
+/// Appends one record's proteins (accession, start, end, residue before and after).
+fn append_pg_accessions(
+    pg_accessions: &mut ListBuilder<StructBuilder>,
+    proteins: &[ProteinPosition],
+) {
+    let sb = pg_accessions.values();
+    for (acc, start, end, pre, post) in proteins {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(acc);
+        sb.field_builder::<Int32Builder>(1)
+            .unwrap()
+            .append_option(*start);
+        sb.field_builder::<Int32Builder>(2)
+            .unwrap()
+            .append_option(*end);
+        sb.field_builder::<StringBuilder>(3)
+            .unwrap()
+            .append_option(pre.as_deref());
+        sb.field_builder::<StringBuilder>(4)
+            .unwrap()
+            .append_option(post.as_deref());
+        sb.append(true);
+    }
+    pg_accessions.append(true);
+}
+
+/// Appends one record's protein positions, for the proteins whose start and end are known.
+fn append_pg_positions(
+    pg_positions: &mut ListBuilder<StructBuilder>,
+    proteins: &[ProteinPosition],
+) {
+    let sb = pg_positions.values();
+    for (acc, start, end, _, _) in proteins {
+        if let (Some(s), Some(e)) = (start, end) {
+            sb.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value(acc);
+            sb.field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(*s);
+            sb.field_builder::<Int32Builder>(2)
+                .unwrap()
+                .append_value(*e);
+            sb.append(true);
+        }
+    }
+    pg_positions.append(true);
 }
 
 /// Appends one record's modifications to the modifications list column: name, accession and a

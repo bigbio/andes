@@ -12,5 +12,4 @@ crates/model-train/src/store/read.rs::read_table_row	276
 crates/model-train/src/store/write.rs::build_stat_batch	264
 crates/output/src/features.rs::build_batch	278
 crates/output/src/protein/inference.rs::infer_protein_groups	267
-crates/rescore/src/cv.rs::train_in_pool	279
 crates/search/src/engine/run.rs::score_spectrum	297

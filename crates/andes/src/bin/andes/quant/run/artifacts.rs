@@ -13,8 +13,8 @@ use search::candidates::Candidate;
 use search::index::SearchIndex;
 use search::psm::TopNQueue;
 
-use super::collect::QuantCollector;
-use super::hits::{peptidoform_of, proteins_of, select_rank1_all};
+use super::collect::{QuantCollector, RunCapture};
+use super::hits::{peptidoform_of, proteins_of, select_rank1_all, Hit};
 use super::lfq::envelope_of;
 use super::scans::native_id;
 use super::MS2_TOP_PEAKS;
@@ -135,27 +135,70 @@ pub(super) fn write_run_artifacts(
             .as_ref()
             .ok_or_else(|| format!("--quant-dir: run {} has no MS1 scans", run.stem))?;
         let ms1_path = quant_dir.join(format!("{}.ms1.parquet", run.stem));
-        ms1.persist(&ms1_path)
-            .map_err(|e| format!("write MS1 table: {e}"))?;
-        let mut rows: Vec<RunPsmRow> = Vec::new();
-        let mut mods: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
-        let mut no_rt = 0usize;
-        for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
-            let spec = &spectra[hit.spec_idx];
-            let Some(rt_s) = spec.rt_seconds else {
-                no_rt += 1;
-                continue;
-            };
-            for m in hit.cand.peptide.residues.iter().filter_map(|aa| aa.mod_) {
-                if let Some(acc) = m.accession.as_deref().filter(|a| !a.is_empty()) {
-                    mods.entry(acc.to_string()).or_insert(m.mass_delta);
-                }
+        let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
+        let run_hits: Vec<&Hit<'_>> = hits.iter().filter(|h| h.run_idx == run_idx).collect();
+        let (persisted, written) = rayon::join(
+            || ms1.persist(&ms1_path),
+            || {
+                let (rows, mods, no_rt) = run_psm_rows(run, &run_hits, spectra, candidates, index);
+                write_run_quant_table(&table_path, &run.stem, &rows, &mods)
+                    .map(|()| (rows.len(), no_rt))
+                    .map_err(|e| format!("write {}: {e}", table_path.display()))
+            },
+        );
+        persisted.map_err(|e| format!("write MS1 table: {e}"))?;
+        let (n_rows, no_rt) = written?;
+        log::info!(
+            target: "quant",
+            "{}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
+            run.stem,
+            ms1_path.display(),
+            table_path.display(),
+            n_rows,
+            if no_rt > 0 {
+                format!("; {no_rt} without a retention time left out")
+            } else {
+                String::new()
             }
+        );
+    }
+    Ok(())
+}
+
+/// The PSM rows of one run's quant table, built in parallel in hit order; the modifications
+/// they carry (the first mass seen for each accession, in hit order); and how many hits had no
+/// retention time and were left out.
+fn run_psm_rows(
+    run: &RunCapture,
+    hits: &[&Hit<'_>],
+    spectra: &[Spectrum],
+    candidates: &[Candidate],
+    index: &SearchIndex,
+) -> (Vec<RunPsmRow>, Vec<(String, f64)>, usize) {
+    use rayon::prelude::*;
+    let mut mods: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    let mut no_rt = 0usize;
+    for hit in hits {
+        if spectra[hit.spec_idx].rt_seconds.is_none() {
+            no_rt += 1;
+            continue;
+        }
+        for m in hit.cand.peptide.residues.iter().filter_map(|aa| aa.mod_) {
+            if let Some(acc) = m.accession.as_deref().filter(|a| !a.is_empty()) {
+                mods.entry(acc.to_string()).or_insert(m.mass_delta);
+            }
+        }
+    }
+    let rows: Vec<RunPsmRow> = hits
+        .par_iter()
+        .filter_map(|hit| {
+            let spec = &spectra[hit.spec_idx];
+            let rt_s = spec.rt_seconds?;
             let z = hit.psm.charge_used.max(1);
             let peptidoform = peptidoform_of(hit.cand);
             let context = run.contexts.get(native_id(run, &spec.title));
             let (envelope, isotope_share) = envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES);
-            rows.push(RunPsmRow {
+            Some(RunPsmRow {
                 spec_id: hit.spec_id.clone(),
                 rt_s,
                 precursor_key: format!("{peptidoform}/{z}"),
@@ -173,27 +216,10 @@ pub(super) fn write_run_artifacts(
                     .join(";"),
                 isotope_share,
                 ion_mobility: context.and_then(|c| c.ion_mobility),
-            });
-        }
-        let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
-        let mods: Vec<(String, f64)> = mods.into_iter().collect();
-        write_run_quant_table(&table_path, &run.stem, &rows, &mods)
-            .map_err(|e| format!("write {}: {e}", table_path.display()))?;
-        log::info!(
-            target: "quant",
-            "{}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
-            run.stem,
-            ms1_path.display(),
-            table_path.display(),
-            rows.len(),
-            if no_rt > 0 {
-                format!("; {no_rt} without a retention time left out")
-            } else {
-                String::new()
-            }
-        );
-    }
-    Ok(())
+            })
+        })
+        .collect();
+    (rows, mods.into_iter().collect(), no_rt)
 }
 
 pub(super) fn write_feature_outputs(

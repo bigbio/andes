@@ -368,10 +368,8 @@ pub fn infer_protein_groups(
         out.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
         out
     };
-    let (target, decoy) = rayon::join(
-        || parsimony(rows(targets, false)),
-        || parsimony(rows(decoys, true)),
-    );
+    let target = parsimony(rows(targets, false));
+    let decoy = parsimony(rows(decoys, true));
     log::debug!(
         target: "inference",
         "parsimony: {} target, {} decoy groups",

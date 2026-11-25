@@ -99,25 +99,6 @@ pub(crate) fn run(
         decoy_key,
         ..
     } = db;
-    let ScoringModel {
-        param,
-        scorer,
-        routed_activation,
-        routed_instrument,
-        resolved_model_id,
-        gbdt_k,
-        frag_tol_override,
-    } = model;
-    let RunInputs {
-        is_mzml,
-        is_raw,
-        is_d,
-        is_mgf,
-        instrument_was_detected,
-        acquisition,
-        route_protocol,
-        ..
-    } = inputs;
 
     let t_phase = std::time::Instant::now();
 
@@ -125,45 +106,29 @@ pub(crate) fn run(
 
     let fragment_tol_da = 0.5_f64;
 
-    let bench_cap = setup::bench_cap(&cli, is_raw || is_d);
+    let bench_cap = setup::bench_cap(&cli, inputs.is_raw || inputs.is_d);
     let ms_level_u32 = cli.ms_level as u32;
 
-    let mut trace = crate::report::build::Trace {
-        clock,
-        hasher,
-        sources,
-        command_line: crate::report::command_line(),
-        models: vec![("scoring".to_string(), resolved_model_id.clone())],
+    let mut trace = run_trace(
+        (clock, hasher, sources),
+        &model.resolved_model_id,
         decoy_strategy,
         decoy_key,
-    };
+    );
     trace.clock.stage("calibration");
     let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
     let index_path = index_cache_path(&idx, &params, &cache_dir);
-    let file_cal = setup::calibration_prepass(
+    let file_cal = calibrate_params(
         &cli,
-        (&idx, &scorer, fragment_tol_da, &index_path),
+        (&inputs, &spectrum_path, &scratch_dir),
+        (&idx, &model.scorer, fragment_tol_da, &index_path),
         &mut params,
         (spectrum_paths, ms_level_u32, bench_cap),
     )?;
 
-    if cli.optimize {
-        optimize_on_sample(
-            &cli,
-            &spectrum_path,
-            (is_mzml, is_raw, is_mgf),
-            &scratch_dir,
-            (&idx, &scorer, fragment_tol_da, &index_path),
-            &mut params,
-        )?;
-    }
-
     let file_params = setup::file_params(&params, &file_cal);
     let bench_mode = cli.max_spectra > 0;
-    let high_res = acquisition.high_res;
-    let tmt_level = setup::tmt_level_for(&cli, high_res, &spectrum_path, is_mzml, is_raw);
-    let mut quant =
-        quant_collector(&cli, high_res, tmt_level, &scorer, is_mgf, is_d, spectrum_paths)?;
+    let mut quant = quant_for_run(&cli, &inputs, &model.scorer, &spectrum_path)?;
     let xl_ms3_capture = setup::xl_ms3_capture(&cli);
     let ms1_input = chimeric_active || mono_active;
     let prefetched = stream::prefetch_first_file(
@@ -173,44 +138,23 @@ pub(crate) fn run(
         quant.as_ref(),
     );
     trace.clock.stage("index");
-    let t_index = std::time::Instant::now();
-    let mut prepared = PreparedSearch::prepare_mmap(
-        &idx,
-        &params,
-        &scorer,
-        fragment_tol_da,
-        &cli.db.decoy_prefix,
-        &index_path,
-    )
-    .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-    prepared = setup::route_per_scan_scorers(
-        prepared,
-        setup::RouteInputs {
-            cli: &cli,
-            standalone,
-            instrument_was_detected,
-            resolved_model_id: &resolved_model_id,
-            param: &param,
-            acquisition: &acquisition,
-            params: &params,
-            gbdt_k,
-            routed_instrument,
-            route_protocol,
-            search_enzyme,
-            frag_tol_override,
-            routed_activation,
-        },
-    );
-    setup::finish_index_open(&cli, &mut prepared, t_index)?;
+    let mut prepared = prepare_index(
+        (&idx, &params, &model.scorer, fragment_tol_da, &index_path),
+        route_inputs(&cli, standalone, &inputs, &model, &params, search_enzyme),
+    )?;
 
-    let (predictors, keep_peaks) =
-        setup::predictors(&cli, standalone, &acquisition, param.data_type.instrument)?;
+    let (predictors, keep_peaks) = setup::predictors(
+        &cli,
+        standalone,
+        &inputs.acquisition,
+        model.param.data_type.instrument,
+    )?;
     let t_search_start = std::time::Instant::now();
 
-    setup::warn_mgf_ms_level(&cli, is_mgf);
+    setup::warn_mgf_ms_level(&cli, inputs.is_mgf);
 
     let mut measurer = FragmentErrorMeasurer {
-        enabled: acquisition.high_res && frag_tol_override.is_none() && !standalone,
+        enabled: inputs.acquisition.high_res && model.frag_tol_override.is_none() && !standalone,
         done: false,
         per_file: Vec::with_capacity(spectrum_paths.len()),
     };
@@ -237,39 +181,26 @@ pub(crate) fn run(
     );
     outputs.prefetched = prefetched;
     trace.clock.stage("search");
-    setup::search_files(
-        &file_inputs,
-        &mut outputs,
-        &mut prepared,
-        &mut measurer,
-        &mut quant,
-        (bench_mode, bench_cap),
-    )?;
     let FileOutputs {
         all_spectra,
         all_queues,
-        mut run_ends,
+        run_ends,
         dia_ms1,
         xl_ms3,
         xl_snapped,
         xl_snap_files,
-        parse_stats,
         mono_table,
         mono_stats,
         mono_dump,
         ..
-    } = outputs;
-    run_ends.resize(spectrum_paths.len(), all_spectra.len());
+    } = search_all_files(
+        &file_inputs,
+        outputs,
+        (&mut prepared, &mut measurer, &mut quant),
+        inputs.is_mzml || inputs.is_raw,
+    )?;
     prepared.params = &params;
     let file_calibrations = setup::file_calibrations(&file_params, &run_ends);
-
-    setup::check_parsed(
-        &cli,
-        &parse_stats,
-        is_mzml || is_raw,
-        &all_spectra,
-        spectrum_paths,
-    )?;
 
     trace.clock.stage(if cli.refine { "refine" } else { "post-search" });
     let Some((spectra, mut queues, refine_output)) = post_search(
@@ -277,12 +208,12 @@ pub(crate) fn run(
             t_phase,
             xl_snapped,
             cli: &cli,
-            acquisition: &acquisition,
+            acquisition: &inputs.acquisition,
             decoy_strategy,
             fragment_tol_da,
             mono_active,
             mono_params: &mono_params,
-            routed_activation,
+            routed_activation: model.routed_activation,
             spectrum_paths,
             standalone,
             t_search_start,
@@ -295,7 +226,7 @@ pub(crate) fn run(
             quant: &quant,
             report_base: &report_base,
             run_ends: &run_ends,
-            scorer: &scorer,
+            scorer: &model.scorer,
             spectrum_path: &spectrum_path,
             t_total,
         },
@@ -313,30 +244,14 @@ pub(crate) fn run(
         return Ok(());
     };
     let t_phase = std::time::Instant::now();
-    let refine_merged = refine_output
-        .as_ref()
-        .is_some_and(|o| !o.candidates.is_empty());
-    let ipf_scoring = cli
-        .localize
-        .is_some()
-        .then(|| prepared.ipf_scoring(&scorer));
-    let pin_candidates;
-    let pin_index;
-    if let Some(out) = refine_output {
-        let merged = search::refinement::merge_into_pass1(
-            &mut queues,
-            std::mem::take(&mut prepared.candidates),
-            &idx,
-            out,
-        );
-        pin_candidates = merged.candidates;
-        drop(prepared);
-        pin_index = merged.index;
-    } else {
-        pin_candidates = std::mem::take(&mut prepared.candidates);
-        drop(prepared);
-        pin_index = idx;
-    }
+    let (refine_merged, ipf_scoring, pin_candidates, merged_index) = pin_tables(
+        &cli,
+        refine_output,
+        &mut queues,
+        prepared,
+        (&idx, &model.scorer),
+    );
+    let pin_index = merged_index.unwrap_or(idx);
 
     finish::write_pin_and_rescore(finish::PinAndRescore {
         cli,
@@ -359,8 +274,8 @@ pub(crate) fn run(
         params,
         restricted_site_masses,
         fixed_terminal_mods,
-        scorer: &scorer,
-        is_mgf,
+        scorer: &model.scorer,
+        is_mgf: inputs.is_mgf,
         t_phase,
         refine_merged,
         ipf_scoring,
@@ -368,6 +283,210 @@ pub(crate) fn run(
         pin_index,
         trace,
     })
+}
+
+/// From `pin_tables`: whether refinement candidates were merged, the IPF scoring, the PIN's
+/// candidates, and the merged index when refinement ran.
+type PinTables<'s> = (
+    bool,
+    Option<search::engine::IpfScoring<'s>>,
+    Vec<search::candidates::Candidate>,
+    Option<search::SearchIndex>,
+);
+
+/// The run report's trace: the stage clock, the input hasher and the parameter sources, with the
+/// scoring model and the decoys of the search.
+fn run_trace(
+    (clock, hasher, sources): (
+        crate::report::StageClock,
+        crate::report::InputHasher,
+        crate::params::sources::ParamSources,
+    ),
+    resolved_model_id: &str,
+    decoy_strategy: search::decoy::DecoyStrategy,
+    decoy_key: Option<String>,
+) -> crate::report::build::Trace {
+    crate::report::build::Trace {
+        clock,
+        hasher,
+        sources,
+        command_line: crate::report::command_line(),
+        models: vec![("scoring".to_string(), resolved_model_id.to_string())],
+        decoy_strategy,
+        decoy_key,
+    }
+}
+
+/// Calibrates the precursor tolerance per file (the prepass), then, with `--optimize`, tunes the
+/// search parameters on a sample of the first file; returns the per-file calibration.
+fn calibrate_params(
+    cli: &Cli,
+    (inputs, spectrum_path, scratch_dir): (&RunInputs, &Path, &Path),
+    index: (&search::SearchIndex, &RankScorer, f64, &Path),
+    params: &mut search::SearchParams,
+    files: (&[PathBuf], u32, usize),
+) -> Result<Vec<(f64, model::tolerance::PrecursorTolerance)>, Box<dyn std::error::Error>> {
+    let file_cal = setup::calibration_prepass(cli, index, params, files)?;
+    if cli.optimize {
+        optimize_on_sample(
+            cli,
+            spectrum_path,
+            (inputs.is_mzml, inputs.is_raw, inputs.is_mgf),
+            scratch_dir,
+            index,
+            params,
+        )?;
+    }
+    Ok(file_cal)
+}
+
+/// The run's quantification collector (label-free, TMT at the level the input supports, or
+/// none), from the flags and the detected input.
+fn quant_for_run(
+    cli: &Cli,
+    inputs: &RunInputs,
+    scorer: &RankScorer,
+    spectrum_path: &Path,
+) -> Result<Option<crate::quant::run::QuantCollector>, Box<dyn std::error::Error>> {
+    let high_res = inputs.acquisition.high_res;
+    let tmt_level =
+        setup::tmt_level_for(cli, high_res, spectrum_path, inputs.is_mzml, inputs.is_raw);
+    quant_collector(
+        cli,
+        high_res,
+        tmt_level,
+        scorer,
+        inputs.is_mgf,
+        inputs.is_d,
+        &cli.spectrum,
+    )
+}
+
+/// What `setup::route_per_scan_scorers` reads: the flags, the detected input, the scoring model
+/// and the search parameters.
+fn route_inputs<'r>(
+    cli: &'r Cli,
+    standalone: bool,
+    inputs: &'r RunInputs,
+    model: &'r ScoringModel,
+    params: &'r search::SearchParams,
+    search_enzyme: model::enzyme::Enzyme,
+) -> setup::RouteInputs<'r> {
+    setup::RouteInputs {
+        cli,
+        standalone,
+        instrument_was_detected: inputs.instrument_was_detected,
+        resolved_model_id: &model.resolved_model_id,
+        param: &model.param,
+        acquisition: &inputs.acquisition,
+        params,
+        gbdt_k: model.gbdt_k,
+        routed_instrument: model.routed_instrument,
+        route_protocol: inputs.route_protocol,
+        search_enzyme,
+        frag_tol_override: model.frag_tol_override,
+        routed_activation: model.routed_activation,
+    }
+}
+
+/// Opens (or builds) the out-of-core candidate index, routes a scorer per scan, and finishes the
+/// opening (the DIA retention-time model and the index log line).
+fn prepare_index<'a>(
+    (idx, params, scorer, fragment_tol_da, index_path): (
+        &'a search::SearchIndex,
+        &'a search::SearchParams,
+        &'a RankScorer,
+        f64,
+        &Path,
+    ),
+    route: setup::RouteInputs<'_>,
+) -> Result<PreparedSearch<'a>, Box<dyn std::error::Error>> {
+    let cli = route.cli;
+    let t_index = std::time::Instant::now();
+    let prepared = PreparedSearch::prepare_mmap(
+        idx,
+        params,
+        scorer,
+        fragment_tol_da,
+        &cli.db.decoy_prefix,
+        index_path,
+    )
+    .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+    let mut prepared = setup::route_per_scan_scorers(prepared, route);
+    setup::finish_index_open(cli, &mut prepared, t_index)?;
+    Ok(prepared)
+}
+
+/// Searches every input file into `outputs`; the run ends then cover every file, and the parse
+/// is checked (`ms_level_filtered`: the reader filters by MS level).
+fn search_all_files<'a>(
+    file_inputs: &FileInputs<'a>,
+    mut outputs: FileOutputs,
+    (prepared, measurer, quant): (
+        &mut PreparedSearch<'a>,
+        &mut FragmentErrorMeasurer,
+        &mut Option<crate::quant::run::QuantCollector>,
+    ),
+    ms_level_filtered: bool,
+) -> Result<FileOutputs, Box<dyn std::error::Error>> {
+    let spectrum_paths = file_inputs.spectrum_paths;
+    setup::search_files(
+        file_inputs,
+        &mut outputs,
+        prepared,
+        measurer,
+        quant,
+        (file_inputs.bench_mode, file_inputs.bench_cap),
+    )?;
+    outputs
+        .run_ends
+        .resize(spectrum_paths.len(), outputs.all_spectra.len());
+    setup::check_parsed(
+        file_inputs.cli,
+        &outputs.parse_stats,
+        ms_level_filtered,
+        &outputs.all_spectra,
+        spectrum_paths,
+    )?;
+    Ok(outputs)
+}
+
+/// The PIN's inputs: whether refinement candidates were merged, the IPF scoring (with
+/// `--localize`), and pass 1's candidates with the refinement's merged in when it ran (then also
+/// the merged index). The prepared search is released here.
+fn pin_tables<'s>(
+    cli: &Cli,
+    refine_output: Option<search::refinement::RefinementOutput>,
+    queues: &mut [search::TopNQueue],
+    mut prepared: PreparedSearch<'_>,
+    (idx, scorer): (&search::SearchIndex, &'s RankScorer),
+) -> PinTables<'s> {
+    let refine_merged = refine_output
+        .as_ref()
+        .is_some_and(|o| !o.candidates.is_empty());
+    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(scorer));
+    match refine_output {
+        Some(out) => {
+            let merged = search::refinement::merge_into_pass1(
+                queues,
+                std::mem::take(&mut prepared.candidates),
+                idx,
+                out,
+            );
+            drop(prepared);
+            (
+                refine_merged,
+                ipf_scoring,
+                merged.candidates,
+                Some(merged.index),
+            )
+        }
+        None => {
+            let candidates = std::mem::take(&mut prepared.candidates);
+            drop(prepared);
+            (refine_merged, ipf_scoring, candidates, None)
+        }
+    }
 }
 
 /// Spectra per chunk handed from the reader to the search threads.

@@ -19,7 +19,7 @@ use super::features::*;
 use super::{
     charges_to_try, enumeration_pass, mmap_window_key, prefetch_window_candidates,
     recalibrate_strong_over_spectrum, recentred_spectra, windowed_top_k, MmapRecordCache,
-    PreparedSearch, RefTracker, ScorerSet, KEPT_FEATURE_BATCH_SPECTRA,
+    PreparedSearch, RankScorer, RefTracker, ScorerSet, KEPT_FEATURE_BATCH_SPECTRA,
 };
 use crate::candidates::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
@@ -42,6 +42,37 @@ struct ChunkScoring<'c> {
     params: &'c SearchParams,
     spectrum_idx_offset: usize,
     complete_later: bool,
+}
+
+/// A spectrum's DIA isolation windows: (charge, lowest and highest neutral mass) per charge.
+type DiaWindows = SmallVec<[(u8, f64, f64); 4]>;
+
+/// The scored spectrum of charge `z`; every candidate charge has one.
+fn scored_spec<'a, 's>(
+    scored_per_charge: &'a [(u8, ScoredSpectrum<'s>)],
+    z: u8,
+) -> &'a ScoredSpectrum<'s> {
+    scored_for_charge(scored_per_charge, z).expect("scored spectrum exists for candidate charge")
+}
+
+/// What finishing a spectrum's scoring carries over from its candidate loop: the scorer and scored
+/// spectra, the candidates, the top-N queue and the per-charge queues, and the loop's statistics.
+struct SpectrumTail<'a, 's> {
+    scorer: &'a RankScorer,
+    scored_per_charge: &'a [(u8, ScoredSpectrum<'s>)],
+    cand_slice: &'a [Candidate],
+    queue: TopNQueue,
+    per_charge_queues: FxHashMap<u8, TopNQueue>,
+    best_raw: i32,
+    second_raw: i32,
+    ref_tracker: RefTracker,
+    track_ref: bool,
+    tailor_hist: FxHashMap<i32, u32>,
+    tailor_total: u32,
+    strong_null_stats: OnlineStats,
+    open_peaks: Option<Vec<(f64, f32)>>,
+    open_attempts: usize,
+    open_wins: usize,
 }
 
 impl<'a> PreparedSearch<'a> {
@@ -420,19 +451,16 @@ impl<'a> PreparedSearch<'a> {
     ) -> (TopNQueue, Vec<f32>) {
         let ChunkScoring {
             scorer_set,
-            rt_source,
-            record_cache,
-            frag_index,
             params,
             spectrum_idx_offset,
-            complete_later,
+            ..
         } = *chunk;
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
         let spec_idx = local_idx + spectrum_idx_offset;
         let scorer = scorer_set.for_spec(spec);
         let retention_cap = params.hot_loop_retention_cap();
-        let mut queue = TopNQueue::new(retention_cap);
+        let queue = TopNQueue::new(retention_cap);
 
         if spec.peaks.len() < params.min_peaks as usize {
             return (queue, Vec::new());
@@ -457,10 +485,7 @@ impl<'a> PreparedSearch<'a> {
                 scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
             }
         }
-        let scored_spec_for_charge = |z: u8| {
-            scored_for_charge(&scored_per_charge, z)
-                .expect("scored spectrum exists for candidate charge")
-        };
+        let scored_spec_for_charge = |z: u8| scored_spec(&scored_per_charge, z);
 
         let shift_ppm = params.precursor_mass_shift_ppm;
         let ms1_gate = if params.dia {
@@ -468,65 +493,8 @@ impl<'a> PreparedSearch<'a> {
         } else {
             None
         };
-        let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
-            charges_to_try
-                .iter()
-                .map(|&z| {
-                    let (lo, hi) = crate::precursor::matching::dia_neutral_window(
-                        spec,
-                        z,
-                        &params.precursor_tolerance,
-                        params.chimeric_isolation_halfwidth_da,
-                        shift_ppm,
-                    );
-                    (z, lo, hi)
-                })
-                .collect()
-        } else {
-            SmallVec::new()
-        };
-        let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
-            let gate = |mass: f64| {
-                ms1_gate.clone().is_none_or(|r| {
-                    dia_windows.iter().any(|&(z, lo, hi)| {
-                        (lo..=hi).contains(&mass)
-                            && self.dia_ms1_has(
-                                r.clone(),
-                                mass / z as f64 + PROTON,
-                                params.dia_ms1_tol_ppm,
-                            )
-                    })
-                })
-            };
-            let voted = params
-                .dia_vote_filter
-                .filter(|_| params.dia)
-                .map(|(w, k)| Spectrum {
-                    peaks: windowed_top_k(&spec.peaks, w, k),
-                    title: String::new(),
-                    ..*spec
-                });
-            let sel = fi.query_where(
-                voted.as_ref().unwrap_or(spec),
-                &charges_to_try,
-                params,
-                scorer.feature_match_tolerance(),
-                params.fragment_index_top_k as usize,
-                crate::params::FRAGMENT_INDEX_MIN_MATCHED,
-                crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
-                &gate,
-                rt_source.as_ref(),
-            );
-            let relabel =
-                |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);
-            fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
-        } else {
-            let key = mmap_window_key(spec, params);
-            self.expand_mmap_window_candidates(params, &key, record_cache.as_ref())
-        };
-        if frag_index.is_some() && self.candidate_filter.is_some() {
-            mmap_cands_owned.retain(|c| self.keeps(c));
-        }
+        let (mmap_cands_owned, dia_windows) =
+            self.spectrum_candidates(chunk, spec, scorer, &charges_to_try, &ms1_gate);
         let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
         let mmap_cands: &[Candidate] = &mmap_cands_owned;
         let cand_slice: &[Candidate] = mmap_cands;
@@ -750,6 +718,147 @@ impl<'a> PreparedSearch<'a> {
             }
         }
 
+        self.finish_spectrum(
+            chunk,
+            spec,
+            SpectrumTail {
+                scorer,
+                scored_per_charge: &scored_per_charge,
+                cand_slice,
+                queue,
+                per_charge_queues,
+                best_raw,
+                second_raw,
+                ref_tracker,
+                track_ref,
+                tailor_hist,
+                tailor_total,
+                strong_null_stats,
+                open_peaks,
+                open_attempts,
+                open_wins,
+            },
+        )
+    }
+
+    /// The candidates of one spectrum and its DIA isolation windows per charge: from the
+    /// fragment-ion index (gated by the windows and the DIA MS1 scans) or the precursor window of
+    /// the out-of-core index, then the candidate filter.
+    fn spectrum_candidates(
+        &self,
+        chunk: &ChunkScoring<'_>,
+        spec: &Spectrum,
+        scorer: &RankScorer,
+        charges_to_try: &[u8],
+        ms1_gate: &Option<std::ops::Range<usize>>,
+    ) -> (Vec<Candidate>, DiaWindows) {
+        let ChunkScoring {
+            rt_source,
+            record_cache,
+            frag_index,
+            params,
+            ..
+        } = *chunk;
+        let shift_ppm = params.precursor_mass_shift_ppm;
+        let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
+            charges_to_try
+                .iter()
+                .map(|&z| {
+                    let (lo, hi) = crate::precursor::matching::dia_neutral_window(
+                        spec,
+                        z,
+                        &params.precursor_tolerance,
+                        params.chimeric_isolation_halfwidth_da,
+                        shift_ppm,
+                    );
+                    (z, lo, hi)
+                })
+                .collect()
+        } else {
+            SmallVec::new()
+        };
+        let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
+            let gate = |mass: f64| {
+                ms1_gate.clone().is_none_or(|r| {
+                    dia_windows.iter().any(|&(z, lo, hi)| {
+                        (lo..=hi).contains(&mass)
+                            && self.dia_ms1_has(
+                                r.clone(),
+                                mass / z as f64 + PROTON,
+                                params.dia_ms1_tol_ppm,
+                            )
+                    })
+                })
+            };
+            let voted = params
+                .dia_vote_filter
+                .filter(|_| params.dia)
+                .map(|(w, k)| Spectrum {
+                    peaks: windowed_top_k(&spec.peaks, w, k),
+                    title: String::new(),
+                    ..*spec
+                });
+            let sel = fi.query_where(
+                voted.as_ref().unwrap_or(spec),
+                charges_to_try,
+                params,
+                scorer.feature_match_tolerance(),
+                params.fragment_index_top_k as usize,
+                crate::params::FRAGMENT_INDEX_MIN_MATCHED,
+                crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
+                &gate,
+                rt_source.as_ref(),
+            );
+            let relabel =
+                |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);
+            fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
+        } else {
+            let key = mmap_window_key(spec, params);
+            self.expand_mmap_window_candidates(params, &key, record_cache.as_ref())
+        };
+        if frag_index.is_some() && self.candidate_filter.is_some() {
+            mmap_cands_owned.retain(|c| self.keeps(c));
+        }
+        (mmap_cands_owned, dia_windows)
+    }
+
+    /// Ends scoring one spectrum once its candidates are scored: merges the per-charge queues,
+    /// computes the spectrum-level features (delta, Tailor denominator, listwise gap, rank entropy),
+    /// fills each retained PSM's features, calibrates the strong score, adds the site evidence and
+    /// interns the candidates; returns the queue and the retained strong scores.
+    fn finish_spectrum(
+        &self,
+        chunk: &ChunkScoring<'_>,
+        spec: &Spectrum,
+        tail: SpectrumTail<'_, '_>,
+    ) -> (TopNQueue, Vec<f32>) {
+        let SpectrumTail {
+            scorer,
+            scored_per_charge,
+            cand_slice,
+            mut queue,
+            mut per_charge_queues,
+            best_raw,
+            second_raw,
+            ref_tracker,
+            track_ref,
+            tailor_hist,
+            tailor_total,
+            strong_null_stats,
+            open_peaks,
+            open_attempts,
+            open_wins,
+        } = tail;
+        let ChunkScoring {
+            params,
+            complete_later,
+            ..
+        } = *chunk;
+        let fragment_tolerance_da = self.fragment_tolerance_da;
+        let aa_set_for_scoring = &self.aa_set_for_scoring;
+        let enz = params.enzyme;
+        let mmap_cands: &[Candidate] = cand_slice;
+        let scored_spec_for_charge = |z: u8| scored_spec(scored_per_charge, z);
         for queue in per_charge_queues.values_mut() {
             if queue.len() > 1 {
                 let drained = queue.drain_into_vec();

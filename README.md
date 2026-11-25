@@ -199,7 +199,7 @@ cargo build --release
 # Binary: target/release/andes
 ```
 
-Requires Rust 1.85+ (see `rust-toolchain.toml`).
+Requires Rust 1.88+ (see `rust-toolchain.toml`).
 
 ## Quick Start
 

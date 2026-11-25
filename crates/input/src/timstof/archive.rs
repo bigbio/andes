@@ -77,7 +77,7 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
                 if entry.is_symlink() {
                     return Err(DArchiveError::Symlink {
                         path: archive.display().to_string(),
-                        entry: entry.name().to_string(),
+                        entry: entry_name(entry.name()),
                     });
                 }
             }
@@ -117,6 +117,15 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
     Ok(target)
 }
 
+/// A zip entry's name for messages; zip 9 validates the name's encoding, so an unreadable name
+/// is shown as such.
+fn entry_name(name: Result<std::borrow::Cow<'_, str>, zip::result::ZipError>) -> String {
+    name.map_or_else(
+        |_| String::from("<unreadable entry name>"),
+        |n| n.into_owned(),
+    )
+}
+
 fn unpack_zip<R: Read + Seek>(
     zip: &mut zip::ZipArchive<R>,
     dir: &Path,
@@ -138,7 +147,7 @@ fn unpack_zip<R: Read + Seek>(
         let Some(rel) = entry.enclosed_name() else {
             return Err(corrupt(format!(
                 "zip entry '{}' points outside the archive folder",
-                entry.name()
+                entry_name(entry.name())
             )));
         };
         let out = dir.join(rel);
@@ -153,7 +162,7 @@ fn unpack_zip<R: Read + Seek>(
         std::io::copy(&mut entry, &mut file).map_err(|e| {
             corrupt(format!(
                 "zip entry '{}' could not be extracted ({e})",
-                entry.name()
+                entry_name(entry.name())
             ))
         })?;
     }

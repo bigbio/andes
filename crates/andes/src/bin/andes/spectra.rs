@@ -367,21 +367,20 @@ pub(crate) fn load_spectra_by_index(
     Ok(loaded)
 }
 
-pub(crate) fn detect_isobaric_sampled(
-    path: &Path,
-    is_mzml: bool,
-    is_mgf: bool,
-    is_raw: bool,
+/// The isobaric label of a run from its spectrum sample at `ms_level`, or else (MS2 searches of
+/// mzML/.raw) from its MS3 sample, which `ms3` gives only when it is needed.
+pub(crate) fn detect_isobaric_in(
+    sample: Option<Vec<Spectrum>>,
+    ms3: impl FnOnce() -> Option<Vec<Spectrum>>,
     ms_level: u32,
+    has_ms3: bool,
     high_res: bool,
 ) -> Option<input::IsobaricLabel> {
-    let found = sample_spectra(path, is_mzml, is_mgf, is_raw, ms_level)
-        .and_then(|sample| input::detect_isobaric(&sample, high_res));
-    if found.is_some() || ms_level != 2 || !(is_mzml || is_raw) {
+    let found = sample.and_then(|sample| input::detect_isobaric(&sample, high_res));
+    if found.is_some() || ms_level != 2 || !has_ms3 {
         return found;
     }
-    let ms3 = sample_spectra(path, is_mzml, is_mgf, is_raw, 3)?;
-    let label = input::detect_isobaric(&ms3, true);
+    let label = input::detect_isobaric(&ms3()?, true);
     if label.is_some() {
         log::info!(target: "protocol", "isobaric reporters found in the MS3 scans (SPS-MS3)");
     }
@@ -469,9 +468,27 @@ pub(crate) fn sample_spectra(
     if !(is_mzml || is_mgf) {
         return None;
     }
+    if is_mzml && ms_level >= 3 && spectrum_ext_lower(path).as_deref() == Some("mzml") {
+        if let Some(sample) = first_spectra_parallel(path, ms_level, SAMPLE_N) {
+            return Some(sample);
+        }
+    }
     let indices: HashSet<usize> = (0..SAMPLE_N).collect();
     let loaded = load_spectra_by_index(path, is_mzml, ms_level, &indices, usize::MAX).ok()?;
     Some(loaded.into_values().collect())
+}
+
+/// The first `n` spectra at `ms_level` of an uncompressed mzML file, read in parallel pieces: the
+/// spectra `load_spectra_by_index` reads one by one. A run without MS3 scans is read to its end
+/// either way, which the pieces do on every thread. `None` when a spectrum fails to parse (the
+/// sequential read then decides).
+fn first_spectra_parallel(path: &Path, ms_level: u32, n: usize) -> Option<Vec<Spectrum>> {
+    let (spectra, errors) =
+        input::read_spectra_parallel(path, ms_level, ms_level, rayon::current_num_threads())
+            .ok()?;
+    errors
+        .is_empty()
+        .then(|| spectra.into_iter().take(n).collect())
 }
 
 /// Every k-th of `items`, k = len / want (at least 1), at most `want` of them: a sample that

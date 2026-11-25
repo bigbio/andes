@@ -11,7 +11,7 @@ use crate::cli::{Cli, EthcdActivationFlag, Protocol};
 use crate::models::{label_from_mods, routing_protocol};
 use crate::quant::run::QuantSettings;
 use crate::spectra::{
-    compare_with_first_input, detect_acquisition_metadata, detect_isobaric_sampled,
+    compare_with_first_input, detect_acquisition_metadata, detect_isobaric_in,
     input_format_flags, sample_ms2_meta, sample_spectra,
 };
 
@@ -95,10 +95,23 @@ pub(crate) fn detect_inputs(
             .into());
     }
 
-    let (detected_activation, detected_instrument) = detect_acquisition_metadata(&spectrum_path);
+    let ms_level = cli.ms_level as u32;
+    let detect_label = cli.tmt.is_none()
+        && matches!(
+            cli.protocol,
+            Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho
+        );
+    let maybe_peak_evidence = cli.fragment_tol_ppm.is_none() && cli.fragment_tol_da.is_none();
+    let probes = read_probes(
+        &spectrum_path,
+        &spectrum_paths[1..],
+        (is_mzml, is_raw, is_d, is_mgf),
+        ms_level,
+        (maybe_peak_evidence, detect_label),
+    );
+    let (detected_activation, detected_instrument) = probes.first;
     let instrument_was_detected = detected_instrument.is_some();
-    for other_path in &spectrum_paths[1..] {
-        let other = detect_acquisition_metadata(other_path);
+    for (other_path, other) in spectrum_paths[1..].iter().zip(probes.others) {
         if let Some(warning) = compare_with_first_input(
             &spectrum_path,
             (detected_activation, detected_instrument),
@@ -109,12 +122,11 @@ pub(crate) fn detect_inputs(
         }
     }
 
-    let peak_evidence = if !instrument_was_detected
-        && cli.fragment_tol_ppm.is_none()
-        && cli.fragment_tol_da.is_none()
-    {
-        let ev = sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
-            .map(|sample| input::infer_fragment_resolution(&sample));
+    let peak_evidence = if !instrument_was_detected && maybe_peak_evidence {
+        let ev = probes
+            .sample
+            .as_deref()
+            .map(input::infer_fragment_resolution);
         if let Some(e) = &ev {
             log::info!(
                 target: "acquisition",
@@ -137,7 +149,7 @@ pub(crate) fn detect_inputs(
         cli.fragment_tol_ppm,
         cli.fragment_tol_da,
         peak_evidence,
-        sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
+        probes.ms2_meta,
     );
     if let (Some(said), Some(read)) = (cli.sdrf_dissociation, acquisition.activation) {
         if said != read {
@@ -150,22 +162,20 @@ pub(crate) fn detect_inputs(
         }
     }
 
-    let detect = || {
-        detect_isobaric_sampled(
-            &spectrum_path,
-            is_mzml,
-            is_mgf,
-            is_raw,
-            cli.ms_level as u32,
+    let label: Option<input::IsobaricLabel> = match cli.tmt {
+        Some(plex) => Some(isobaric_label_of_plex(plex)),
+        None if detect_label => detect_isobaric_in(
+            probes.sample,
+            || {
+                probes
+                    .ms3_sample
+                    .unwrap_or_else(|| sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, 3))
+            },
+            ms_level,
+            is_mzml || is_raw,
             acquisition.high_res,
-        )
-    };
-    let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
-        (Some(plex), _) => Some(isobaric_label_of_plex(plex)),
-        (None, Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho) => {
-            detect()
-        }
-        (None, _) => None,
+        ),
+        None => None,
     };
     let label = label.or_else(|| {
         if cli.protocol == Protocol::Auto {
@@ -186,6 +196,73 @@ pub(crate) fn detect_inputs(
         acquisition,
         label,
         route_protocol,
+    })
+}
+
+/// What input detection reads from the spectrum files.
+struct ReadProbes {
+    first: (Option<model::ActivationMethod>, Option<model::InstrumentType>),
+    others: Vec<(Option<model::ActivationMethod>, Option<model::InstrumentType>)>,
+    ms2_meta: input::Ms2MetaSample,
+    sample: Option<Vec<model::Spectrum>>,
+    /// The MS3 sample when it was read ahead (`None`: not read).
+    ms3_sample: Option<Option<Vec<model::Spectrum>>>,
+}
+
+/// Reads the heads of the inputs concurrently, each probe on its own thread with its own reader:
+/// the acquisition metadata of every input, the MS2 metadata of the first, and (when wanted) a
+/// spectrum sample of the first at `ms_level` and at MS3, for the fragment resolution and the
+/// isobaric label. A Thermo .raw is probed in turn (its .NET readers gain nothing from opening
+/// at once): its spectrum sample is read only when a probe will use it, and its MS3 sample is
+/// left to the label detection, which reads it only when the MS2 sample has no reporters.
+fn read_probes(
+    first: &Path,
+    others: &[PathBuf],
+    (is_mzml, is_raw, is_d, is_mgf): (bool, bool, bool, bool),
+    ms_level: u32,
+    (want_peak_evidence, want_label): (bool, bool),
+) -> ReadProbes {
+    let want_ms3 = want_label && ms_level == 2 && (is_mzml || is_raw);
+    if is_raw {
+        let first_meta = detect_acquisition_metadata(first);
+        let want_sample = want_label || (want_peak_evidence && first_meta.1.is_none());
+        return ReadProbes {
+            first: first_meta,
+            others: others.iter().map(|p| detect_acquisition_metadata(p)).collect(),
+            ms2_meta: sample_ms2_meta(first, is_mzml, is_raw, is_d),
+            sample: want_sample
+                .then(|| sample_spectra(first, is_mzml, is_mgf, is_raw, ms_level))
+                .flatten(),
+            ms3_sample: None,
+        };
+    }
+    let want_sample = want_peak_evidence || want_label;
+    std::thread::scope(|s| {
+        let others = s.spawn(|| {
+            others
+                .iter()
+                .map(|p| detect_acquisition_metadata(p))
+                .collect::<Vec<_>>()
+        });
+        let ms2_meta = s.spawn(|| sample_ms2_meta(first, is_mzml, is_raw, is_d));
+        let sample = s.spawn(|| {
+            want_sample
+                .then(|| sample_spectra(first, is_mzml, is_mgf, is_raw, ms_level))
+                .flatten()
+        });
+        let ms3_sample =
+            s.spawn(|| want_ms3.then(|| sample_spectra(first, is_mzml, is_mgf, is_raw, 3)));
+        let first = detect_acquisition_metadata(first);
+        fn resume<T>(panic: Box<dyn std::any::Any + Send>) -> T {
+            std::panic::resume_unwind(panic)
+        }
+        ReadProbes {
+            first,
+            others: others.join().unwrap_or_else(resume),
+            ms2_meta: ms2_meta.join().unwrap_or_else(resume),
+            sample: sample.join().unwrap_or_else(resume),
+            ms3_sample: ms3_sample.join().unwrap_or_else(resume),
+        }
     })
 }
 

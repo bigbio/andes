@@ -11,7 +11,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::format::KeyValue;
+use parquet::file::metadata::KeyValue;
 
 use crate::atomic::write_atomic_str;
 use crate::versioned::{column_at as column, zstd_props};

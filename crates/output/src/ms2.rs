@@ -12,8 +12,8 @@ use model::Tolerance;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Encoding;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
 use quant::ms2::{Ms2Scan, ScanReporters};
 

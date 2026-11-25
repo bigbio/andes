@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use model::hash::{fnv1a64_extend, FNV1A64_OFFSET};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::format::KeyValue;
+use parquet::file::metadata::KeyValue;
 use quant::align::{Alignment, RunAlignment, RunMap};
 use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};

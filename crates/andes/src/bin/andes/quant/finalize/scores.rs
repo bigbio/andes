@@ -12,8 +12,8 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 use rayon::prelude::*;
 
 use super::index::{EntryIndex, Table};
@@ -36,7 +36,7 @@ pub(super) fn temp_writer(
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let props = WriterProperties::builder()
         .set_compression(compression)
-        .set_max_row_group_size(group_rows)
+        .set_max_row_group_row_count(Some(group_rows))
         .set_key_value_metadata(Some(vec![KeyValue::new(
             key.to_string(),
             TEMP_VERSION.to_string(),

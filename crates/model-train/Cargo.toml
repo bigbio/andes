@@ -13,8 +13,8 @@ input = { path = "../input" }
 search = { path = "../search" }
 rustc-hash = "2"
 thiserror = { workspace = true }
-arrow = "53"
-parquet = "53"
+arrow = "60"
+parquet = "60"
 rayon = "1.10"
 
 [dev-dependencies]

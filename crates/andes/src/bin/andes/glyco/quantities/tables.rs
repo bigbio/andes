@@ -117,6 +117,44 @@ pub(super) fn write_rollup_tables(
     run_names: &[&str],
     settings: &Settings,
 ) -> Result<Kept, String> {
+    let glyco = glyco_rollup(rows, settings);
+    let mut glyco_rows: Vec<_> = glyco.iter().collect();
+    glyco_rows.sort_by(|a, b| {
+        a.0 .0
+            .cmp(&b.0 .0)
+            .then_with(|| a.0 .1.cmp(&b.0 .1))
+            .then_with(|| a.0 .2.cmp(&b.0 .2))
+    });
+    write_quant_table(pin, &glyco_rows)?;
+    let sites = write_site_table(pin, &glyco_rows)?;
+    write_glyco_matrix(pin, &glyco_rows, run_names)?;
+    write_protein_tables(pin, &glyco_rows, run_names)?;
+    Ok(Kept {
+        glycopeptides: glyco_rows.len(),
+        sites,
+    })
+}
+
+type GlycoKey = (String, String, String);
+
+/// The roll-up rows, sorted by run, peptide and glycan.
+type GlycoRows<'a> = [(&'a GlycoKey, &'a Glyco)];
+
+/// One glycopeptide composition of one run, summed over its charge states.
+struct Glyco {
+    area: f64,
+    best_cosine: f32,
+    best_q: f64,
+    charges: BTreeSet<u8>,
+    scans: BTreeSet<i32>,
+    transferred: usize,
+    proteins: String,
+    site: String,
+}
+
+/// The best accepted feature of each run, peptide, glycan and charge, summed per run, peptide
+/// and glycan.
+fn glyco_rollup(rows: &[FeatureRow], settings: &Settings) -> HashMap<GlycoKey, Glyco> {
     #[derive(PartialEq, Eq, Hash)]
     struct Key(String, String, String, u8);
     let mut best: HashMap<Key, usize> = HashMap::new();
@@ -144,17 +182,6 @@ pub(super) fn write_rollup_tables(
         if better {
             best.insert(key, i);
         }
-    }
-
-    struct Glyco {
-        area: f64,
-        best_cosine: f32,
-        best_q: f64,
-        charges: BTreeSet<u8>,
-        scans: BTreeSet<i32>,
-        transferred: usize,
-        proteins: String,
-        site: String,
     }
     let mut glyco: HashMap<(String, String, String), Glyco> = HashMap::new();
     for &i in best.values() {
@@ -188,6 +215,11 @@ pub(super) fn write_rollup_tables(
             Evidence::Transferred => e.transferred += 1,
         }
     }
+    glyco
+}
+
+/// `<pin>.glyco.quant.tsv`: one row per run, peptide and glycan.
+fn write_quant_table(pin: &Path, glyco_rows: &GlycoRows<'_>) -> Result<(), String> {
     let quant_path = output_path(pin, "quant");
     let mut out = std::io::BufWriter::new(
         std::fs::File::create(&quant_path).map_err(|e| format!("{}: {e}", quant_path.display()))?,
@@ -198,14 +230,7 @@ pub(super) fn write_rollup_tables(
          BestQValue\tArea"
     )
     .map_err(|e| format!("{}: {e}", quant_path.display()))?;
-    let mut glyco_rows: Vec<_> = glyco.iter().collect();
-    glyco_rows.sort_by(|a, b| {
-        a.0 .0
-            .cmp(&b.0 .0)
-            .then_with(|| a.0 .1.cmp(&b.0 .1))
-            .then_with(|| a.0 .2.cmp(&b.0 .2))
-    });
-    for ((run, peptide, glycan), g) in &glyco_rows {
+    for ((run, peptide, glycan), g) in glyco_rows {
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -229,9 +254,14 @@ pub(super) fn write_rollup_tables(
     }
     out.flush()
         .map_err(|e| format!("{}: {e}", quant_path.display()))?;
+    Ok(())
+}
 
+/// `<pin>.glyco.site.tsv`: each glycoform's share of its site's area in a run. Returns the
+/// number of run and site pairs.
+fn write_site_table(pin: &Path, glyco_rows: &GlycoRows<'_>) -> Result<usize, String> {
     let mut site_total: HashMap<(String, String), f64> = HashMap::new();
-    for ((run, peptide, _), g) in &glyco_rows {
+    for ((run, peptide, _), g) in glyco_rows {
         *site_total
             .entry((run.clone(), peptide.clone()))
             .or_insert(0.0) += g.area;
@@ -245,7 +275,7 @@ pub(super) fn write_rollup_tables(
         "Run\tPeptide\tGlycosite\tProteins\tGlycan\tArea\tSiteGlycoArea\tGlycoformShare"
     )
     .map_err(|e| format!("{}: {e}", site_path.display()))?;
-    for ((run, peptide, glycan), g) in &glyco_rows {
+    for ((run, peptide, glycan), g) in glyco_rows {
         let total = site_total
             .get(&(run.clone(), peptide.clone()))
             .copied()
@@ -271,14 +301,22 @@ pub(super) fn write_rollup_tables(
     }
     out.flush()
         .map_err(|e| format!("{}: {e}", site_path.display()))?;
+    Ok(site_total.len())
+}
 
+/// `<pin>.glyco.matrix.tsv`: one row per peptide and glycan, one area column per run.
+fn write_glyco_matrix(
+    pin: &Path,
+    glyco_rows: &GlycoRows<'_>,
+    run_names: &[&str],
+) -> Result<(), String> {
     struct MatrixRow {
         site: String,
         proteins: String,
         areas: HashMap<String, f64>,
     }
     let mut matrix: HashMap<(String, String), MatrixRow> = HashMap::new();
-    for ((run, peptide, glycan), g) in &glyco_rows {
+    for ((run, peptide, glycan), g) in glyco_rows {
         let e = matrix
             .entry((peptide.clone(), glycan.clone()))
             .or_insert_with(|| MatrixRow {
@@ -323,9 +361,18 @@ pub(super) fn write_rollup_tables(
     }
     out.flush()
         .map_err(|e| format!("{}: {e}", matrix_path.display()))?;
+    Ok(())
+}
 
+/// `<pin>.glyco.protein.tsv` (per run and protein) and `<pin>.glyco.protein_matrix.tsv` (one
+/// row per protein): summed and Top3 glycopeptide areas.
+fn write_protein_tables(
+    pin: &Path,
+    glyco_rows: &GlycoRows<'_>,
+    run_names: &[&str],
+) -> Result<(), String> {
     let mut per_protein: HashMap<(String, String), Vec<f64>> = HashMap::new();
-    for ((run, _, _), g) in &glyco_rows {
+    for ((run, _, _), g) in glyco_rows {
         for acc in g.proteins.split(';').filter(|s| !s.is_empty()) {
             per_protein
                 .entry((run.clone(), acc.to_string()))
@@ -396,11 +443,7 @@ pub(super) fn write_rollup_tables(
     }
     out.flush()
         .map_err(|e| format!("{}: {e}", protein_path.display()))?;
-
-    Ok(Kept {
-        glycopeptides: glyco_rows.len(),
-        sites: site_total.len(),
-    })
+    Ok(())
 }
 
 pub(super) fn composition_label(comp: &GlycanComp) -> String {

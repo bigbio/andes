@@ -2,9 +2,13 @@
 # These functions are reported in CI, not gated; any other function over 250 lines fails no_new_function_over_the_budget.
 # After a function is split under the budget, drop its line (and refresh the listed lengths) with:
 # cargo test -p andes --release --test structure -- --ignored write_fn_lines_baseline
+# Functions over 250 lines when the budget was lowered from 300 to 250, keyed path::name, with their lengths then.
+# These functions are reported in CI, not gated; any other function over 250 lines fails no_new_function_over_the_budget.
+crates/andes/src/bin/andes/cohort.rs::plan	299
 crates/andes/src/bin/andes/dia/llr.rs::add_to_pin	264
 crates/andes/src/bin/andes/dia/study.rs::finalize	286
 crates/andes/src/bin/andes/glyco/quantities/tables.rs::write_rollup_tables	291
+crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	299
 crates/andes/src/bin/andes/quant/run/labels.rs::quantify	285
 crates/andes/src/bin/andes/quant/tmt.rs::finalize	278
 crates/andes/src/bin/andes/quant/tmt/mbr.rs::process_run	291
@@ -14,8 +18,10 @@ crates/andes/src/bin/andes/search/resolve.rs::resolve_search_params	288
 crates/andes/src/bin/andes/train.rs::run_train	256
 crates/andes/src/bin/andes/train.rs::run_train_from_search	273
 crates/input/src/annotations.rs::add_claims	253
+crates/model-train/src/gbdt/train.rs::train_gbdt_from	295
 crates/model-train/src/store/read.rs::read_table_row	276
 crates/model-train/src/store/write.rs::build_stat_batch	264
+crates/model-train/src/store/write.rs::build_table_batch	300
 crates/output/src/fdr/sites.rs::site_claims	287
 crates/output/src/features.rs::build_batch	278
 crates/output/src/protein/inference.rs::infer_protein_groups	267

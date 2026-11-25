@@ -1,6 +1,7 @@
 pub(crate) mod blocks;
 pub(crate) mod joint;
 pub(crate) mod llr;
+pub(crate) mod pin;
 pub(crate) mod pass2;
 pub(crate) mod rt;
 pub(crate) mod score;

@@ -383,28 +383,8 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .map(|i| ms1.detection_limit(i) as f64)
         .collect();
     let limit = median_mut(&mut limits, Even::Upper).unwrap_or(f64::NAN);
-    let away: Vec<bool> = rt
-        .iter()
-        .map(|&t| (t - probe.t_hat).abs() > 3.0 * s.max(w_max) + max_shift)
-        .collect();
-    let n_away = away.iter().filter(|&&a| a).count();
-    let sigma: Vec<f64> = y
-        .iter()
-        .map(|t| {
-            if n_away >= 10 {
-                let base: Vec<f64> = t
-                    .iter()
-                    .zip(&away)
-                    .filter(|(_, &a)| a)
-                    .map(|(v, _)| *v)
-                    .collect();
-                robust_sigma(&base, 0.5 * limit)
-            } else {
-                robust_sigma(t, 0.5 * limit)
-            }
-        })
-        .collect();
-    let w_inv: Vec<f64> = sigma.iter().map(|s| 1.0 / (s * s)).collect();
+    let near = 3.0 * s.max(w_max) + max_shift;
+    let w_inv = trace_weights(&y, &rt, probe.t_hat, near, limit);
     let reach = 3.0 * s + 3.0 * w_max + max_shift;
     let j0 = rt.partition_point(|&t| t < probe.t_hat - reach);
     let j1 = rt.partition_point(|&t| t <= probe.t_hat + reach);
@@ -428,53 +408,9 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .map(|(t, m)| t.iter().map(|v| v - m).collect())
         .collect();
 
-    let profiles = |t0: f64, w: f64| -> Vec<Vec<f64>> {
-        (0..n_ch)
-            .map(|c| {
-                let tc = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
-                let g: Vec<f64> = rt
-                    .iter()
-                    .map(|&t| (-(t - tc) * (t - tc) / (2.0 * w * w)).exp())
-                    .collect();
-                let gbar = g.iter().sum::<f64>() / n_j as f64;
-                g.into_iter().map(|v| v - gbar).collect()
-            })
-            .collect()
-    };
+    let profiles = |t0: f64, w: f64| centred_profiles(&rt, &probe.rt_shift, n_ch, t0, w);
     let normal =
-        |gc: &[Vec<f64>], w_inv: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>) {
-            let mut sgg = vec![0.0; n_ch * n_ch];
-            for a in 0..n_ch {
-                for b in a..n_ch {
-                    let v: f64 = gc[a].iter().zip(&gc[b]).map(|(x, y)| x * y).sum();
-                    sgg[a * n_ch + b] = v;
-                    sgg[b * n_ch + a] = v;
-                }
-            }
-            let proj: Vec<Vec<f64>> = yc
-                .iter()
-                .map(|t| {
-                    (0..n_ch)
-                        .map(|c| t.iter().zip(&gc[c]).map(|(x, y)| x * y).sum())
-                        .collect()
-                })
-                .collect();
-            let mut h = vec![0.0; n_ch * n_ch];
-            let mut b = vec![0.0; n_ch];
-            for t in 0..n_t {
-                let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
-                for a in 0..n_ch {
-                    if mt[a] == 0.0 {
-                        continue;
-                    }
-                    b[a] += w_inv[t] * mt[a] * proj[t][a];
-                    for c in 0..n_ch {
-                        h[a * n_ch + c] += w_inv[t] * mt[a] * mt[c] * sgg[a * n_ch + c];
-                    }
-                }
-            }
-            (h, b, proj, sgg)
-        };
+        |gc: &[Vec<f64>], w_inv: &[f64]| normal_equations(gc, w_inv, &yc, &traces.mix, n_ch);
 
     let lo = probe.t_hat - 3.0 * s;
     let hi = probe.t_hat + 3.0 * s;
@@ -640,6 +576,94 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         n_points,
         channels,
     })
+}
+
+/// The weighted normal equations of the channel amplitudes for the centred profiles `gc`.
+type Normal = (Vec<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>);
+
+/// Each trace's inverse noise variance: its robust sigma from the scans more than `near` from
+/// `t_hat` when there are at least 10 of them, else from the whole trace, floored at half the
+/// detection `limit`.
+fn trace_weights(y: &[Vec<f64>], rt: &[f64], t_hat: f64, near: f64, limit: f64) -> Vec<f64> {
+    let away: Vec<bool> = rt.iter().map(|&t| (t - t_hat).abs() > near).collect();
+    let n_away = away.iter().filter(|&&a| a).count();
+    let sigma: Vec<f64> = y
+        .iter()
+        .map(|t| {
+            if n_away >= 10 {
+                let base: Vec<f64> = t
+                    .iter()
+                    .zip(&away)
+                    .filter(|(_, &a)| a)
+                    .map(|(v, _)| *v)
+                    .collect();
+                robust_sigma(&base, 0.5 * limit)
+            } else {
+                robust_sigma(t, 0.5 * limit)
+            }
+        })
+        .collect();
+    sigma.iter().map(|s| 1.0 / (s * s)).collect()
+}
+
+/// Each channel's Gaussian elution profile at apex `t0` (shifted by the channel's RT shift) and
+/// width `w` over the scans `rt`, centred to mean zero.
+fn centred_profiles(rt: &[f64], rt_shift: &[f64], n_ch: usize, t0: f64, w: f64) -> Vec<Vec<f64>> {
+    let n_j = rt.len();
+    (0..n_ch)
+        .map(|c| {
+            let tc = t0 + rt_shift.get(c).copied().unwrap_or(0.0);
+            let g: Vec<f64> = rt
+                .iter()
+                .map(|&t| (-(t - tc) * (t - tc) / (2.0 * w * w)).exp())
+                .collect();
+            let gbar = g.iter().sum::<f64>() / n_j as f64;
+            g.into_iter().map(|v| v - gbar).collect()
+        })
+        .collect()
+}
+
+/// The normal matrix `h` and vector `b` of the channel amplitudes, weighted per trace by
+/// `w_inv`, with each centred trace's projections on the profiles and the profiles' Gram matrix.
+fn normal_equations(
+    gc: &[Vec<f64>],
+    w_inv: &[f64],
+    yc: &[Vec<f64>],
+    mix: &[f64],
+    n_ch: usize,
+) -> Normal {
+    let n_t = yc.len();
+    let mut sgg = vec![0.0; n_ch * n_ch];
+    for a in 0..n_ch {
+        for b in a..n_ch {
+            let v: f64 = gc[a].iter().zip(&gc[b]).map(|(x, y)| x * y).sum();
+            sgg[a * n_ch + b] = v;
+            sgg[b * n_ch + a] = v;
+        }
+    }
+    let proj: Vec<Vec<f64>> = yc
+        .iter()
+        .map(|t| {
+            (0..n_ch)
+                .map(|c| t.iter().zip(&gc[c]).map(|(x, y)| x * y).sum())
+                .collect()
+        })
+        .collect();
+    let mut h = vec![0.0; n_ch * n_ch];
+    let mut b = vec![0.0; n_ch];
+    for t in 0..n_t {
+        let mt = &mix[t * n_ch..(t + 1) * n_ch];
+        for a in 0..n_ch {
+            if mt[a] == 0.0 {
+                continue;
+            }
+            b[a] += w_inv[t] * mt[a] * proj[t][a];
+            for c in 0..n_ch {
+                h[a * n_ch + c] += w_inv[t] * mt[a] * mt[c] * sgg[a * n_ch + c];
+            }
+        }
+    }
+    (h, b, proj, sgg)
 }
 
 /// The standard error of each channel's amplitude: from the inverse of the normal matrix over the

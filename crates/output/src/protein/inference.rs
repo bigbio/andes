@@ -278,58 +278,7 @@ pub fn infer_protein_groups(
     let target = parsimony(rows(targets, false));
     let decoy = parsimony(rows(decoys, true));
 
-    let member = |s: &Side| -> HashMap<String, usize> {
-        let mut m = s.family_group.clone();
-        for (i, g) in s.groups.iter().enumerate() {
-            for f in &g.subsumed {
-                m.entry(f.clone()).or_insert(i);
-            }
-        }
-        m
-    };
-    let (t_member, d_member) = (member(&target), member(&decoy));
-    let families: BTreeSet<&String> = t_member.keys().chain(d_member.keys()).collect();
-    let mut t_win: BTreeSet<usize> = BTreeSet::new();
-    let mut d_win: BTreeSet<usize> = BTreeSet::new();
-    for f in families {
-        let t = t_member.get(f).map(|&g| (g, target.groups[g].score));
-        let d = d_member.get(f).map(|&g| (g, decoy.groups[g].score));
-        match (t, d) {
-            (Some((g, ts)), Some((_, ds))) if ts > ds => {
-                t_win.insert(g);
-            }
-            (Some(_), Some((g, _))) | (None, Some((g, _))) => {
-                d_win.insert(g);
-            }
-            (Some((g, _)), None) => {
-                t_win.insert(g);
-            }
-            (None, None) => {}
-        }
-    }
-    let mut ranked: Vec<(f64, bool, usize)> = t_win
-        .iter()
-        .map(|&g| (target.groups[g].score, false, g))
-        .chain(d_win.iter().map(|&g| (decoy.groups[g].score, true, g)))
-        .collect();
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let fdp = ranked_q::<Counts>(
-        ranked.len(),
-        |c, rank| c.add(ranked[rank].1),
-        |_, _| false,
-        Eval::PerRow,
-        Counts::ratio,
-        1.0,
-    );
-    let mut q_of: HashMap<usize, f64> = HashMap::new();
-    let mut decoy_q: Vec<(usize, f64)> = Vec::new();
-    for (&(_, is_decoy, g), &q) in ranked.iter().zip(&fdp) {
-        if is_decoy {
-            decoy_q.push((g, q));
-        } else {
-            q_of.insert(g, q);
-        }
-    }
+    let (q_of, decoy_q) = picked_group_q(&target, &decoy);
 
     let mut psms = vec![0usize; target.groups.len()];
     let mut accepted_peps: BTreeSet<usize> = BTreeSet::new();
@@ -442,6 +391,82 @@ pub fn infer_protein_groups(
         .into_iter()
         .map(|(p, g)| (target.peptides[p].clone(), new_index[g]))
         .collect();
+    let decoy_groups = decoy_groups(&decoy, decoy_q, &prefix, groups.len() + 1);
+    Inference {
+        groups,
+        peptide_group,
+        shared_peptides,
+        decoy_groups,
+    }
+}
+
+/// Picked competition [cite:savitski2015_picked_fdr] between the target and decoy group of each
+/// protein family: the better-scoring side wins the family, then the winners are ranked and given
+/// q-values. Returns the target groups' q-values and the decoy winners with theirs.
+fn picked_group_q(target: &Side, decoy: &Side) -> (HashMap<usize, f64>, Vec<(usize, f64)>) {
+    let member = |s: &Side| -> HashMap<String, usize> {
+        let mut m = s.family_group.clone();
+        for (i, g) in s.groups.iter().enumerate() {
+            for f in &g.subsumed {
+                m.entry(f.clone()).or_insert(i);
+            }
+        }
+        m
+    };
+    let (t_member, d_member) = (member(target), member(decoy));
+    let families: BTreeSet<&String> = t_member.keys().chain(d_member.keys()).collect();
+    let mut t_win: BTreeSet<usize> = BTreeSet::new();
+    let mut d_win: BTreeSet<usize> = BTreeSet::new();
+    for f in families {
+        let t = t_member.get(f).map(|&g| (g, target.groups[g].score));
+        let d = d_member.get(f).map(|&g| (g, decoy.groups[g].score));
+        match (t, d) {
+            (Some((g, ts)), Some((_, ds))) if ts > ds => {
+                t_win.insert(g);
+            }
+            (Some(_), Some((g, _))) | (None, Some((g, _))) => {
+                d_win.insert(g);
+            }
+            (Some((g, _)), None) => {
+                t_win.insert(g);
+            }
+            (None, None) => {}
+        }
+    }
+    let mut ranked: Vec<(f64, bool, usize)> = t_win
+        .iter()
+        .map(|&g| (target.groups[g].score, false, g))
+        .chain(d_win.iter().map(|&g| (decoy.groups[g].score, true, g)))
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    let fdp = ranked_q::<Counts>(
+        ranked.len(),
+        |c, rank| c.add(ranked[rank].1),
+        |_, _| false,
+        Eval::PerRow,
+        Counts::ratio,
+        1.0,
+    );
+    let mut q_of: HashMap<usize, f64> = HashMap::new();
+    let mut decoy_q: Vec<(usize, f64)> = Vec::new();
+    for (&(_, is_decoy, g), &q) in ranked.iter().zip(&fdp) {
+        if is_decoy {
+            decoy_q.push((g, q));
+        } else {
+            q_of.insert(g, q);
+        }
+    }
+    (q_of, decoy_q)
+}
+
+/// The decoy groups that won their family, as `ProteinGroup`s with decoy accessions (`prefix`
+/// and the family), sorted by score and numbered from `first_id`.
+fn decoy_groups(
+    decoy: &Side,
+    decoy_q: Vec<(usize, f64)>,
+    prefix: &str,
+    first_id: usize,
+) -> Vec<ProteinGroup> {
     let decoy_accession = |f: &str| format!("{prefix}{f}");
     let mut decoy_groups: Vec<ProteinGroup> = decoy_q
         .into_iter()
@@ -474,14 +499,9 @@ pub fn infer_protein_groups(
             .then_with(|| a.lead.cmp(&b.lead))
     });
     for (i, g) in decoy_groups.iter_mut().enumerate() {
-        g.id = groups.len() + i + 1;
+        g.id = first_id + i;
     }
-    Inference {
-        groups,
-        peptide_group,
-        shared_peptides,
-        decoy_groups,
-    }
+    decoy_groups
 }
 
 pub fn write_protein_groups_tsv(path: &std::path::Path, inf: &Inference) -> std::io::Result<()> {

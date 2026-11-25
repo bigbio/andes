@@ -33,6 +33,39 @@ static ANDES_RT_WEIGHTS: &[u8] =
 static ANDES_MS2_WEIGHTS: &[u8] =
     include_bytes!("../../../../../../resources/predictors/andes_ms2.ams2");
 
+/// The bundled andes-ms2 model, with the collision energy, activation and instrument of the
+/// run unless --predictor-nce or --predictor-instrument set them.
+pub(crate) fn andes_ms2(cli: &Cli, acquisition: &Acquisition) -> Result<NativeMs2, String> {
+    let nce = cli
+        .predictor_nce
+        .map(f64::from)
+        .or_else(|| acquisition.predictor_nce())
+        .map(|v| v as f32);
+    let activation = acquisition.ms2_activation();
+    let inst = cli
+        .predictor_instrument
+        .clone()
+        .unwrap_or_else(|| acquisition.ms2_instrument().to_string());
+    log::info!(
+        target: "predict",
+        "andes-ms2 (activation {activation}, instrument {}, NCE {})",
+        if inst.is_empty() { "unknown" } else { &inst },
+        nce.map_or("unknown".to_string(), |v| v.to_string())
+    );
+    NativeMs2::from_bytes(ANDES_MS2_WEIGHTS, nce, activation, &inst).map_err(|e| e.to_string())
+}
+
+/// The fragment tolerance of the predicted-intensity features: the search's, else 20 ppm on
+/// high-resolution MS2 and 0.5 Da otherwise.
+pub(crate) fn feature_tolerance(cli: &Cli, high_res: bool) -> FragmentTolerance {
+    match (cli.fragment_tol_ppm, cli.fragment_tol_da) {
+        (Some(p), _) => FragmentTolerance::Ppm(p),
+        (None, Some(d)) => FragmentTolerance::Da(d),
+        (None, None) if high_res => FragmentTolerance::Ppm(20.0),
+        (None, None) => FragmentTolerance::Da(0.5),
+    }
+}
+
 pub(crate) const ANCHOR_Q: f64 = 0.01;
 
 /// The bundled andes-rt model as the per-form RT predictor of the DIA vote cut: the raw
@@ -179,27 +212,8 @@ impl Predictors {
             });
         }
         if has(PredictFeature::Ms2) {
-            let nce = cli
-                .predictor_nce
-                .map(f64::from)
-                .or_else(|| acquisition.predictor_nce())
-                .map(|v| v as f32);
-            let activation = acquisition.ms2_activation();
-            let inst = cli
-                .predictor_instrument
-                .clone()
-                .unwrap_or_else(|| acquisition.ms2_instrument().to_string());
-            log::info!(
-                target: "predict",
-                "andes-ms2 (activation {activation}, instrument {}, NCE {})",
-                if inst.is_empty() { "unknown" } else { &inst },
-                nce.map_or("unknown".to_string(), |v| v.to_string())
-            );
             sources.push(Source {
-                pred: Box::new(
-                    NativeMs2::from_bytes(ANDES_MS2_WEIGHTS, nce, activation, &inst)
-                        .map_err(|e| e.to_string())?,
-                ),
+                pred: Box::new(andes_ms2(cli, acquisition)?),
                 sessions: Vec::new(),
                 rt: false,
                 ms2: true,
@@ -261,13 +275,7 @@ impl Predictors {
                 .sessions()
                 .map_err(|e| format!("--predict {}: {e}", s.pred.prefix()))?;
         }
-        let high_res = acquisition.high_res;
-        let tol = match (cli.fragment_tol_ppm, cli.fragment_tol_da) {
-            (Some(p), _) => FragmentTolerance::Ppm(p),
-            (None, Some(d)) => FragmentTolerance::Da(d),
-            (None, None) if high_res => FragmentTolerance::Ppm(20.0),
-            (None, None) => FragmentTolerance::Da(0.5),
-        };
+        let tol = feature_tolerance(cli, acquisition.high_res);
         Ok(Some(Self {
             sources,
             tol,

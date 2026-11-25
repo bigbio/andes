@@ -77,6 +77,9 @@ pub(crate) const GAP_FEATURES: [&str; 6] = [
     "beta_gap_missing",
 ];
 
+/// The fragment-intensity features of a CSM the model has no row for: zero, marked missing.
+const MS2_NONE: crate::xl::ms2::Ms2Row = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
 /// The PIN `SpecId` of a spectrum's crosslink row; the CSM table repeats it in `spec_id`, so a
 /// rescored PIN joins back to the table by it.
 pub(crate) fn spec_id(r: &XlSpectrumResult) -> String {
@@ -192,16 +195,20 @@ pub(crate) fn write_xl_pin(
     prepared: &PreparedSearch,
     run_of: &dyn Fn(usize) -> String,
     intra: Option<bool>,
+    ms2: Option<&[Option<crate::xl::ms2::Ms2Row>]>,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<&str> = vec![
         "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "FileName",
     ];
     head.extend(FEATURES);
+    if ms2.is_some() {
+        head.extend(crate::xl::ms2::FEATURES);
+    }
     head.extend(["Peptide", "Proteins"]);
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
-    for r in results {
+    for (ri, r) in results.iter().enumerate() {
         let Some(c) = &r.csm else { continue };
         if intra.is_some_and(|i| i != c.intra) {
             continue;
@@ -225,6 +232,10 @@ pub(crate) fn write_xl_pin(
             run_of(r.spec_idx),
         ];
         row.extend(f.iter().map(|v| format!("{v:.5}")));
+        if let Some(rows) = ms2 {
+            let m = rows.get(ri).copied().flatten().unwrap_or(MS2_NONE);
+            row.extend(m.iter().map(|v| format!("{v:.5}")));
+        }
         row.push(format!(
             "-.{}{}-{}{}.-",
             bare(pa),

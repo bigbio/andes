@@ -1,5 +1,6 @@
 pub(crate) mod ambiguity;
 pub(crate) mod fdr;
+pub(crate) mod ms2;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -594,9 +595,11 @@ pub(crate) fn run_xl(
     report_base: &Path,
     spectrum_paths: &[PathBuf],
     run_ends: &[usize],
+    acquisition: &crate::acquisition::Acquisition,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let linkers = cli.xl.clone().ok_or("--xl: no crosslinker")?.0;
+    let ms2_model = crate::xl::ms2::XlMs2::from_cli(cli, acquisition)?;
     let several = linkers.len() > 1;
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]
@@ -675,6 +678,19 @@ pub(crate) fn run_xl(
             .and_then(|p| p.file_stem())
             .map_or_else(|| "run".to_string(), |s| s.to_string_lossy().into_owned())
     };
+    let ms2_rows = ms2_model.as_ref().map(|m| {
+        let t = std::time::Instant::now();
+        let rows = m.rows(spectra_for_xl, &results, &runs);
+        let missing = rows.iter().flatten().filter(|r| r[r.len() - 1] > 0.0).count();
+        log::info!(
+            target: "xl",
+            "fragment-intensity features for {} CSMs ({missing} with a peptide the model \
+             cannot encode) [{:.2}s]",
+            rows.iter().flatten().count(),
+            t.elapsed().as_secs_f64()
+        );
+        rows
+    });
     let pin_path = sibling(report_base, ".xl.pin");
     let n_pin = crate::xl::fdr::write_xl_pin(
         &pin_path,
@@ -684,6 +700,7 @@ pub(crate) fn run_xl(
         prepared,
         &run_of,
         None,
+        ms2_rows.as_deref(),
     )?;
     log::info!(target: "xl", "wrote {} ({n_pin} CSM rows)", pin_path.display());
     let mut score: Vec<Option<f64>> = results
@@ -700,6 +717,7 @@ pub(crate) fn run_xl(
             prepared,
             &run_of,
             Some(intra),
+            ms2_rows.as_deref(),
         )?;
         log::info!(target: "xl", "wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl::fdr::percolator_scores(cli, &path, &results)?;

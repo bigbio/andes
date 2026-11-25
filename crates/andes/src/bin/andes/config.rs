@@ -1,4 +1,6 @@
 pub(crate) mod mods;
+mod sections;
+pub use sections::apply;
 
 use std::path::PathBuf;
 
@@ -255,8 +257,16 @@ pub fn apply_db(
             }
         };
     }
-    set!("uniprot_variants", uniprot_variants, cfg.io.uniprot_variants);
-    set!("uniprot_isoforms", uniprot_isoforms, cfg.io.uniprot_isoforms);
+    set!(
+        "uniprot_variants",
+        uniprot_variants,
+        cfg.io.uniprot_variants
+    );
+    set!(
+        "uniprot_isoforms",
+        uniprot_isoforms,
+        cfg.io.uniprot_isoforms
+    );
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
     set!("annotations", annotations, cfg.io.annotations);
     set!("knockoffs", knockoffs, cfg.io.knockoffs);
@@ -301,496 +311,6 @@ pub fn apply_protein_config(
 }
 
 use crate::config::mods::{mod_list, xl_set};
-
-pub fn apply(
-    cfg: RunConfig,
-    args: &mut SearchArgs,
-    m: &clap::ArgMatches,
-    src: &mut ParamSources,
-) -> Result<(), String> {
-    macro_rules! set {
-        ($id:literal, $($field:ident).+, $val:expr) => {
-            if let Some(v) = $val {
-                if !cli_set(m, $id) {
-                    src.record_config($id, &cfg.written);
-                    args.$($field).+ = v;
-                }
-            }
-        };
-    }
-    macro_rules! set_opt {
-        ($id:literal, $($field:ident).+, $val:expr) => {
-            if let Some(v) = $val {
-                if !cli_set(m, $id) {
-                    src.record_config($id, &cfg.written);
-                    args.$($field).+ = Some(v);
-                }
-            }
-        };
-    }
-    macro_rules! set_parsed {
-        ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
-            if let Some(s) = $val {
-                if !cli_set(m, $id) {
-                    args.$($field).+ = ($parse)(&s)?;
-                    src.record_config($id, &cfg.written);
-                }
-            }
-        };
-    }
-
-    apply_db(&cfg, &mut args.db, m, src)?;
-
-    set_opt!("sdrf", sdrf, cfg.io.sdrf);
-    set!("spectrum", spectrum, cfg.io.spectrum);
-    set_opt!("database", database, cfg.io.database);
-    set_opt!("output_pin", output_pin, cfg.io.output_pin);
-    set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
-    set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
-    set_opt!("temp_dir", temp_dir, cfg.io.temp_dir);
-
-    set_parsed!(
-        "precursor_tol",
-        precursor_tol,
-        cfg.search.precursor_tol,
-        crate::parse_precursor_tol
-    );
-    set_parsed!(
-        "charge",
-        charge,
-        cfg.search.charge,
-        crate::parse_charge_range
-    );
-    if let Some(s) = cfg.search.isotope_error {
-        if !cli_set(m, "isotope_error") {
-            src.record_config("isotope_error", &cfg.written);
-            args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
-        }
-    }
-    set_parsed!(
-        "enzyme_specificity",
-        enzyme_specificity,
-        cfg.search.enzyme_specificity,
-        |s: &str| crate::cli::parse_enum("enzyme_specificity", s, true)
-    );
-    set!(
-        "max_missed_cleavages",
-        max_missed_cleavages,
-        cfg.search.max_missed_cleavages
-    );
-    set!("min_length", min_length, cfg.search.min_length);
-    set!("max_length", max_length, cfg.search.max_length);
-    set!("max_mods", max_mods, cfg.search.max_mods);
-    set!("min_peaks", min_peaks, cfg.search.min_peaks);
-    set!("top_n", top_n, cfg.search.top_n);
-    set!("dia", dia, cfg.search.dia);
-    set!(
-        "dia_mobility_slices",
-        dia_mobility_slices,
-        cfg.search.dia_mobility_slices
-    );
-    set!("dia_ms1_tol_ppm", dia_ms1_tol_ppm, cfg.search.dia_ms1_tol_ppm);
-    if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
-        if v != "ipf" {
-            return Err(format!("search.localize: '{v}' is not one of: ipf"));
-        }
-        args.localize = Some(v);
-        src.record_config("localize", &cfg.written);
-    }
-    set_parsed!(
-        "fragment_index",
-        fragment_index,
-        cfg.search.fragment_index,
-        parse_value_enum::<crate::cli::FragmentIndexFlag>
-    );
-    set_opt!(
-        "fragment_index_slice_da",
-        fragment_index_slice_da,
-        cfg.search.fragment_index_slice_da
-    );
-    set_opt!(
-        "index_cache_dir",
-        index_cache_dir,
-        cfg.search.index_cache_dir
-    );
-    set!("open_search", open_search, cfg.search.open_search);
-    set_parsed!(
-        "open_search_delta",
-        open_search_delta,
-        cfg.search.open_search_delta,
-        crate::parse_open_search_delta
-    );
-    set!(
-        "open_search_top_k",
-        open_search_top_k,
-        cfg.search.open_search_top_k
-    );
-    set!("optimize", optimize, cfg.search.optimize);
-    set!("optimize_sample", optimize_sample, cfg.search.optimize_sample);
-
-    set_parsed!(
-        "score",
-        score,
-        cfg.scoring.score,
-        parse_value_enum::<crate::ScoreFlag>
-    );
-    set_parsed!(
-        "precursor_cal",
-        precursor_cal,
-        cfg.scoring.precursor_cal,
-        crate::parse_precursor_cal
-    );
-    set!("threads", threads, cfg.scoring.threads);
-    set_parsed!(
-        "fragmentation",
-        fragmentation,
-        cfg.scoring.fragmentation,
-        |s: &str| crate::cli::parse_enum("fragmentation", s, true)
-    );
-    set_parsed!(
-        "protocol",
-        protocol,
-        cfg.scoring.protocol,
-        |s: &str| crate::cli::parse_enum("protocol", s, true)
-    );
-    if !cli_set(m, "fragment_tol_ppm") && !cli_set(m, "fragment_tol_da") {
-        set_opt!(
-            "fragment_tol_ppm",
-            fragment_tol_ppm,
-            cfg.scoring.fragment_tol_ppm
-        );
-        set_opt!(
-            "fragment_tol_da",
-            fragment_tol_da,
-            cfg.scoring.fragment_tol_da
-        );
-    }
-    set_opt!("model_store", model_store, cfg.scoring.model_store);
-    set_opt!("model_id_override", model_id_override, cfg.scoring.model);
-    set!("ms_level", ms_level, cfg.scoring.ms_level);
-    set!("max_spectra", max_spectra, cfg.scoring.max_spectra);
-    set_opt!("gbdt_max_trees", gbdt_max_trees, cfg.scoring.gbdt_max_trees);
-    set_parsed!(
-        "precursor_mono",
-        precursor_mono,
-        cfg.scoring.precursor_mono,
-        parse_value_enum::<crate::cli::PrecursorMonoFlag>
-    );
-    set_parsed!(
-        "ethcd_activation",
-        ethcd_activation,
-        cfg.scoring.ethcd_activation,
-        parse_value_enum::<crate::cli::EthcdActivationFlag>
-    );
-    set_opt!("peak_filter", peak_filter, cfg.scoring.peak_filter);
-
-    set_parsed!(
-        "decoy_strategy",
-        decoy_strategy,
-        cfg.decoys.strategy,
-        crate::cli::parse_decoy_strategy
-    );
-    set!("decoy_seed", decoy_seed, cfg.decoys.seed);
-
-    set!("chimeric", chimeric, cfg.chimeric.enabled);
-    set!(
-        "chimeric_max_coisolated",
-        chimeric_max_coisolated,
-        cfg.chimeric.max_coisolated
-    );
-    set!("chimeric_max_kl", chimeric_max_kl, cfg.chimeric.max_kl);
-
-    set!("refine", refine, cfg.refine.enabled);
-    set_opt!("refine_config", refine_config, cfg.refine.config);
-
-    set!("rescore", rescore, cfg.rescoring.enabled);
-    set_opt!("psm_fdr", psm_fdr, cfg.rescoring.psm_fdr);
-    set_opt!(
-        "proteoform_fdr",
-        proteoform_fdr,
-        cfg.rescoring.proteoform_fdr
-    );
-    set_opt!("protein_fdr", protein_fdr, cfg.rescoring.protein_fdr);
-    set_opt!("pep", pep, cfg.rescoring.pep);
-    set_opt!(
-        "percolator_bin",
-        percolator_bin,
-        cfg.rescoring.percolator_bin
-    );
-    set!(
-        "percolator_docker",
-        percolator_docker,
-        cfg.rescoring.percolator_docker
-    );
-    set!(
-        "percolator_image",
-        percolator_image,
-        cfg.rescoring.percolator_image
-    );
-    set!(
-        "percolator_args",
-        percolator_args,
-        cfg.rescoring.percolator_args
-    );
-    set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
-    set_opt!(
-        "rescore_memory_gb",
-        rescore_memory_gb,
-        cfg.rescoring.memory_gb
-    );
-    if let Some(list) = cfg.rescoring.predict {
-        if !cli_set(m, "predict") {
-            args.predict = list
-                .iter()
-                .map(|s| crate::cli::parse_enum("predict entry", s, true))
-                .collect::<Result<_, _>>()?;
-            src.record_config("predict", &cfg.written);
-        }
-    }
-    set_opt!(
-        "predictor_models",
-        predictor_models,
-        cfg.rescoring.predictor_models
-    );
-    set_parsed!(
-        "predictor_backend",
-        predictor_backend,
-        cfg.rescoring.predictor_backend,
-        |s: &str| crate::cli::parse_enum("predictor_backend", s, true)
-    );
-    set_opt!("predictor_nce", predictor_nce, cfg.rescoring.predictor_nce);
-    set_opt!(
-        "predictor_instrument",
-        predictor_instrument,
-        cfg.rescoring.predictor_instrument
-    );
-    set!(
-        "predictor_batch",
-        predictor_batch,
-        cfg.rescoring.predictor_batch
-    );
-
-    if let Some(v) = cfg.quant.tmt {
-        if !cli_set(m, "tmt") {
-            src.record_config("tmt", &cfg.written);
-            args.tmt = Some(crate::cli::parse_plex(&v)?);
-        }
-    }
-    set_opt!("tmt_level", tmt_level, cfg.quant.tmt_level);
-    if let Some(v) = cfg.quant.tmt_tol {
-        if !cli_set(m, "tmt_tol") {
-            src.record_config("tmt_tol", &cfg.written);
-            args.tmt_tol = Some(parse_tol("tmt_tol", &v)?);
-        }
-    }
-    set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
-    set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
-    set!("tmt_min_sn", tmt_min_sn, cfg.quant.tmt_min_sn);
-    set_parsed!(
-        "tmt_unmix",
-        tmt_unmix,
-        cfg.quant.tmt_unmix,
-        parse_value_enum::<crate::cli::TmtUnmix>
-    );
-    set!("lfq", lfq, cfg.quant.lfq);
-    if let Some(v) = cfg.quant.lfq_tol {
-        if !cli_set(m, "lfq_tol") {
-            src.record_config("lfq_tol", &cfg.written);
-            args.lfq_tol = Some(parse_tol("lfq_tol", &v)?);
-        }
-    }
-    set_opt!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
-    set_opt!(
-        "lfq_gaussian_width",
-        lfq_gaussian_width,
-        cfg.quant.lfq_gaussian_width
-    );
-    set!("lfq_min_cosine", lfq_min_cosine, cfg.quant.lfq_min_cosine);
-    set_opt!("label", label, cfg.quant.label);
-    set!(
-        "label_reference",
-        label_reference,
-        cfg.quant.label_reference
-    );
-    set!("label_arg_pro", label_arg_pro, cfg.quant.label_arg_pro);
-    set!(
-        "label_2h_enrichment_silac",
-        label_2h_enrichment_silac,
-        cfg.quant.label_2h_enrichment_silac
-    );
-    set!(
-        "label_2h_enrichment_chemical",
-        label_2h_enrichment_chemical,
-        cfg.quant.label_2h_enrichment_chemical
-    );
-    set!(
-        "label_heavy_enrichment",
-        label_heavy_enrichment,
-        cfg.quant.label_heavy_enrichment
-    );
-    set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
-    set_opt!(
-        "quant_transfer_fdr",
-        quant_transfer_fdr,
-        cfg.quant.quant_transfer_fdr
-    );
-    set_opt!(
-        "quant_channel_fdr",
-        quant_channel_fdr,
-        cfg.quant.quant_channel_fdr
-    );
-    set_opt!("quant_dir", quant_dir, cfg.quant.dir);
-    set!("mbr", mbr, cfg.quant.mbr);
-    set_opt!("mbr_donor_fdr", mbr_donor_fdr, cfg.quant.mbr_donor_fdr);
-    set!("mbr_wrong_log2", mbr_wrong_log2, cfg.quant.mbr_wrong_log2);
-
-    set!("glyco", glyco, cfg.glyco.enabled);
-    if let Some(v) = &cfg.search.xl {
-        if !cli_set(m, "xl") {
-            src.record_config("xl", &cfg.written);
-            args.xl = Some(xl_set(v)?);
-        }
-    }
-    set!("xl_linear_only", xl_linear_only, cfg.search.xl_linear_only);
-    set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
-    set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
-    set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
-    set!("debug_glyco", debug_glyco, cfg.glyco.debug);
-    set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
-    if !cli_set(m, "glyco_glycan_gdb")
-        && !cli_set(m, "glyco_glycan_wurcs")
-        && !cli_set(m, "glyco_species")
-    {
-        let n_sources = usize::from(cfg.glyco.glycan_gdb.is_some())
-            + usize::from(cfg.glyco.glycan_wurcs.is_some())
-            + usize::from(cfg.glyco.species.is_some());
-        if n_sources > 1 {
-            return Err(
-                "config: `glyco.glycan_gdb`, `glyco.glycan_wurcs` and `glyco.species` are \
-                 mutually exclusive — set only one"
-                    .to_string(),
-            );
-        }
-        if let Some(p) = cfg.glyco.glycan_gdb {
-            src.record_config("glyco_glycan_gdb", &cfg.written);
-            args.glyco_glycan_gdb = Some(p);
-        }
-        if let Some(p) = cfg.glyco.glycan_wurcs {
-            src.record_config("glyco_glycan_wurcs", &cfg.written);
-            args.glyco_glycan_wurcs = Some(p);
-        }
-        if let Some(s) = cfg.glyco.species {
-            src.record_config("glyco_species", &cfg.written);
-            args.glyco_species = Some(
-                parse_value_enum::<crate::cli::GlycoSpeciesFlag>(&s)
-                    .map_err(|e| format!("config: `glyco.species`: {e}"))?,
-            );
-        }
-    }
-    set!("glyco_min_core_y", glyco_min_core_y, cfg.glyco.min_core_y);
-    set_opt!(
-        "glyco_retrieval_tol_ppm",
-        glyco_retrieval_tol_ppm,
-        cfg.glyco.retrieval_tol_ppm
-    );
-    set!(
-        "glyco_peptide_first",
-        glyco_peptide_first,
-        cfg.glyco.peptide_first
-    );
-    set!(
-        "glyco_index_sequon_only",
-        glyco_index_sequon_only,
-        cfg.glyco.index_sequon_only
-    );
-    set_opt!(
-        "glyco_cz_max_charge",
-        glyco_cz_max_charge,
-        cfg.glyco.cz_max_charge
-    );
-    set!(
-        "glyco_y_max_charge",
-        glyco_y_max_charge,
-        cfg.glyco.y_max_charge
-    );
-
-    if let Some(v) = args.psm_fdr {
-        check_unit_fraction("psm_fdr", v)?;
-    }
-    if args.rescore_memory_gb == Some(0) {
-        return Err("config: `memory_gb` must be at least 1 (GB)".to_string());
-    }
-    if let Some(v) = args.proteoform_fdr {
-        check_unit_fraction("proteoform_fdr", v)?;
-    }
-    if let Some(v) = args.protein_fdr {
-        check_unit_fraction("protein_fdr", v)?;
-    }
-    if let Some(v) = args.pep {
-        check_unit_fraction("pep", v)?;
-    }
-    for (key, value) in [
-        ("mbr_donor_fdr", args.mbr_donor_fdr),
-        ("quant_transfer_fdr", args.quant_transfer_fdr),
-        ("quant_channel_fdr", args.quant_channel_fdr),
-    ] {
-        if let Some(v) = value {
-            check_unit_fraction(key, v)?;
-        }
-    }
-    check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
-    if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
-        return Err(format!(
-            "config: tmt_min_sn must be >= 0, got {}",
-            args.tmt_min_sn
-        ));
-    }
-    check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
-    check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
-    check_unit_fraction(
-        "label_2h_enrichment_chemical",
-        args.label_2h_enrichment_chemical,
-    )?;
-    check_unit_fraction("label_heavy_enrichment", args.label_heavy_enrichment)?;
-    if let Some(v) = args.quant_fdr {
-        check_unit_fraction("quant_fdr", v)?;
-    }
-    if let Some(v) = args.lfq_rt_window {
-        check_positive("lfq_rt_window", v)?;
-    }
-    check_positive("mbr_wrong_log2", args.mbr_wrong_log2)?;
-    if let Some(v) = args.lfq_gaussian_width {
-        check_positive("lfq_gaussian_width", v)?;
-    }
-    check_positive("glyco_tol_ppm", args.glyco_tol_ppm)?;
-    if let Some(v) = args.glyco_retrieval_tol_ppm {
-        check_positive("glyco_retrieval_tol_ppm", v)?;
-    }
-    if !args.chimeric_max_kl.is_finite() || args.chimeric_max_kl < 0.0 {
-        return Err(format!(
-            "config: `chimeric_max_kl` must be finite and >= 0 (got {})",
-            args.chimeric_max_kl
-        ));
-    }
-    if let Some(v) = args.fragment_index_slice_da {
-        check_positive("fragment_index_slice_da", v)?;
-    }
-    if let Some(v) = args.fragment_tol_ppm {
-        check_positive("fragment_tol_ppm", v)?;
-    }
-    if let Some(v) = args.fragment_tol_da {
-        check_positive("fragment_tol_da", v)?;
-    }
-    if args.fragment_tol_ppm.is_some() && args.fragment_tol_da.is_some() {
-        return Err(
-            "config: `scoring.fragment_tol_ppm` and `scoring.fragment_tol_da` are mutually \
-             exclusive — set only one"
-                .to_string(),
-        );
-    }
-
-    Ok(())
-}
 
 pub fn check_resolved(args: &SearchArgs) -> Result<(), String> {
     if args.glyco
@@ -1191,14 +711,21 @@ glyco:
     #[test]
     fn every_search_flag_has_a_config_key() {
         use clap::CommandFactory;
-        let source = include_str!("config.rs")
-            .replace("\r\n", "\n")
-            .replace("(\n        ", "(");
+        let source = [
+            include_str!("config.rs"),
+            include_str!("config/sections.rs"),
+        ]
+        .concat()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("( ", "(");
         let mapped = |id: &str| {
-            ["set!", "set_opt!", "set_parsed!"]
-                .iter()
-                .any(|mac| source.contains(&format!("{mac}(\"{id}\",")))
-                || source.contains(&format!("cli_set(m, \"{id}\")"))
+            ["set!", "set_opt!", "set_parsed!"].iter().any(|mac| {
+                source.contains(&format!("{mac}(\"{id}\","))
+                    || source.contains(&format!("{mac}(c, \"{id}\","))
+            }) || source.contains(&format!("cli_set(m, \"{id}\")"))
+                || source.contains(&format!("cli_set(c.m, \"{id}\")"))
         };
         let missing: Vec<String> = crate::TopCli::command()
             .get_arguments()
@@ -1218,7 +745,10 @@ glyco:
         let a = applied(yaml, &[]).unwrap();
         let f = &a.db.fixed_mods.as_ref().unwrap().0;
         assert_eq!(f.len(), 2);
-        assert_eq!((f[0].name.as_str(), f[0].mass_delta), ("Carbamidomethyl", 57.021464));
+        assert_eq!(
+            (f[0].name.as_str(), f[0].mass_delta),
+            ("Carbamidomethyl", 57.021464)
+        );
         assert_eq!((f[1].name.as_str(), f[1].mass_delta), ("MyTag", 28.0313));
         assert!(f[1].accession.is_none() && f.iter().all(|m| m.fixed));
         let v = &a.db.variable_mods.as_ref().unwrap().0;
@@ -1239,13 +769,22 @@ glyco:
                 "search:\n  variable_mods: [{name: Phospho, sites: S, nuetral_loss: [1.0]}]\n",
                 "unknown key `nuetral_loss`",
             ),
-            ("search:\n  variable_mods: [Phosho (S)]\n", "did you mean Phospho"),
-            ("search:\n  variable_mods: [{mass: 1.0}]\n", "`sites` is missing"),
+            (
+                "search:\n  variable_mods: [Phosho (S)]\n",
+                "did you mean Phospho",
+            ),
+            (
+                "search:\n  variable_mods: [{mass: 1.0}]\n",
+                "`sites` is missing",
+            ),
             (
                 "search:\n  fixed_mods: [{name: Phospho, sites: S, restrict_to: annotated}]\n",
                 "needs a variable",
             ),
-            ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+            (
+                "search:\n  variable_mods: [42]\n",
+                "expected `Name (sites)`",
+            ),
         ] {
             let e = applied(bad, &[]).unwrap_err();
             assert!(e.contains(msg), "{e}");
@@ -1292,8 +831,14 @@ glyco:
                 "search:\n  xl: [DSSO, \"DSSO (K)\"]\n",
                 "search.xl: DSSO is given twice",
             ),
-            ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
-            ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
+            (
+                "search:\n  xl: {name: X, intact: {mass: 100.0}}\n",
+                "needs `sites`",
+            ),
+            (
+                "search:\n  xl: {name: X, sites: K, intact: {}}\n",
+                "needs a `unimod`",
+            ),
             (
                 "search:\n  xl: {name: DSSO, sitess: K}\n",
                 "unknown key `sitess`",

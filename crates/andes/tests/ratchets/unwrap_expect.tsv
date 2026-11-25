@@ -17,7 +17,8 @@ crates/andes/src/bin/andes/quant/scores.rs	1
 crates/andes/src/bin/andes/quant/tmt.rs	1
 crates/andes/src/bin/andes/quant/tmt/mbr.rs	4
 crates/andes/src/bin/andes/sdrf.rs	1
-crates/andes/src/bin/andes/search.rs	2
+crates/andes/src/bin/andes/search.rs	1
+crates/andes/src/bin/andes/search/setup.rs	1
 crates/andes/src/bin/andes/train.rs	2
 crates/andes/src/bin/andes/train/intensity.rs	2
 crates/andes/src/bin/andes/transfers.rs	1
@@ -62,12 +63,15 @@ crates/scoring/src/psm/spectrum.rs	3
 crates/search/src/candidates.rs	2
 crates/search/src/candidates/records.rs	8
 crates/search/src/dia.rs	4
-crates/search/src/engine.rs	17
+crates/search/src/engine.rs	1
 crates/search/src/engine/coisolation.rs	2
+crates/search/src/engine/queries.rs	2
+crates/search/src/engine/run.rs	6
+crates/search/src/engine/setup.rs	8
 crates/search/src/engine/slices.rs	1
 crates/search/src/fragments/index.rs	2
 crates/search/src/fragments/predictions.rs	3
-crates/search/src/glycopeptides.rs	1
+crates/search/src/glycopeptides/scan.rs	1
 crates/search/src/ipf.rs	1
 crates/xl/src/crosslinker.rs	1
 crates/xl/src/doublet.rs	1

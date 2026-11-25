@@ -14,6 +14,7 @@ the pull request.
 | `agents_md_lists_every_docs_dev_page` | `AGENTS.md` mentions every page under `docs/dev/`. | none | Add a row to the table in `AGENTS.md`. |
 | `contributing_points_to_the_rules` | `CONTRIBUTING.md` links `docs/dev/` and `AGENTS.md`. | none | Restore the links. |
 | `no_new_source_file_over_the_budget` | A file under `crates/*/src` that is not on `file_lines.tsv` has at most 1,500 lines. The files on the list (over the budget when the checks were added) are not gated: CI prints them, with how far each moved, from the ignored test `report_listed_files_over_the_budget`. | `file_lines.tsv` | Split the file into modules. When a listed file is split under the budget, remove its line (the regeneration command does it); from then on it is gated. |
+| `no_new_function_over_the_budget` | A function in a file under `crates/*/src` has at most 250 lines (from its `fn` line to its closing brace, test code excluded), unless it is on `fn_lines.tsv` as `path::name`. The listed functions are not gated: CI prints them from the ignored test `report_listed_functions_over_the_budget`. | `fn_lines.tsv` | Split the function into steps (a function per stage, its inputs in a struct when there are many). When a listed function is split under the budget, remove its line (the regeneration command does it); from then on it is gated. |
 | `no_new_unwrap_or_expect_in_live_code` | No new `.unwrap()` or `.expect(` in live code (not tests, comments or strings). `unwrap_err` and `expect_err` are not counted. A documented invariant is not exempt yet. | `unwrap_expect.tsv` | Return an error, or restructure with `let ... else` or `match`. |
 | `no_print_macros_in_live_code` | No `println!`, `eprintln!`, `print!`, `eprint!` or `dbg!` in live code, except in the files on `PRINT_ALLOWED` in `structure.rs`. | none (allowlist in code) | Log through `log` (see `clean-logs`). A file whose output is a command's result goes on `PRINT_ALLOWED` with the reason. |
 | `every_new_module_has_a_doc` | A source file starts with a `//!` doc; inner attributes may come first. | `module_docs.tsv` | Add a `//!` doc of 2-4 lines. |
@@ -57,7 +58,7 @@ A baseline is a TSV of `path<TAB>count` lines. The tests compare counts per file
 
 After a cleanup, lower the counts with
 `cargo test -p andes --release --test structure -- --ignored write_<rule>_baseline`, where
-`<rule>` is `file_lines`, `unwrap_expect` or `module_docs`. The command refuses to raise any
+`<rule>` is `file_lines`, `fn_lines`, `unwrap_expect` or `module_docs`. The command refuses to raise any
 count or add a line.
 
 Because lowering is strict, two parallel pull requests that clean the same file can conflict

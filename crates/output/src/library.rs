@@ -796,93 +796,7 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     }
     let n = meta_rows.len();
 
-    let (reader, _, _) = open(
-        &align_path,
-        ALIGNMENT_KEY,
-        "alignment",
-        &[alignment_schema()],
-    )?;
-    let mut run_states: Vec<RunAlignment> = Vec::new();
-    for b in reader {
-        let b = b.map_err(|e| aerr(&e))?;
-        let run = column::<UInt16Array>(&b, 0, &align_path)?;
-        let stem = column::<StringArray>(&b, 1, &align_path)?;
-        let aligned = column::<BooleanArray>(&b, 2, &align_path)?;
-        let kx = column::<ListArray>(&b, 3, &align_path)?;
-        let ky = column::<ListArray>(&b, 4, &align_path)?;
-        let slo = column::<Float64Array>(&b, 5, &align_path)?;
-        let shi = column::<Float64Array>(&b, 6, &align_path)?;
-        let sd_t = column::<ListArray>(&b, 7, &align_path)?;
-        let sd = column::<ListArray>(&b, 8, &align_path)?;
-        let anchors = column::<UInt64Array>(&b, 9, &align_path)?;
-        let coverage = column::<Float64Array>(&b, 10, &align_path)?;
-        let component = column::<UInt32Array>(&b, 11, &align_path)?;
-        let obs_p = column::<ListArray>(&b, 12, &align_path)?;
-        let obs_rt = column::<ListArray>(&b, 13, &align_path)?;
-        for i in 0..b.num_rows() {
-            let r = run_states.len();
-            if run.value(i) as usize != r {
-                return Err(aerr(&format!("row {r} holds run {}", run.value(i))));
-            }
-            if runs.get(r).map(String::as_str) != Some(stem.value(i)) {
-                return Err(aerr(&format!(
-                    "run {r} is {:?}, the library lists {:?}",
-                    stem.value(i),
-                    runs.get(r)
-                )));
-            }
-            let (map, residual_sd) = if aligned.value(i) {
-                if slo.is_null(i) || shi.is_null(i) {
-                    return Err(aerr(&format!("run {r}: aligned without end slopes")));
-                }
-                let map = RunMap::from_parts(
-                    f64s(kx, i, &align_path)?,
-                    f64s(ky, i, &align_path)?,
-                    slo.value(i),
-                    shi.value(i),
-                )
-                .map_err(|e| aerr(&format!("run {r}: {e}")))?;
-                let t = f64s(sd_t, i, &align_path)?;
-                let s = f64s(sd, i, &align_path)?;
-                if t.len() != s.len() {
-                    return Err(aerr(&format!(
-                        "run {r}: {} residual knots for {} widths",
-                        t.len(),
-                        s.len()
-                    )));
-                }
-                (Some(map), Some(t.into_iter().zip(s).collect()))
-            } else {
-                (None, None)
-            };
-            let ps =
-                items::<u32, UInt32Array>(obs_p, i, &align_path, |a: &UInt32Array| a.values())?;
-            let ts = f64s(obs_rt, i, &align_path)?;
-            if ps.len() != ts.len() {
-                return Err(aerr(&format!(
-                    "run {r}: {} observed precursors for {} RTs",
-                    ps.len(),
-                    ts.len()
-                )));
-            }
-            run_states.push(RunAlignment {
-                map,
-                residual_sd,
-                anchors: anchors.value(i) as usize,
-                coverage: coverage.value(i),
-                component: (!component.is_null(i)).then(|| component.value(i)),
-                observations: ps.into_iter().zip(ts).collect(),
-            });
-        }
-    }
-    if run_states.len() != runs.len() {
-        return Err(aerr(&format!(
-            "{} runs, the library lists {}",
-            run_states.len(),
-            runs.len()
-        )));
-    }
-    let alignment = Alignment::from_runs(run_states, n).map_err(|e| aerr(&e))?;
+    let alignment = read_alignment(&align_path, &runs, n)?;
     if alignment_fingerprint(&alignment) != alignment_fp {
         return Err(aerr(&format!(
             "does not belong to {} (alignment fingerprint differs); rebuild the library",
@@ -929,6 +843,98 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         ));
     }
     Ok(stored)
+}
+
+/// The run alignment of a library: one state per run in the order the library lists them,
+/// checked against those run names.
+fn read_alignment(align_path: &Path, runs: &[String], n: usize) -> Result<Alignment, String> {
+    let aerr = |e: &dyn std::fmt::Display| format!("{}: {e}", align_path.display());
+    let (reader, _, _) = open(
+        align_path,
+        ALIGNMENT_KEY,
+        "alignment",
+        &[alignment_schema()],
+    )?;
+    let mut run_states: Vec<RunAlignment> = Vec::new();
+    for b in reader {
+        let b = b.map_err(|e| aerr(&e))?;
+        let run = column::<UInt16Array>(&b, 0, align_path)?;
+        let stem = column::<StringArray>(&b, 1, align_path)?;
+        let aligned = column::<BooleanArray>(&b, 2, align_path)?;
+        let kx = column::<ListArray>(&b, 3, align_path)?;
+        let ky = column::<ListArray>(&b, 4, align_path)?;
+        let slo = column::<Float64Array>(&b, 5, align_path)?;
+        let shi = column::<Float64Array>(&b, 6, align_path)?;
+        let sd_t = column::<ListArray>(&b, 7, align_path)?;
+        let sd = column::<ListArray>(&b, 8, align_path)?;
+        let anchors = column::<UInt64Array>(&b, 9, align_path)?;
+        let coverage = column::<Float64Array>(&b, 10, align_path)?;
+        let component = column::<UInt32Array>(&b, 11, align_path)?;
+        let obs_p = column::<ListArray>(&b, 12, align_path)?;
+        let obs_rt = column::<ListArray>(&b, 13, align_path)?;
+        for i in 0..b.num_rows() {
+            let r = run_states.len();
+            if run.value(i) as usize != r {
+                return Err(aerr(&format!("row {r} holds run {}", run.value(i))));
+            }
+            if runs.get(r).map(String::as_str) != Some(stem.value(i)) {
+                return Err(aerr(&format!(
+                    "run {r} is {:?}, the library lists {:?}",
+                    stem.value(i),
+                    runs.get(r)
+                )));
+            }
+            let (map, residual_sd) = if aligned.value(i) {
+                if slo.is_null(i) || shi.is_null(i) {
+                    return Err(aerr(&format!("run {r}: aligned without end slopes")));
+                }
+                let map = RunMap::from_parts(
+                    f64s(kx, i, align_path)?,
+                    f64s(ky, i, align_path)?,
+                    slo.value(i),
+                    shi.value(i),
+                )
+                .map_err(|e| aerr(&format!("run {r}: {e}")))?;
+                let t = f64s(sd_t, i, align_path)?;
+                let s = f64s(sd, i, align_path)?;
+                if t.len() != s.len() {
+                    return Err(aerr(&format!(
+                        "run {r}: {} residual knots for {} widths",
+                        t.len(),
+                        s.len()
+                    )));
+                }
+                (Some(map), Some(t.into_iter().zip(s).collect()))
+            } else {
+                (None, None)
+            };
+            let ps = items::<u32, UInt32Array>(obs_p, i, align_path, |a: &UInt32Array| a.values())?;
+            let ts = f64s(obs_rt, i, align_path)?;
+            if ps.len() != ts.len() {
+                return Err(aerr(&format!(
+                    "run {r}: {} observed precursors for {} RTs",
+                    ps.len(),
+                    ts.len()
+                )));
+            }
+            run_states.push(RunAlignment {
+                map,
+                residual_sd,
+                anchors: anchors.value(i) as usize,
+                coverage: coverage.value(i),
+                component: (!component.is_null(i)).then(|| component.value(i)),
+                observations: ps.into_iter().zip(ts).collect(),
+            });
+        }
+    }
+    if run_states.len() != runs.len() {
+        return Err(aerr(&format!(
+            "{} runs, the library lists {}",
+            run_states.len(),
+            runs.len()
+        )));
+    }
+    Alignment::from_runs(run_states, n).map_err(|e| aerr(&e))
 }
 
 #[cfg(test)]

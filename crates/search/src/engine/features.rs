@@ -172,6 +172,242 @@ pub(crate) fn complete_psm_features(
     features.mod_site_det_count = kept.mod_site[FEAT_SITE_DET_COUNT];
 }
 
+fn longest_run(matched: &[bool]) -> u32 {
+    let mut best = 0u32;
+    let mut cur = 0u32;
+    for &m in matched {
+        if m {
+            cur += 1;
+            if cur > best {
+                best = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    best
+}
+
+fn mean_and_pop_stdev(values: &[f64]) -> (f32, f32) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let sum_sq: f64 = values.iter().map(|v| v * v).sum();
+    let var = (sum_sq / n - mean * mean).max(0.0);
+    (mean as f32, var.sqrt() as f32)
+}
+
+/// The doubly charged b/y ions (with their neutral losses) matched within the feature tolerance.
+fn doubly_charged_matches(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    predict_losses: bool,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> u32 {
+    let predicted_z2 = predict_by_ions_with_losses(peptide, 2..=2, predict_losses);
+    let mut count: u32 = 0;
+    for p in &predicted_z2 {
+        let tol_da = if feature_tol_is_ppm {
+            p.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        if scored_spec.nearest_peak_full(p.mz, tol_da).is_some() {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Mean and population standard deviation of the absolute and of the signed ppm errors of the
+/// seven most intense matched ions.
+fn top7_ppm_error_stats(top7: &[MatchedIon]) -> ((f32, f32), (f32, f32)) {
+    let abs_ppm_errors: Vec<f64> = top7
+        .iter()
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| ((obs - pred) / pred * 1e6).abs())
+        .collect();
+    let rel_ppm_errors: Vec<f64> = top7
+        .iter()
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| (obs - pred) / pred * 1e6)
+        .collect();
+    (
+        mean_and_pop_stdev(&abs_ppm_errors),
+        mean_and_pop_stdev(&rel_ppm_errors),
+    )
+}
+
+/// The matched ions' summed Gaussian likelihood of their ppm error under the scorer's error model.
+fn ppm_gaussian_score(matched_ions: &[MatchedIon], ppm_centre: f64, ppm_sigma: f64) -> f32 {
+    matched_ions
+        .iter()
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| {
+            let z = ((obs - pred) / pred * 1e6 - ppm_centre) / ppm_sigma;
+            (-0.5 * z * z).exp()
+        })
+        .sum::<f64>() as f32
+}
+
+/// The matched ions' summed surprise against chance matches at the local peak density.
+fn chance_match_surprise(
+    scored_spec: &ScoredSpectrum<'_>,
+    matched_ions: &[MatchedIon],
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> f32 {
+    matched_ions
+        .iter()
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| {
+            let tol_da = if feature_tol_is_ppm {
+                pred * feature_tol / 1e6
+            } else {
+                feature_tol
+            };
+            let rho = scored_spec.local_peak_density(obs, DENSITY_HW);
+            let p_chance = rho * (2.0 * tol_da);
+            if p_chance > 0.0 {
+                (-p_chance.ln()).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .sum::<f64>() as f32
+}
+
+/// The mean over matched ions of 1 / (1 + the number of other theoretical fragments within
+/// tolerance of the matched peak).
+fn unique_match_fraction(
+    matched_ions: &[MatchedIon],
+    theoretical_ions: &[(f64, FragmentIon)],
+    num_matched: u32,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> f32 {
+    if num_matched == 0 {
+        0.0
+    } else {
+        let evidence_sum: f64 = matched_ions
+            .iter()
+            .map(|&(_, obs, _, _, ion)| {
+                let ambiguity =
+                    fragment_ambiguity(theoretical_ions, obs, feature_tol, feature_tol_is_ppm, ion);
+                1.0 / (1.0 + ambiguity as f64)
+            })
+            .sum();
+        (evidence_sum / num_matched as f64) as f32
+    }
+}
+
+/// Per cleavage site, whether any prefix (b) or suffix (y) ion of the scorer's partition ion types
+/// matched within the feature tolerance, and the matched prefix and suffix intensities summed.
+struct SiteMatches {
+    b_any_matched: SmallVec<[bool; 64]>,
+    y_any_matched: SmallVec<[bool; 64]>,
+    sum_prefix_intensity: f64,
+    sum_suffix_intensity: f64,
+}
+
+fn site_ion_matches(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> SiteMatches {
+    let n = peptide.length();
+    let parent_mass = scored_spec.parent_mass();
+    let num_segments = scorer.param().num_segments.max(1) as usize;
+
+    let mut b_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut y_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut sum_prefix_intensity: f64 = 0.0;
+    let mut sum_suffix_intensity: f64 = 0.0;
+
+    let mut prm_accurate: f64 = 0.0;
+    let mut srm_accurate: f64 = 0.0;
+
+    let segment_ions: SmallVec<[&[scoring_crate::params::IonType]; 8]> = (0..num_segments)
+        .map(|seg| {
+            scorer
+                .param()
+                .ion_types_for_partition_slice(charge, parent_mass, seg)
+        })
+        .collect();
+
+    for i in 0..(n - 1) {
+        let aa_n = &peptide.residues[i];
+        let aa_c = &peptide.residues[n - 1 - i];
+        prm_accurate += aa_n.mass + aa_n.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        srm_accurate += aa_c.mass + aa_c.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+
+        let mut b_any_this = false;
+        let mut y_any_this = false;
+
+        for seg in 0..num_segments {
+            let ions = segment_ions[seg];
+            for &ion in ions {
+                let (is_prefix, residue_mass) = match ion {
+                    scoring_crate::params::IonType::Prefix {
+                        charge: ic,
+                        offset_bits,
+                        ..
+                    } => {
+                        let offset = f32::from_bits(offset_bits) as f64;
+                        let z = ic as f64;
+                        (true, (prm_accurate / z + offset, ion))
+                    }
+                    scoring_crate::params::IonType::Suffix {
+                        charge: ic,
+                        offset_bits,
+                        ..
+                    } => {
+                        let offset = f32::from_bits(offset_bits) as f64;
+                        let z = ic as f64;
+                        (false, (srm_accurate / z + offset, ion))
+                    }
+                    scoring_crate::params::IonType::Noise => continue,
+                };
+                let theo_mz = residue_mass.0;
+                if scorer.param().segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = if feature_tol_is_ppm {
+                    theo_mz * feature_tol / 1e6
+                } else {
+                    feature_tol
+                };
+                if let Some((_rank, intensity, _peak_mz)) =
+                    scored_spec.nearest_peak_full(theo_mz, tol_da)
+                {
+                    if is_prefix {
+                        sum_prefix_intensity += intensity as f64;
+                        b_any_this = true;
+                    } else {
+                        sum_suffix_intensity += intensity as f64;
+                        y_any_this = true;
+                    }
+                }
+            }
+        }
+
+        b_any_matched[i] = b_any_this;
+        y_any_matched[i] = y_any_this;
+    }
+    SiteMatches {
+        b_any_matched,
+        y_any_matched,
+        sum_prefix_intensity,
+        sum_suffix_intensity,
+    }
+}
+
 pub(crate) fn compute_psm_features_with_edge(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
@@ -260,113 +496,27 @@ pub(crate) fn compute_psm_features_with_edge(
     let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
         + y_matched.iter().filter(|&&m| m).count()) as u32;
 
-    let predicted_z2 = predict_by_ions_with_losses(peptide, 2..=2, predict_losses);
-    let mut doubly_charged_matched_ion_count: u32 = 0;
-    for p in &predicted_z2 {
-        let tol_da = if feature_tol_is_ppm {
-            p.mz * feature_tol / 1e6
-        } else {
-            feature_tol
-        };
-        if scored_spec.nearest_peak_full(p.mz, tol_da).is_some() {
-            doubly_charged_matched_ion_count += 1;
-        }
-    }
+    let doubly_charged_matched_ion_count = doubly_charged_matches(
+        scored_spec,
+        peptide,
+        predict_losses,
+        feature_tol,
+        feature_tol_is_ppm,
+    );
 
-    fn longest_run(matched: &[bool]) -> u32 {
-        let mut best = 0u32;
-        let mut cur = 0u32;
-        for &m in matched {
-            if m {
-                cur += 1;
-                if cur > best {
-                    best = cur;
-                }
-            } else {
-                cur = 0;
-            }
-        }
-        best
-    }
-
-    let parent_mass = scored_spec.parent_mass();
-    let num_segments = scorer.param().num_segments.max(1) as usize;
-
-    let mut b_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    let mut y_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    let mut sum_prefix_intensity: f64 = 0.0;
-    let mut sum_suffix_intensity: f64 = 0.0;
-
-    let mut prm_accurate: f64 = 0.0;
-    let mut srm_accurate: f64 = 0.0;
-
-    let segment_ions: SmallVec<[&[scoring_crate::params::IonType]; 8]> = (0..num_segments)
-        .map(|seg| {
-            scorer
-                .param()
-                .ion_types_for_partition_slice(charge, parent_mass, seg)
-        })
-        .collect();
-
-    for i in 0..(n - 1) {
-        let aa_n = &peptide.residues[i];
-        let aa_c = &peptide.residues[n - 1 - i];
-        prm_accurate += aa_n.mass + aa_n.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-        srm_accurate += aa_c.mass + aa_c.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-
-        let mut b_any_this = false;
-        let mut y_any_this = false;
-
-        for seg in 0..num_segments {
-            let ions = segment_ions[seg];
-            for &ion in ions {
-                let (is_prefix, residue_mass) = match ion {
-                    scoring_crate::params::IonType::Prefix {
-                        charge: ic,
-                        offset_bits,
-                        ..
-                    } => {
-                        let offset = f32::from_bits(offset_bits) as f64;
-                        let z = ic as f64;
-                        (true, (prm_accurate / z + offset, ion))
-                    }
-                    scoring_crate::params::IonType::Suffix {
-                        charge: ic,
-                        offset_bits,
-                        ..
-                    } => {
-                        let offset = f32::from_bits(offset_bits) as f64;
-                        let z = ic as f64;
-                        (false, (srm_accurate / z + offset, ion))
-                    }
-                    scoring_crate::params::IonType::Noise => continue,
-                };
-                let theo_mz = residue_mass.0;
-                if scorer.param().segment_num(theo_mz, parent_mass) != seg {
-                    continue;
-                }
-                let tol_da = if feature_tol_is_ppm {
-                    theo_mz * feature_tol / 1e6
-                } else {
-                    feature_tol
-                };
-                if let Some((_rank, intensity, _peak_mz)) =
-                    scored_spec.nearest_peak_full(theo_mz, tol_da)
-                {
-                    if is_prefix {
-                        sum_prefix_intensity += intensity as f64;
-                        b_any_this = true;
-                    } else {
-                        sum_suffix_intensity += intensity as f64;
-                        y_any_this = true;
-                    }
-                }
-            }
-        }
-
-        b_any_matched[i] = b_any_this;
-        y_any_matched[i] = y_any_this;
-    }
+    let SiteMatches {
+        b_any_matched,
+        y_any_matched,
+        sum_prefix_intensity,
+        sum_suffix_intensity,
+    } = site_ion_matches(
+        scored_spec,
+        peptide,
+        scorer,
+        charge,
+        feature_tol,
+        feature_tol_is_ppm,
+    );
 
     let longest_b = longest_run(&b_any_matched);
     let longest_y = longest_run(&y_any_matched);
@@ -397,59 +547,14 @@ pub(crate) fn compute_psm_features_with_edge(
     matched_ions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let top7 = &matched_ions[..matched_ions.len().min(7)];
 
-    let abs_ppm_errors: Vec<f64> = top7
-        .iter()
-        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _, _)| ((obs - pred) / pred * 1e6).abs())
-        .collect();
-    let rel_ppm_errors: Vec<f64> = top7
-        .iter()
-        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _, _)| (obs - pred) / pred * 1e6)
-        .collect();
-
-    fn mean_and_pop_stdev(values: &[f64]) -> (f32, f32) {
-        if values.is_empty() {
-            return (0.0, 0.0);
-        }
-        let n = values.len() as f64;
-        let mean = values.iter().sum::<f64>() / n;
-        let sum_sq: f64 = values.iter().map(|v| v * v).sum();
-        let var = (sum_sq / n - mean * mean).max(0.0);
-        (mean as f32, var.sqrt() as f32)
-    }
-
-    let (mean_error_top7, stdev_error_top7) = mean_and_pop_stdev(&abs_ppm_errors);
-    let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
+    let ((mean_error_top7, stdev_error_top7), (mean_rel_error_top7, stdev_rel_error_top7)) =
+        top7_ppm_error_stats(top7);
 
     let (ppm_centre, ppm_sigma) = scorer.ppm_gaussian();
-    let ppm_gaussian_score: f32 = matched_ions
-        .iter()
-        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _, _)| {
-            let z = ((obs - pred) / pred * 1e6 - ppm_centre) / ppm_sigma;
-            (-0.5 * z * z).exp()
-        })
-        .sum::<f64>() as f32;
+    let ppm_gaussian_score = ppm_gaussian_score(&matched_ions, ppm_centre, ppm_sigma);
 
-    let chance_match_surprise: f32 = matched_ions
-        .iter()
-        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _, _)| {
-            let tol_da = if feature_tol_is_ppm {
-                pred * feature_tol / 1e6
-            } else {
-                feature_tol
-            };
-            let rho = scored_spec.local_peak_density(obs, DENSITY_HW);
-            let p_chance = rho * (2.0 * tol_da);
-            if p_chance > 0.0 {
-                (-p_chance.ln()).max(0.0)
-            } else {
-                0.0
-            }
-        })
-        .sum::<f64>() as f32;
+    let chance_match_surprise =
+        chance_match_surprise(scored_spec, &matched_ions, feature_tol, feature_tol_is_ppm);
 
     let mut complementary_sites: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     for i in 1..n {
@@ -475,24 +580,13 @@ pub(crate) fn compute_psm_features_with_edge(
 
     let charge1_predicted = predict_by_ions(peptide, 1..=1);
     let theoretical_ions = theoretical_fragment_ions(&charge1_predicted);
-    let unique_match_fraction = if num_matched == 0 {
-        0.0
-    } else {
-        let evidence_sum: f64 = matched_ions
-            .iter()
-            .map(|&(_, obs, _, _, ion)| {
-                let ambiguity = fragment_ambiguity(
-                    &theoretical_ions,
-                    obs,
-                    feature_tol,
-                    feature_tol_is_ppm,
-                    ion,
-                );
-                1.0 / (1.0 + ambiguity as f64)
-            })
-            .sum();
-        (evidence_sum / num_matched as f64) as f32
-    };
+    let unique_match_fraction = unique_match_fraction(
+        &matched_ions,
+        &theoretical_ions,
+        num_matched,
+        feature_tol,
+        feature_tol_is_ppm,
+    );
     let mass_competition_evidence_val = mass_competition_evidence(
         scored_spec,
         &matched_ions,

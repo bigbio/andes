@@ -1,683 +1,37 @@
+//! `andes train` and `andes train-from-search`: fit the scoring model's tables from labelled
+//! PSMs (a TSV, a search, or MSnet Parquet) and update an existing model.
+
+mod args;
+mod inputs;
 pub(crate) mod intensity;
+mod msnet;
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
-
-use crate::cli::{parse_unit_fraction, GeometryArgs, Protocol};
-use crate::models::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
-use crate::spectra::spectrum_ext_lower;
-use crate::train::intensity::GbdtMode;
-use clap::Args;
-use input::{MgfReader, MzMLReader};
-use model::{
-    activation::ActivationMethod, InstrumentType, ModLocation, Modification,
-    ResidueSpec, Spectrum, Tolerance,
+use model::activation::ActivationMethod;
+use model::{InstrumentType, Tolerance};
+use model_train::accumulate::{merge, StatsAccumulator};
+use model_train::counts::CountStats;
+use model_train::estimate::{Estimator, EstimatorConfig};
+use model_train::gate::evaluate_candidate;
+use model_train::geometry::{corpus_charge_masses, derive_geometry};
+use model_train::labeled::bootstrap_labels;
+use model_train::store::{
+    commit_update, ensure_single_file_store, update_add, update_decay, update_remove,
+    update_reweight, write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
+    SourceLedger,
 };
-use model_train::{
-    accumulate::{merge, StatsAccumulator},
-    counts::CountStats,
-    estimate::{Estimator, EstimatorConfig},
-    gate::evaluate_candidate,
-    geometry::{corpus_charge_masses, derive_geometry},
-    labeled::bootstrap_labels,
-    store::{
-        commit_update, ensure_single_file_store, update_add, update_decay, update_remove,
-        update_reweight, write_all_models_with_sources_and_gbdt_pub,
-        write_all_models_with_sources_pub, SourceLedger,
-    },
-    ModelStore,
-};
+use model_train::ModelStore;
 use scoring_crate::{Param, RankScorer};
-use search::SearchParams;
+
+use crate::cli::{GeometryArgs, Protocol};
+use crate::models::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
+use crate::train::intensity::GbdtMode;
+pub(crate) use args::{TrainArgs, TrainFromSearchArgs};
+use inputs::{build_train_search_params, load_labels_from_tsv, load_spectra_for_train, TrainRun};
+pub(crate) use msnet::{read_msnet_parquet, MsnetPsm};
 
 fn inherit_seed_gbdts(trained: &mut Param, seed: &Param) {
     trained.frag_intensity_model = seed.frag_intensity_model.clone();
     trained.rich_ion_model = seed.rich_ion_model.clone();
-}
-
-/// Training arguments for `andes train-from-search`.
-#[derive(Args, Debug)]
-pub(crate) struct TrainFromSearchArgs {
-    /// Reuse the seed model's geometry instead of deriving one from the corpus.
-    /// Deriving (the default) fits segments and mass tiers to the training data.
-    #[arg(long = "seed-geometry", default_value_t = false)]
-    pub(crate) seed_geometry: bool,
-    /// Input spectrum file (training data). Same format dispatch as for search:
-    /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
-    ///
-    /// Repeat the flag to train one model from several runs. Each run is
-    /// searched and labelled on its own (its own target-decoy q-values), keeps
-    /// only its labelled spectra in memory, and becomes its own source in the
-    /// store ledger (source id = file stem), so it can later be removed or
-    /// reweighted with `--update`. `--labels` and `--update --add` take a
-    /// single file.
-    ///
-    /// Required for initial training.  In `--update` mode with `--remove-source`
-    /// or `--reweight` / `--decay`, `--spectra` is only required when
-    /// `--validate` is also given (to run the acceptance gate).
-    #[arg(long)]
-    pub(crate) spectra: Vec<PathBuf>,
-
-    /// Input FASTA target database (decoys are generated automatically).
-    ///
-    /// Required for initial training and for `--update --add`.
-    /// In `--update` mode without `--add`, only required when `--validate` is
-    /// given.
-    #[arg(long)]
-    pub(crate) database: Option<PathBuf>,
-
-    /// EXTERNAL LABELS (SP-B glyco training): a TSV with columns `scan`,
-    /// `peptide`, `charge`. When given, labels come from this file instead of a
-    /// seed search (`bootstrap_labels`), and `--database` is not required. The
-    /// `peptide` is the BARE backbone sequence (the glycan is stripped — the
-    /// rank model scores backbone b/y ions, which in HCD come from the
-    /// deglycosylated backbone); Cam-C and any `--fixed-mods` / `--variable-mods` are applied via the
-    /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
-    /// fails to parse are skipped. Use to train a glyco-regime rank model from
-    /// MSFragger/pGlyco backbone IDs.
-    ///
-    /// With several `--spectra`, give one `--labels` per run, in the same order.
-    #[arg(long = "labels")]
-    pub(crate) labels: Vec<PathBuf>,
-
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
-    /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
-    #[arg(long = "seed-model")]
-    pub(crate) seed_model: Option<String>,
-
-    /// Target-decoy q-value threshold for accepting PSMs as confident training
-    /// labels. Use a lenient value (e.g. 0.1 or 0.5) for small fixtures.
-    #[arg(long = "train-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) train_fdr: f64,
-
-    /// Instrument of the trained model (`LowRes`, `HighRes`, `QExactive`,
-    /// `OrbitrapAstral`, `TOF`, `TimsTOF`). It is part of the model's selection
-    /// key, so a search on data from this instrument picks the model. Default:
-    /// the seed model's instrument (`QExactive` for the default seed).
-    #[arg(long)]
-    pub(crate) instrument: Option<String>,
-
-    /// Activation of the trained model (`CID`, `HCD`, `ETD`, `EThcD`, `UVPD`, `PQD`),
-    /// part of its selection key. It also sets the ion series of the derived geometry
-    /// (EThcD: b, y, c and z•), and only spectra recorded with this activation are
-    /// searched and trained on (spectra without a recorded activation are kept).
-    /// Default: the seed model's activation, all spectra.
-    #[arg(long, conflicts_with = "seed_geometry")]
-    pub(crate) activation: Option<String>,
-
-    /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
-    #[arg(long, default_value = "Automatic")]
-    pub(crate) protocol: String,
-
-    /// Path to the Parquet model store to write (created if absent, appended
-    /// otherwise). REQUIRED.
-    #[arg(long = "out-store")]
-    pub(crate) out_store: PathBuf,
-
-    /// Directory of the candidate-index cache of the seed searches, created if
-    /// missing. Default: the directory of `--out-store`. A directory that
-    /// cannot be written is an error.
-    #[arg(long = "index-cache-dir", value_name = "DIR")]
-    pub(crate) index_cache_dir: Option<PathBuf>,
-
-    /// Model ID written into the store. Default: `trained_<instrument>_<protocol>`.
-    #[arg(long = "model-id")]
-    pub(crate) model_id: Option<String>,
-
-    /// Fixed modifications, a list of Name (sites) as for the search's
-    /// `--fixed-mods` [default: Carbamidomethyl (C)].
-    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_fixed_mods)]
-    pub(crate) fixed_mods: Option<crate::cli::ModList>,
-
-    /// Variable modifications, a list of Name (sites) as for the search's
-    /// `--variable-mods` [default: Oxidation (M)].
-    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_variable_mods)]
-    pub(crate) variable_mods: Option<crate::cli::ModList>,
-
-    /// Number of worker threads. Defaults to logical CPU count.
-    #[arg(long, default_value_t = num_cpus::get())]
-    pub(crate) threads: usize,
-
-    /// ISO 8601 date string (e.g. `2026-01-01`) recorded in the source ledger.
-    /// When omitted, the current date is used for initial training; empty string
-    /// is stored when `--date ""` is explicitly passed.
-    #[arg(long)]
-    pub(crate) date: Option<String>,
-
-    /// Fragment match tolerance in ppm for initial training: the window in
-    /// which training matches fragments, stored as the trained model's `mme`.
-    /// The seed search that labels the PSMs keeps the seed's `mme`. When
-    /// neither this nor `--fragment-tol-da` is given, the seed's `mme` is
-    /// kept. Training reconstructs fragment m/z from nominal masses, so a ppm
-    /// window this narrow marks most fragments as missing; keep the seed `mme`
-    /// unless the comparison is the point.
-    #[arg(long = "fragment-tol-ppm", conflicts_with = "fragment_tol_da")]
-    pub(crate) fragment_tol_ppm: Option<f64>,
-
-    /// Fragment match tolerance in Da for initial training. Overwrites the seed
-    /// model's `mme` (see `--fragment-tol-ppm`).
-    #[arg(long = "fragment-tol-da")]
-    pub(crate) fragment_tol_da: Option<f64>,
-
-    /// Switch to incremental update mode for this model ID.
-    /// When set, one of `--add`, `--remove-source`, `--reweight`, or `--decay`
-    /// must be provided.
-    #[arg(long = "update", value_name = "MODEL_ID")]
-    pub(crate) update_model: Option<String>,
-
-    /// (Update mode) Add a new source from `--spectra`.
-    /// Requires `--source-id` and `--database`.
-    #[arg(long, requires = "update_model")]
-    pub(crate) add: bool,
-
-    /// (Update mode) Source identifier for the new source being added
-    /// (used with `--add`).
-    #[arg(long = "source-id", requires = "add", value_name = "ID")]
-    pub(crate) source_id: Option<String>,
-
-    /// (Update mode) Remove the source with this ID from the model.
-    #[arg(long = "remove-source", requires = "update_model", value_name = "ID")]
-    pub(crate) remove_source: Option<String>,
-
-    /// (Update mode) Set a source's weight.  Format: `<source-id>=<weight>`,
-    /// e.g. `--reweight s0=0.5`.
-    #[arg(long = "reweight", requires = "update_model", value_name = "ID=W")]
-    pub(crate) reweight: Option<String>,
-
-    /// (Update mode) Apply exponential age-decay to all sources with this
-    /// half-life in days.
-    #[arg(long = "decay", requires = "update_model", value_name = "DAYS")]
-    pub(crate) decay: Option<f32>,
-
-    /// (Update mode) Held-out validation spectra for the acceptance gate.
-    /// When omitted the gate is skipped (a warning is printed).
-    #[arg(long = "validate", requires = "update_model")]
-    pub(crate) validate: Option<PathBuf>,
-
-    /// (Update mode) Commit the update even if the acceptance gate fails.
-    #[arg(long, requires = "update_model")]
-    pub(crate) force: bool,
-}
-
-/// Training arguments for `andes train`.
-///
-/// Trains a scoring model directly from externally-labeled, high-confidence
-/// PSMs supplied as a "flat training parquet" (one row per PSM, each carrying
-/// the spectrum peaks + identified peptide + resolved mod mass-deltas). This
-/// bypasses the bootstrap-search label step entirely: every input row is a
-/// label. The seed model supplies only structural hyperparameters (`mme`,
-/// deconvolution, segments, frag/precursor offset tables, max_rank); all
-/// learned distributions come from the input data.
-#[derive(Args, Debug)]
-pub(crate) struct TrainArgs {
-    /// Reuse the seed model's geometry instead of deriving one from the corpus.
-    /// Deriving (the default) fits segments and mass tiers to the training data.
-    #[arg(long = "seed-geometry", default_value_t = false)]
-    pub(crate) seed_geometry: bool,
-    /// Input flat training parquet(s). Repeatable; stats accumulate across all
-    /// inputs into a single model.
-    #[arg(long = "in", required = true)]
-    pub(crate) inputs: Vec<PathBuf>,
-
-    /// Path to the Parquet model store to write (created if absent; existing
-    /// models are preserved and re-written alongside the new one). REQUIRED.
-    #[arg(long = "out-store")]
-    pub(crate) out_store: PathBuf,
-
-    /// Model ID written into the store. Default: `default`.
-    #[arg(long = "model-id", default_value = "default")]
-    pub(crate) model_id: String,
-
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
-    /// Supplies structural hyperparameters only.
-    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
-    pub(crate) seed_model: String,
-
-    /// Override the trained model's activation in the store `data_type`
-    /// (e.g. `CID`, `HCD`, `ETD`, `UVPD`). Defaults to the seed's value.
-    /// Together with `--instrument/--enzyme/--protocol` this lets a new slug
-    /// carry the correct selection columns even when seeded from a related model.
-    #[arg(long = "activation")]
-    pub(crate) activation: Option<String>,
-
-    /// Override the trained model's instrument in the store `data_type`
-    /// (e.g. `LowRes`, `HighRes`, `QExactive`, `TOF`). Defaults to the seed's value.
-    #[arg(long = "instrument")]
-    pub(crate) instrument: Option<String>,
-
-    /// Override the trained model's enzyme in the store `data_type`
-    /// (e.g. `Trypsin`, `LysC`, `LysN`). Defaults to the seed's value.
-    #[arg(long = "enzyme")]
-    pub(crate) enzyme: Option<String>,
-
-    /// Override the trained model's protocol in the store `data_type`
-    /// (e.g. `TMT`, `iTRAQ`, `Phosphorylation`, `Automatic`). Drives
-    /// `experiment_class` model selection. Defaults to the seed's value.
-    #[arg(long = "protocol")]
-    pub(crate) protocol: Option<String>,
-
-    /// Fragment match tolerance in ppm. Overwrites the seed model's `mme`
-    /// before training. Mutually exclusive with `--fragment-tol-da`. When
-    /// neither is given, the seed model's `mme` is kept.
-    #[arg(long = "fragment-tol-ppm", conflicts_with = "fragment_tol_da")]
-    pub(crate) fragment_tol_ppm: Option<f64>,
-
-    /// Fragment match tolerance in Da. Overwrites the seed model's `mme`
-    /// before training. Mutually exclusive with `--fragment-tol-ppm`.
-    #[arg(long = "fragment-tol-da")]
-    pub(crate) fragment_tol_da: Option<f64>,
-
-    /// Number of worker threads. Defaults to logical CPU count.
-    #[arg(long, default_value_t = num_cpus::get())]
-    pub(crate) threads: usize,
-
-    /// Laplace pseudo-count for rank/error tables (lower = sharper; default 1.0).
-    #[arg(long = "train-pseudo", default_value_t = 1.0)]
-    pub(crate) train_pseudo: f32,
-
-    /// Laplace pseudo-count for the NOISE rank distribution (lower = sharper).
-    /// Noise is abundant and concentrated, so it needs far less smoothing than
-    /// signal ions; the signal `--train-pseudo` over-flattens it. Default 0.05.
-    #[arg(long = "train-noise-pseudo", default_value_t = 0.05)]
-    pub(crate) train_noise_pseudo: f32,
-
-    /// Partition backoff prior weight (lower = less smoothing toward parent; default 20).
-    #[arg(long = "train-backoff-weight", default_value_t = 20.0)]
-    pub(crate) train_backoff_weight: f32,
-
-    /// Minimum partition count before backoff blending (default 50).
-    #[arg(long = "train-min-count", default_value_t = 50)]
-    pub(crate) train_min_count: u64,
-
-    /// Optional path to an independent prior model store. Sparse partitions in
-    /// the trained model shrink toward the matching prior model instead of the
-    /// corpus-internal pool. Must be own-data (NOT a bundled seed model) to stay
-    /// relicense-safe.
-    #[arg(long)]
-    pub(crate) prior_model_store: Option<PathBuf>,
-
-    /// Model id to load from `--prior-model-store` (defaults to the trained
-    /// model id when omitted).
-    #[arg(long)]
-    pub(crate) prior_model: Option<String>,
-
-    /// Apply widening rank-window smoothing to signal rank distributions
-    /// (Kim et al., Nat Commun 5:5277, 2014).
-    #[arg(long)]
-    pub(crate) rank_smoothing: bool,
-
-    /// Source identifier for the source ledger. Defaults to "msnet".
-    #[arg(long, default_value = "msnet")]
-    pub(crate) source: String,
-
-    /// Whether to also train and embed a GBDT peak model. `on` (default) trains
-    /// GBDT and writes the blob; `off` writes rank-core only (byte-identical to
-    /// the pre-GBDT path).
-    #[arg(long, default_value = "on")]
-    pub(crate) gbdt: GbdtMode,
-
-    /// Opt-in fallback (finding 3.6): downgrade a failed GBDT quality gate to a
-    /// warning and embed the degenerate model anyway. Default off.
-    #[arg(long = "allow-degenerate-model", hide = true, default_value_t = false)]
-    pub(crate) allow_degenerate_model: bool,
-}
-
-/// Spectra a reader returned as errors: how many, and the first error text.
-#[derive(Default)]
-struct ParseFailures {
-    count: usize,
-    first: Option<String>,
-}
-
-impl ParseFailures {
-    fn add(&mut self, e: impl std::fmt::Display) {
-        self.count += 1;
-        if self.first.is_none() {
-            self.first = Some(e.to_string());
-        }
-    }
-
-    /// Adds spectra a reader skipped on its own, with the errors it kept.
-    fn add_skipped(&mut self, count: usize, errors: &[String]) {
-        self.count += count;
-        if self.first.is_none() {
-            self.first = errors.first().cloned();
-        }
-    }
-
-    /// One warning for all failed spectra of `path`, none when every spectrum parsed.
-    fn report(&self, path: &Path) {
-        if self.count == 0 {
-            return;
-        }
-        let first = self.first.as_deref().unwrap_or("no message");
-        log::warn!(
-            target: "train",
-            "{} spectra of {} could not be parsed and were skipped (first: {first})",
-            self.count,
-            path.display()
-        );
-    }
-}
-
-pub(crate) fn load_spectra_for_train(
-    path: &Path,
-) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
-    let ext_lower = spectrum_ext_lower(path);
-    let mut spectra = Vec::new();
-    let mut failed = ParseFailures::default();
-    match ext_lower.as_deref() {
-        Some("mzml") => {
-            let mut reader =
-                MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
-            for item in reader.by_ref() {
-                match item {
-                    Ok(s) => spectra.push(s),
-                    Err(e) => failed.add(e),
-                }
-            }
-            failed.add_skipped(reader.skipped_count(), reader.skipped_errors());
-        }
-        Some("raw") => {
-            #[cfg(feature = "thermo")]
-            {
-                let reader = input::ThermoRawReader::open(path)
-                    .map_err(|e| format!("open Thermo .raw {}: {e}", path.display()))?
-                    .with_ms_level(Some(2));
-                for item in reader {
-                    match item {
-                        Ok(s) => spectra.push(s),
-                        Err(e) => failed.add(e),
-                    }
-                }
-            }
-            #[cfg(not(feature = "thermo"))]
-            {
-                return Err(format!(
-                    "native Thermo `.raw` training input requires building with \
-                     `--features thermo` (and the .NET 8 runtime): {}",
-                    path.display()
-                )
-                .into());
-            }
-        }
-        Some("d") => {
-            #[cfg(feature = "timstof")]
-            {
-                let reader = input::TimsTofReader::open(path)
-                    .map_err(|e| format!("open Bruker .d {}: {e}", path.display()))?;
-                for item in reader {
-                    match item {
-                        Ok(s) => spectra.push(s),
-                        Err(e) => failed.add(e),
-                    }
-                }
-            }
-            #[cfg(not(feature = "timstof"))]
-            {
-                return Err(format!(
-                    "native Bruker `.d` training input requires building with \
-                     `--features timstof`: {}",
-                    path.display()
-                )
-                .into());
-            }
-        }
-        _ => {
-            let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
-            for item in reader {
-                match item {
-                    Ok(s) => spectra.push(s),
-                    Err(e) => failed.add(e),
-                }
-            }
-        }
-    }
-    failed.report(path);
-    Ok(spectra)
-}
-
-pub(crate) fn build_train_search_params(
-    args: &TrainFromSearchArgs,
-) -> Result<SearchParams, Box<dyn std::error::Error>> {
-    let aa = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
-    let mut params = SearchParams::default_tryptic(aa);
-    params.charge_range = 2..=5;
-    Ok(params)
-}
-
-pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
-    (0..seq.len()).find(|&i| {
-        seq[i] == b'N'
-            && i + 2 < seq.len()
-            && seq[i + 1] != b'P'
-            && (seq[i + 2] == b'S' || seq[i + 2] == b'T')
-    })
-}
-
-pub(crate) fn load_labels_from_tsv(
-    path: &std::path::Path,
-    spectra: &[model::spectrum::Spectrum],
-    aa_set: &model::amino_acid::set::AminoAcidSet,
-) -> Result<Vec<model_train::labeled::LabeledMatch>, Box<dyn std::error::Error>> {
-    use model::peptide::Peptide;
-    use std::collections::HashMap;
-
-    let mut scan_to_idx: HashMap<i32, usize> = HashMap::new();
-    for (i, s) in spectra.iter().enumerate() {
-        if let Some(sc) = s.scan {
-            scan_to_idx.entry(sc).or_insert(i);
-        }
-    }
-
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading labels {}: {e}", path.display()))?;
-    let mut lines = text.lines();
-    let header = lines.next().ok_or("labels file is empty")?;
-    let cols: Vec<String> = header
-        .split('\t')
-        .map(|c| c.trim().to_ascii_lowercase())
-        .collect();
-    let col = |names: &[&str]| -> Option<usize> {
-        cols.iter().position(|c| names.iter().any(|n| c == n))
-    };
-    let scan_c = col(&["scan", "scannr", "scan_number"]).ok_or("labels: no scan column")?;
-    let pep_c = col(&["peptide", "backbone", "sequence", "peptide_sequence"])
-        .ok_or("labels: no peptide column")?;
-    let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
-    let gly_c = col(&["glycan_mass", "glycan", "glycan_neutral"]);
-    let site_c = col(&["glycosite", "site", "glyco_site"]);
-    let max_c = scan_c.max(pep_c).max(chg_c);
-
-    let anywhere: std::collections::HashMap<u8, f64> =
-        aa_set.fixed_anywhere_deltas().into_iter().collect();
-    let terminal = aa_set.fixed_terminal_deltas();
-    let at = |loc: model::modification::ModLocation| -> f64 {
-        terminal.iter().filter(|(l, _)| *l == loc).map(|(_, d)| d).sum()
-    };
-    let (n_term, c_term) = (
-        at(model::modification::ModLocation::NTerm),
-        at(model::modification::ModLocation::CTerm),
-    );
-    let decorate = |seq: &str| -> String {
-        let mut d = String::with_capacity(seq.len() + 4);
-        d.push_str("-.");
-        let n = seq.len();
-        for (i, &b) in seq.as_bytes().iter().enumerate() {
-            d.push(b as char);
-            let mut delta = anywhere.get(&b).copied().unwrap_or(0.0);
-            if i == 0 {
-                delta += n_term;
-            }
-            if i + 1 == n {
-                delta += c_term;
-            }
-            if delta != 0.0 {
-                d.push_str(&format!("+{:.5}", delta));
-            }
-        }
-        d.push_str(".-");
-        d
-    };
-
-    let mut labels = Vec::new();
-    let mut seen_scans: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
-    let (mut dup_scan, mut charge_mismatch) = (0usize, 0usize);
-    for line in lines {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() <= max_c {
-            miss_other += 1;
-            continue;
-        }
-        let scan: i32 = match f[scan_c].trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                miss_other += 1;
-                continue;
-            }
-        };
-        let charge: u8 = match f[chg_c].trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                miss_other += 1;
-                continue;
-            }
-        };
-        let idx = match scan_to_idx.get(&scan) {
-            Some(&v) => v,
-            None => {
-                miss_scan += 1;
-                continue;
-            }
-        };
-        let seq = f[pep_c].trim();
-        let glyco: Option<(usize, f64)> = gly_c.and_then(|gc| {
-            let gmass: f64 = f.get(gc)?.trim().parse().ok()?;
-            if gmass <= 0.0 {
-                return None;
-            }
-            let site = site_c
-                .and_then(|sc| f.get(sc)?.trim().parse::<usize>().ok())
-                .or_else(|| first_nglyco_site(seq.as_bytes()))?;
-            (site < seq.len()).then_some((site, gmass))
-        });
-        let mut peptide = match Peptide::from_str(&decorate(seq), aa_set) {
-            Ok(p) => p,
-            Err(_) => {
-                miss_pep += 1;
-                continue;
-            }
-        };
-        if let Some((site, gmass)) = glyco {
-            if let Some(res) = peptide.residues.get_mut(site) {
-                let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-                res.mod_ = Some(model::modification::leak_mod(
-                    model::modification::Modification {
-                        name: "Glycan".to_string(),
-                        mass_delta: base + gmass,
-                        residue: model::modification::ResidueSpec::Specific(res.residue),
-                        location: model::modification::ModLocation::Anywhere,
-                        fixed: false,
-                        accession: None,
-                        neutral_losses: Vec::new(),
-                        loss_class: 1,
-                        annotated_site_mass: None,
-                        blocks_cleavage: false,
-                        parts: Vec::new(),
-                        diagnostic_ions: Vec::new(),
-                    },
-                ));
-                let charge = peptide.charge;
-                let residues = std::mem::take(&mut peptide.residues);
-                peptide = Peptide::new(residues, peptide.pre, peptide.post);
-                peptide.charge = charge;
-            }
-        }
-        if !seen_scans.insert(scan) {
-            dup_scan += 1;
-            continue;
-        }
-        if let Some(spec_z) = spectra[idx].precursor_charge {
-            if spec_z != charge as i32 {
-                charge_mismatch += 1;
-            }
-        }
-        labels.push(model_train::labeled::LabeledMatch {
-            spectrum_index: idx,
-            peptide,
-            charge,
-            confidence: 0.0,
-        });
-    }
-    log::info!(
-        "loaded {} labels from {} ({} skipped: {} scan-not-found, {} dup-scan, {} unparseable-peptide, {} malformed; {} charge-mismatch vs mzML)",
-        labels.len(),
-        path.display(),
-        miss_scan + dup_scan + miss_pep + miss_other,
-        miss_scan,
-        dup_scan,
-        miss_pep,
-        miss_other,
-        charge_mismatch,
-    );
-    if charge_mismatch * 5 > labels.len().max(1) {
-        log::warn!(
-            "{charge_mismatch} labels ({}%) disagree with the mzML precursor \
-             charge; the scan->spectrum mapping or the label charges may be wrong.",
-            charge_mismatch * 100 / labels.len().max(1),
-        );
-    }
-    Ok(labels)
-}
-
-struct TrainRun {
-    dataset: String,
-    stem: String,
-    spectra: Vec<Spectrum>,
-    labels: Vec<model_train::labeled::LabeledMatch>,
-}
-
-impl TrainRun {
-    fn keep_labelled(
-        path: &Path,
-        spectra: Vec<Spectrum>,
-        mut labels: Vec<model_train::labeled::LabeledMatch>,
-    ) -> Self {
-        let mut kept = Vec::with_capacity(labels.len());
-        let mut new_index = std::collections::HashMap::new();
-        for label in &mut labels {
-            let idx = *new_index.entry(label.spectrum_index).or_insert_with(|| {
-                kept.push(spectra[label.spectrum_index].clone());
-                kept.len() - 1
-            });
-            label.spectrum_index = idx;
-        }
-        let dataset = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let stem = run_stem(path);
-        TrainRun {
-            dataset,
-            stem,
-            spectra: kept,
-            labels,
-        }
-    }
-}
-
-fn run_stem(path: &Path) -> String {
-    let mut name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    for ext in [".gz", ".mzml", ".mgf", ".d", ".raw"] {
-        if name.len() > ext.len() && name.to_ascii_lowercase().ends_with(ext) {
-            name.truncate(name.len() - ext.len());
-        }
-    }
-    name
 }
 
 pub(crate) fn run_train_from_search(
@@ -751,10 +105,7 @@ pub(crate) fn run_train_from_search(
                 .clone()
                 .ok_or("--database is required for initial training (or pass --labels)")?;
             let search_params = build_train_search_params(&args)?;
-            log::info!(
-                "running seed search (train-fdr = {}) ...",
-                args.train_fdr
-            );
+            log::info!("running seed search (train-fdr = {}) ...", args.train_fdr);
             bootstrap_labels(
                 &spectra,
                 &database,
@@ -773,10 +124,7 @@ pub(crate) fn run_train_from_search(
         runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
     }
     let n_labels: usize = runs.iter().map(|r| r.labels.len()).sum();
-    log::info!(
-        "{n_labels} confident labels from {} run(s)",
-        runs.len()
-    );
+    log::info!("{n_labels} confident labels from {} run(s)", runs.len());
 
     if n_labels == 0 {
         return Err(format!(
@@ -812,10 +160,7 @@ pub(crate) fn run_train_from_search(
         template.mme = Tolerance::Da(da);
         log::info!("training fragment tolerance overridden to {da} Da");
     } else {
-        log::info!(
-            "training at the seed fragment tolerance {:?}",
-            template.mme
-        );
+        log::info!("training at the seed fragment tolerance {:?}", template.mme);
     }
     let accum_scorer = RankScorer::new(&template);
 
@@ -876,9 +221,7 @@ pub(crate) fn run_train_from_search(
         .unwrap_or_else(|| format!("trained_{}_{}", instrument, args.protocol));
     log::info!("model ID = {model_id}");
 
-    let date_str = args.date.clone().unwrap_or_else(|| {
-        format_today_iso8601()
-    });
+    let date_str = args.date.clone().unwrap_or_else(format_today_iso8601);
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::with_capacity(runs.len());
     let mut seen_ids = std::collections::HashSet::new();
     for (run, run_stats) in runs.iter().zip(run_stats) {
@@ -963,232 +306,6 @@ pub(crate) fn run_train_from_search(
     );
 
     Ok(())
-}
-
-pub(crate) struct MsnetPsm {
-    pub(crate) spectrum: Spectrum,
-    pub(crate) peptide: model::peptide::Peptide,
-    pub(crate) charge: u8,
-}
-
-pub(crate) fn build_msnet_peptide(
-    seq: &str,
-    res_mod_pos: &[i32],
-    res_mod_delta: &[f64],
-    nterm_delta: f64,
-    cterm_delta: f64,
-) -> Result<model::peptide::Peptide, Box<dyn std::error::Error>> {
-    if res_mod_pos.len() != res_mod_delta.len() {
-        return Err(format!(
-            "res_mod_pos ({}) and res_mod_delta ({}) length mismatch",
-            res_mod_pos.len(),
-            res_mod_delta.len()
-        )
-        .into());
-    }
-    let bytes = seq.as_bytes();
-    if bytes.is_empty() {
-        return Err("empty peptide sequence".into());
-    }
-    let n = bytes.len();
-
-    let mut residue_delta = vec![0.0f64; n];
-    let mut residue_modded = vec![false; n];
-    for (&pos1, &delta) in res_mod_pos.iter().zip(res_mod_delta.iter()) {
-        if pos1 < 1 || (pos1 as usize) > n {
-            return Err(
-                format!("res_mod_pos {pos1} out of range for sequence of length {n}").into(),
-            );
-        }
-        let idx = (pos1 - 1) as usize;
-        residue_delta[idx] += delta;
-        residue_modded[idx] = true;
-    }
-    if nterm_delta != 0.0 {
-        residue_delta[0] += nterm_delta;
-        residue_modded[0] = true;
-    }
-    if cterm_delta != 0.0 {
-        residue_delta[n - 1] += cterm_delta;
-        residue_modded[n - 1] = true;
-    }
-
-    let mut residues = Vec::with_capacity(n);
-    for (i, &r) in bytes.iter().enumerate() {
-        let aa = model::AminoAcid::standard(r)
-            .ok_or_else(|| format!("non-standard residue {:?} at position {}", r as char, i + 1))?;
-        if residue_modded[i] {
-            let m = Modification {
-                name: "msnet".to_string(),
-                mass_delta: residue_delta[i],
-                residue: ResidueSpec::Specific(r),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-                annotated_site_mass: None,
-                blocks_cleavage: false,
-                parts: Vec::new(),
-                diagnostic_ions: Vec::new(),
-            };
-            residues.push(aa.with_mod(m));
-        } else {
-            residues.push(aa);
-        }
-    }
-
-    Ok(model::peptide::Peptide::new(residues, b'_', b'-'))
-}
-
-pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn std::error::Error>> {
-    use arrow::array::{Array, Float32Array, Float64Array, Int32Array, ListArray, StringArray};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    let file = File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| format!("parquet reader for {}: {e}", path.display()))?
-        .build()
-        .map_err(|e| format!("building parquet reader for {}: {e}", path.display()))?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(|e| format!("reading batch from {}: {e}", path.display()))?;
-
-        let col = |name: &str| -> Result<&std::sync::Arc<dyn Array>, Box<dyn std::error::Error>> {
-            batch
-                .column_by_name(name)
-                .ok_or_else(|| format!("missing column '{name}' in {}", path.display()).into())
-        };
-
-        let seq = col("seq")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("column 'seq' is not a STRING column")?;
-        let charge = col("charge")?
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .ok_or("column 'charge' is not an INT32 column")?;
-        let prec_mz = col("prec_mz")?
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or("column 'prec_mz' is not a DOUBLE column")?;
-        let res_mod_pos = col("res_mod_pos")?
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or("column 'res_mod_pos' is not a LIST column")?;
-        let res_mod_delta = col("res_mod_delta")?
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or("column 'res_mod_delta' is not a LIST column")?;
-        let nterm = col("nterm_delta")?
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or("column 'nterm_delta' is not a DOUBLE column")?;
-        let cterm = col("cterm_delta")?
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or("column 'cterm_delta' is not a DOUBLE column")?;
-        let mz = col("mz")?
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or("column 'mz' is not a LIST column")?;
-        let intensity = col("intensity")?
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or("column 'intensity' is not a LIST column")?;
-
-        let list_i32 =
-            |list: &ListArray, i: usize| -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-                if list.is_null(i) {
-                    return Ok(Vec::new());
-                }
-                let v = list.value(i);
-                let a = v
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .ok_or("list element is not INT32")?;
-                Ok((0..a.len()).map(|j| a.value(j)).collect())
-            };
-        let list_f64 =
-            |list: &ListArray, i: usize| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-                if list.is_null(i) {
-                    return Ok(Vec::new());
-                }
-                let v = list.value(i);
-                let a = v
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or("list element is not DOUBLE")?;
-                Ok((0..a.len()).map(|j| a.value(j)).collect())
-            };
-        let list_f32 =
-            |list: &ListArray, i: usize| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-                if list.is_null(i) {
-                    return Ok(Vec::new());
-                }
-                let v = list.value(i);
-                let a = v
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .ok_or("list element is not FLOAT")?;
-                Ok((0..a.len()).map(|j| a.value(j)).collect())
-            };
-
-        for i in 0..batch.num_rows() {
-            let seq_s = seq.value(i);
-            let ch = charge.value(i);
-            if !(1..=255).contains(&ch) {
-                return Err(format!("invalid charge {ch} at row {i} of {}", path.display()).into());
-            }
-            let charge_u8 = ch as u8;
-
-            let positions = list_i32(res_mod_pos, i)?;
-            let deltas = list_f64(res_mod_delta, i)?;
-            let peptide =
-                build_msnet_peptide(seq_s, &positions, &deltas, nterm.value(i), cterm.value(i))?;
-
-            let mzs = list_f32(mz, i)?;
-            let ints = list_f32(intensity, i)?;
-            if mzs.len() != ints.len() {
-                return Err(format!(
-                    "mz ({}) and intensity ({}) length mismatch at row {i} of {}",
-                    mzs.len(),
-                    ints.len(),
-                    path.display()
-                )
-                .into());
-            }
-            let mut peaks: Vec<(f64, f32)> = mzs
-                .iter()
-                .zip(ints.iter())
-                .map(|(&m, &it)| (m as f64, it))
-                .collect();
-            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-            let spectrum = Spectrum {
-                title: format!("row{i}"),
-                precursor_mz: prec_mz.value(i),
-                precursor_intensity: None,
-                precursor_charge: Some(charge_u8 as i32),
-                rt_seconds: None,
-                scan: None,
-                peaks,
-                activation_method: None,
-                isolation_lower_offset: None,
-                isolation_upper_offset: None,
-                isolation_target_mz: None,
-                mobility_window: None,
-            };
-
-            out.push(MsnetPsm {
-                spectrum,
-                peptide,
-                charge: charge_u8,
-            });
-        }
-    }
-    Ok(out)
 }
 
 pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1276,7 +393,10 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     };
     log::info!(
         "estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
-        cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
+        cfg.pseudo,
+        cfg.noise_pseudo,
+        cfg.backoff_weight,
+        cfg.min_count
     );
     let estimator = Estimator::new(cfg);
 
@@ -1295,10 +415,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
                 Some(&prior_id),
             )
             .map_err(|e| format!("loading --prior-model '{prior_id}': {e}"))?;
-            log::info!(
-                "prior model = {prior_id} (from {})",
-                store_path.display()
-            );
+            log::info!("prior model = {prior_id} (from {})", store_path.display());
             Some(p)
         }
         None => None,
@@ -1362,12 +479,10 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         log::info!("building GBDT dataset from {} PSMs ...", psms.len());
         let gbdt_rows: Vec<PsmRow<'_>> = psms
             .iter()
-            .map(|psm| {
-                PsmRow {
-                    spectrum: &psm.spectrum,
-                    peptide: &psm.peptide,
-                    charge: psm.charge,
-                }
+            .map(|psm| PsmRow {
+                spectrum: &psm.spectrum,
+                peptide: &psm.peptide,
+                charge: psm.charge,
             })
             .collect();
 
@@ -1681,77 +796,5 @@ pub(crate) fn unix_days_to_iso8601(days: u64) -> String {
 }
 
 #[cfg(test)]
-mod train_from_msnet_tests {
-    use super::*;
-    use model::mass::H2O;
-
-    #[test]
-    fn run_stem_strips_spectrum_extensions() {
-        assert_eq!(run_stem(Path::new("/x/a.mzML.gz")), "a");
-        assert_eq!(run_stem(Path::new("/x/PXD1_run.d")), "PXD1_run");
-        assert_eq!(run_stem(Path::new("/x/PXD1_run.d/")), "PXD1_run");
-        assert_eq!(run_stem(Path::new("b.MGF")), "b");
-        assert_eq!(run_stem(Path::new("c.raw")), "c");
-        assert_eq!(run_stem(Path::new(".d")), ".d");
-    }
-
-    fn unmod_mass(seq: &[u8]) -> f64 {
-        let rsum: f64 = seq
-            .iter()
-            .map(|&r| model::AminoAcid::standard(r).unwrap().mass)
-            .sum();
-        rsum + H2O
-    }
-
-    #[test]
-    fn unmodified_peptide_mass_matches_reference() {
-        let p = build_msnet_peptide("PEPTIDEK", &[], &[], 0.0, 0.0).unwrap();
-        let expected = unmod_mass(b"PEPTIDEK");
-        assert_eq!(p.mass().to_bits(), expected.to_bits());
-        assert!(p.residues.iter().all(|aa| !aa.is_modified()));
-    }
-
-    #[test]
-    fn residue_mod_mass_is_correct() {
-        const OX: f64 = 15.994915;
-        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], 0.0, 0.0).unwrap();
-        let expected = unmod_mass(b"MPEPTIDE") + OX;
-        assert_eq!(p.mass().to_bits(), expected.to_bits());
-        assert!(
-            p.residues[0].is_modified(),
-            "residue 1 should carry the mod"
-        );
-        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX);
-    }
-
-    #[test]
-    fn nterm_mod_mass_is_correct() {
-        const ACETYL: f64 = 42.010565;
-        let p = build_msnet_peptide("PEPTIDEK", &[], &[], ACETYL, 0.0).unwrap();
-        let expected = unmod_mass(b"PEPTIDEK") + ACETYL;
-        assert_eq!(p.mass().to_bits(), expected.to_bits());
-        assert!(p.residues[0].is_modified());
-    }
-
-    #[test]
-    fn overlapping_residue_and_nterm_mods_sum() {
-        const OX: f64 = 15.994915;
-        const ACETYL: f64 = 42.010565;
-        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], ACETYL, 0.0).unwrap();
-        let expected = unmod_mass(b"MPEPTIDE") + OX + ACETYL;
-        assert_eq!(p.mass().to_bits(), expected.to_bits());
-        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX + ACETYL);
-    }
-
-    #[test]
-    fn mismatched_mod_arrays_error() {
-        let r = build_msnet_peptide("PEPTIDE", &[1, 2], &[1.0], 0.0, 0.0);
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn nonstandard_residue_errors() {
-        let r = build_msnet_peptide("PEPTBDE", &[], &[], 0.0, 0.0);
-        assert!(r.is_err());
-    }
-}
+#[path = "train/tests/msnet.rs"]
+mod train_from_msnet_tests;

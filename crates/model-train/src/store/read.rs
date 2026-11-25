@@ -274,15 +274,7 @@ struct ManifestRow {
 
 fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainError> {
     let mut manifest_opt: Option<ManifestRow> = None;
-    let mut partitions: Vec<Partition> = Vec::new();
-    let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
-    let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
-        FxHashMap::default();
-    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
-        FxHashMap::default();
-    let mut ion_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
-    let mut noise_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
-    let mut ion_existence_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
+    let mut tables = TableRows::default();
 
     for path in parts {
         if manifest_opt.is_some() {
@@ -314,303 +306,21 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
                     "manifest" => {
                         manifest_opt = Some(parse_manifest_row(&batch, i)?);
                     }
-                    "table" => {
-                        let table_kind = str_col(&batch, "table_kind")?;
-                        if table_kind.is_null(i) {
-                            continue;
-                        }
-                        let tk = table_kind.value(i);
-
-                        let part_charge = i32_col(&batch, "part_charge")?;
-                        let part_mass_bits = i32_col(&batch, "part_mass_bits")?;
-                        let part_seg = i32_col(&batch, "part_seg")?;
-
-                        match tk {
-                            "partition" => {
-                                let charge = part_charge.value(i);
-                                let mass_bits = part_mass_bits.value(i) as u32;
-                                let seg = part_seg.value(i);
-                                partitions.push(Partition {
-                                    charge,
-                                    parent_mass: f32::from_bits(mass_bits),
-                                    seg_num: seg,
-                                });
-                            }
-                            "precursor_off" => {
-                                let charge = part_charge.value(i);
-                                let prec_arr =
-                                    batch.column_by_name("precursor_offsets").ok_or_else(|| {
-                                        TrainError::Other("missing precursor_offsets".into())
-                                    })?;
-                                let list = prec_arr
-                                    .as_any()
-                                    .downcast_ref::<ListArray>()
-                                    .ok_or_else(|| {
-                                        TrainError::Other("precursor_offsets not ListArray".into())
-                                    })?;
-                                if list.is_null(i) {
-                                    continue;
-                                }
-                                let sa = list.value(i);
-                                let structs =
-                                    sa.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
-                                        TrainError::Other(
-                                            "precursor_offsets item not StructArray".into(),
-                                        )
-                                    })?;
-                                let rc_col =
-                                    structs.column_by_name("reduced_charge").ok_or_else(|| {
-                                        TrainError::Other("missing reduced_charge".into())
-                                    })?;
-                                let off_col = structs
-                                    .column_by_name("offset")
-                                    .ok_or_else(|| TrainError::Other("missing offset".into()))?;
-                                let tol_is_ppm_col =
-                                    structs.column_by_name("tol_is_ppm").ok_or_else(|| {
-                                        TrainError::Other("missing tol_is_ppm".into())
-                                    })?;
-                                let tol_val_col = structs
-                                    .column_by_name("tol_val")
-                                    .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
-                                let freq_col = structs
-                                    .column_by_name("frequency")
-                                    .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
-                                let rcs = rc_col.as_any().downcast_ref::<Int32Array>().ok_or_else(
-                                    || {
-                                        TrainError::Other(
-                                            "column reduced_charge has unexpected arrow type"
-                                                .into(),
-                                        )
-                                    },
-                                )?;
-                                let offs = off_col
-                                    .as_any()
-                                    .downcast_ref::<Float32Array>()
-                                    .ok_or_else(|| {
-                                        TrainError::Other(
-                                            "column offset has unexpected arrow type".into(),
-                                        )
-                                    })?;
-                                let tols = tol_is_ppm_col
-                                    .as_any()
-                                    .downcast_ref::<BooleanArray>()
-                                    .ok_or_else(|| {
-                                    TrainError::Other(
-                                        "column tol_is_ppm has unexpected arrow type".into(),
-                                    )
-                                })?;
-                                let tolvs = tol_val_col
-                                    .as_any()
-                                    .downcast_ref::<Float32Array>()
-                                    .ok_or_else(|| {
-                                        TrainError::Other(
-                                            "column tol_val has unexpected arrow type".into(),
-                                        )
-                                    })?;
-                                let freqs = freq_col
-                                    .as_any()
-                                    .downcast_ref::<Float32Array>()
-                                    .ok_or_else(|| {
-                                        TrainError::Other(
-                                            "column frequency has unexpected arrow type".into(),
-                                        )
-                                    })?;
-                                let entries = precursor_off_map.entry(charge).or_default();
-                                for j in 0..structs.len() {
-                                    let is_ppm = tols.value(j);
-                                    let tol_raw = tolvs.value(j) as f64;
-                                    let tolerance = if is_ppm {
-                                        Tolerance::Ppm(tol_raw)
-                                    } else {
-                                        Tolerance::Da(tol_raw)
-                                    };
-                                    entries.push(PrecursorOffsetFrequency {
-                                        reduced_charge: rcs.value(j),
-                                        offset: offs.value(j),
-                                        tolerance,
-                                        frequency: freqs.value(j),
-                                    });
-                                }
-                            }
-                            "frag_off" => {
-                                let charge = part_charge.value(i);
-                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                                let seg = part_seg.value(i);
-                                let part = Partition {
-                                    charge,
-                                    parent_mass: mass,
-                                    seg_num: seg,
-                                };
-
-                                let values_arr = list_col(&batch, "values")?;
-                                if values_arr.is_null(i) {
-                                    continue;
-                                }
-                                let flat_arr = values_arr.value(i);
-                                let flat = flat_arr
-                                    .as_any()
-                                    .downcast_ref::<Float32Array>()
-                                    .ok_or_else(|| {
-                                        TrainError::Other("frag_off values not Float32Array".into())
-                                    })?;
-                                let len = flat.len();
-                                if len % 4 != 0 {
-                                    return Err(TrainError::Other(format!(
-                                        "frag_off flat length {} not multiple of 4",
-                                        len
-                                    )));
-                                }
-
-                                let loss_classes_vec: Vec<i32> = match batch
-                                    .column_by_name("frag_off_loss_classes")
-                                {
-                                    Some(col) => {
-                                        if let Some(list) = col.as_any().downcast_ref::<ListArray>()
-                                        {
-                                            if list.is_null(i) {
-                                                Vec::new()
-                                            } else {
-                                                let item = list.value(i);
-                                                if let Some(arr) =
-                                                    item.as_any().downcast_ref::<Int32Array>()
-                                                {
-                                                    (0..arr.len()).map(|k| arr.value(k)).collect()
-                                                } else {
-                                                    Vec::new()
-                                                }
-                                            }
-                                        } else {
-                                            Vec::new()
-                                        }
-                                    }
-                                    None => Vec::new(),
-                                };
-
-                                let mut frags: Vec<FragmentOffsetFrequency> =
-                                    Vec::with_capacity(len / 4);
-                                let mut j = 0;
-                                let mut entry_idx = 0usize;
-                                while j + 3 < len {
-                                    let is_prefix_f = flat.value(j);
-                                    let ion_charge = flat.value(j + 1) as i32;
-                                    let offset_bits_f = flat.value(j + 2);
-                                    let offset_bits = offset_bits_f.to_bits();
-                                    let frequency = flat.value(j + 3);
-                                    let lc: u8 = loss_classes_vec
-                                        .get(entry_idx)
-                                        .map(|&v| v.clamp(0, 255) as u8)
-                                        .unwrap_or(0);
-                                    let ion_type = if is_prefix_f > 0.5 {
-                                        IonType::Prefix {
-                                            charge: ion_charge,
-                                            offset_bits,
-                                            loss_class: lc,
-                                        }
-                                    } else if is_prefix_f < -0.5 {
-                                        IonType::Noise
-                                    } else {
-                                        IonType::Suffix {
-                                            charge: ion_charge,
-                                            offset_bits,
-                                            loss_class: lc,
-                                        }
-                                    };
-                                    frags.push(FragmentOffsetFrequency {
-                                        ion_type,
-                                        frequency,
-                                    });
-                                    j += 4;
-                                    entry_idx += 1;
-                                }
-                                frag_off_table.insert(part, frags);
-                            }
-                            "rank_dist" => {
-                                let charge = part_charge.value(i);
-                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                                let seg = part_seg.value(i);
-                                let part = Partition {
-                                    charge,
-                                    parent_mass: mass,
-                                    seg_num: seg,
-                                };
-
-                                let ik_col = str_col(&batch, "ion_kind")?;
-                                let ic_col = i32_col(&batch, "ion_charge")?;
-                                let iob_col = i32_col(&batch, "ion_offset_bits")?;
-
-                                let kind = ik_col.value(i);
-                                let ic = ic_col.value(i);
-                                let iob = iob_col.value(i) as u32;
-                                let lc: u8 = match batch.column_by_name("ion_loss_class") {
-                                    Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
-                                        Some(arr) if !arr.is_null(i) => {
-                                            arr.value(i).clamp(0, 255) as u8
-                                        }
-                                        _ => 0,
-                                    },
-                                    None => 0,
-                                };
-                                let ion_type = decode_ion_type(kind, ic, iob, lc)?;
-
-                                let values_arr = list_col(&batch, "values")?;
-                                if values_arr.is_null(i) {
-                                    continue;
-                                }
-                                let v_arr = values_arr.value(i);
-                                let v = v_arr.as_any().downcast_ref::<Float32Array>().ok_or_else(
-                                    || {
-                                        TrainError::Other(
-                                            "rank_dist values not Float32Array".into(),
-                                        )
-                                    },
-                                )?;
-                                let freqs: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
-
-                                rank_dist_table
-                                    .entry(part)
-                                    .or_default()
-                                    .insert(ion_type, freqs);
-                            }
-                            "ion_err" | "noise_err" | "ion_existence" => {
-                                let charge = part_charge.value(i);
-                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                                let seg = part_seg.value(i);
-                                let part = Partition {
-                                    charge,
-                                    parent_mass: mass,
-                                    seg_num: seg,
-                                };
-
-                                let values_arr = list_col(&batch, "values")?;
-                                if values_arr.is_null(i) {
-                                    continue;
-                                }
-                                let v_arr = values_arr.value(i);
-                                let v = v_arr.as_any().downcast_ref::<Float32Array>().ok_or_else(
-                                    || TrainError::Other("dist values not Float32Array".into()),
-                                )?;
-                                let vals: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
-                                match tk {
-                                    "ion_err" => {
-                                        ion_err_dist_table.insert(part, vals);
-                                    }
-                                    "noise_err" => {
-                                        noise_err_dist_table.insert(part, vals);
-                                    }
-                                    "ion_existence" => {
-                                        ion_existence_table.insert(part, vals);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    "table" => read_table_row(&batch, i, &mut tables)?,
                     _ => {}
                 }
             }
         }
     }
+    let TableRows {
+        mut partitions,
+        precursor_off_map,
+        frag_off_table,
+        rank_dist_table,
+        ion_err_dist_table,
+        noise_err_dist_table,
+        ion_existence_table,
+    } = tables;
 
     let manifest = manifest_opt.ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
 
@@ -710,6 +420,297 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     }
 
     Ok(param)
+}
+
+/// The per-partition tables of a model, read row by row from its Parquet parts.
+#[derive(Default)]
+struct TableRows {
+    partitions: Vec<Partition>,
+    precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>>,
+    frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>>,
+    rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>>,
+    ion_err_dist_table: FxHashMap<Partition, Vec<f32>>,
+    noise_err_dist_table: FxHashMap<Partition, Vec<f32>>,
+    ion_existence_table: FxHashMap<Partition, Vec<f32>>,
+}
+
+/// Reads one `table` row (row `i` of `batch`) into the table it belongs to; a row with no table kind
+/// or no values is skipped.
+fn read_table_row(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+    tables: &mut TableRows,
+) -> Result<(), TrainError> {
+    let TableRows {
+        partitions,
+        precursor_off_map,
+        frag_off_table,
+        rank_dist_table,
+        ion_err_dist_table,
+        noise_err_dist_table,
+        ion_existence_table,
+    } = tables;
+    let table_kind = str_col(batch, "table_kind")?;
+    if table_kind.is_null(i) {
+        return Ok(());
+    }
+    let tk = table_kind.value(i);
+
+    let part_charge = i32_col(batch, "part_charge")?;
+    let part_mass_bits = i32_col(batch, "part_mass_bits")?;
+    let part_seg = i32_col(batch, "part_seg")?;
+
+    match tk {
+        "partition" => {
+            let charge = part_charge.value(i);
+            let mass_bits = part_mass_bits.value(i) as u32;
+            let seg = part_seg.value(i);
+            partitions.push(Partition {
+                charge,
+                parent_mass: f32::from_bits(mass_bits),
+                seg_num: seg,
+            });
+        }
+        "precursor_off" => {
+            let charge = part_charge.value(i);
+            let prec_arr = batch
+                .column_by_name("precursor_offsets")
+                .ok_or_else(|| TrainError::Other("missing precursor_offsets".into()))?;
+            let list = prec_arr
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| TrainError::Other("precursor_offsets not ListArray".into()))?;
+            if list.is_null(i) {
+                return Ok(());
+            }
+            let sa = list.value(i);
+            let structs = sa.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                TrainError::Other("precursor_offsets item not StructArray".into())
+            })?;
+            let rc_col = structs
+                .column_by_name("reduced_charge")
+                .ok_or_else(|| TrainError::Other("missing reduced_charge".into()))?;
+            let off_col = structs
+                .column_by_name("offset")
+                .ok_or_else(|| TrainError::Other("missing offset".into()))?;
+            let tol_is_ppm_col = structs
+                .column_by_name("tol_is_ppm")
+                .ok_or_else(|| TrainError::Other("missing tol_is_ppm".into()))?;
+            let tol_val_col = structs
+                .column_by_name("tol_val")
+                .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
+            let freq_col = structs
+                .column_by_name("frequency")
+                .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
+            let rcs = rc_col
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| {
+                    TrainError::Other("column reduced_charge has unexpected arrow type".into())
+                })?;
+            let offs = off_col
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    TrainError::Other("column offset has unexpected arrow type".into())
+                })?;
+            let tols = tol_is_ppm_col
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    TrainError::Other("column tol_is_ppm has unexpected arrow type".into())
+                })?;
+            let tolvs = tol_val_col
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    TrainError::Other("column tol_val has unexpected arrow type".into())
+                })?;
+            let freqs = freq_col
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    TrainError::Other("column frequency has unexpected arrow type".into())
+                })?;
+            let entries = precursor_off_map.entry(charge).or_default();
+            for j in 0..structs.len() {
+                let is_ppm = tols.value(j);
+                let tol_raw = tolvs.value(j) as f64;
+                let tolerance = if is_ppm {
+                    Tolerance::Ppm(tol_raw)
+                } else {
+                    Tolerance::Da(tol_raw)
+                };
+                entries.push(PrecursorOffsetFrequency {
+                    reduced_charge: rcs.value(j),
+                    offset: offs.value(j),
+                    tolerance,
+                    frequency: freqs.value(j),
+                });
+            }
+        }
+        "frag_off" => {
+            let charge = part_charge.value(i);
+            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+            let seg = part_seg.value(i);
+            let part = Partition {
+                charge,
+                parent_mass: mass,
+                seg_num: seg,
+            };
+
+            let values_arr = list_col(batch, "values")?;
+            if values_arr.is_null(i) {
+                return Ok(());
+            }
+            let flat_arr = values_arr.value(i);
+            let flat = flat_arr
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| TrainError::Other("frag_off values not Float32Array".into()))?;
+            let len = flat.len();
+            if len % 4 != 0 {
+                return Err(TrainError::Other(format!(
+                    "frag_off flat length {} not multiple of 4",
+                    len
+                )));
+            }
+
+            let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
+                Some(col) => {
+                    if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
+                        if list.is_null(i) {
+                            Vec::new()
+                        } else {
+                            let item = list.value(i);
+                            if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
+                                (0..arr.len()).map(|k| arr.value(k)).collect()
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                }
+                None => Vec::new(),
+            };
+
+            let mut frags: Vec<FragmentOffsetFrequency> = Vec::with_capacity(len / 4);
+            let mut j = 0;
+            let mut entry_idx = 0usize;
+            while j + 3 < len {
+                let is_prefix_f = flat.value(j);
+                let ion_charge = flat.value(j + 1) as i32;
+                let offset_bits_f = flat.value(j + 2);
+                let offset_bits = offset_bits_f.to_bits();
+                let frequency = flat.value(j + 3);
+                let lc: u8 = loss_classes_vec
+                    .get(entry_idx)
+                    .map(|&v| v.clamp(0, 255) as u8)
+                    .unwrap_or(0);
+                let ion_type = if is_prefix_f > 0.5 {
+                    IonType::Prefix {
+                        charge: ion_charge,
+                        offset_bits,
+                        loss_class: lc,
+                    }
+                } else if is_prefix_f < -0.5 {
+                    IonType::Noise
+                } else {
+                    IonType::Suffix {
+                        charge: ion_charge,
+                        offset_bits,
+                        loss_class: lc,
+                    }
+                };
+                frags.push(FragmentOffsetFrequency {
+                    ion_type,
+                    frequency,
+                });
+                j += 4;
+                entry_idx += 1;
+            }
+            frag_off_table.insert(part, frags);
+        }
+        "rank_dist" => {
+            let charge = part_charge.value(i);
+            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+            let seg = part_seg.value(i);
+            let part = Partition {
+                charge,
+                parent_mass: mass,
+                seg_num: seg,
+            };
+
+            let ik_col = str_col(batch, "ion_kind")?;
+            let ic_col = i32_col(batch, "ion_charge")?;
+            let iob_col = i32_col(batch, "ion_offset_bits")?;
+
+            let kind = ik_col.value(i);
+            let ic = ic_col.value(i);
+            let iob = iob_col.value(i) as u32;
+            let lc: u8 = match batch.column_by_name("ion_loss_class") {
+                Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+                    Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
+                    _ => 0,
+                },
+                None => 0,
+            };
+            let ion_type = decode_ion_type(kind, ic, iob, lc)?;
+
+            let values_arr = list_col(batch, "values")?;
+            if values_arr.is_null(i) {
+                return Ok(());
+            }
+            let v_arr = values_arr.value(i);
+            let v = v_arr
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| TrainError::Other("rank_dist values not Float32Array".into()))?;
+            let freqs: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
+
+            rank_dist_table
+                .entry(part)
+                .or_default()
+                .insert(ion_type, freqs);
+        }
+        "ion_err" | "noise_err" | "ion_existence" => {
+            let charge = part_charge.value(i);
+            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+            let seg = part_seg.value(i);
+            let part = Partition {
+                charge,
+                parent_mass: mass,
+                seg_num: seg,
+            };
+
+            let values_arr = list_col(batch, "values")?;
+            if values_arr.is_null(i) {
+                return Ok(());
+            }
+            let v_arr = values_arr.value(i);
+            let v = v_arr
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| TrainError::Other("dist values not Float32Array".into()))?;
+            let vals: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
+            match tk {
+                "ion_err" => {
+                    ion_err_dist_table.insert(part, vals);
+                }
+                "noise_err" => {
+                    noise_err_dist_table.insert(part, vals);
+                }
+                "ion_existence" => {
+                    ion_existence_table.insert(part, vals);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn parse_manifest_row(

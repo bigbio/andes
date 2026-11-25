@@ -585,39 +585,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         problems.errors.push(format!("cohort.{e}"));
     }
 
-    let mut projects: Vec<&str> = Vec::new();
-    for s in &cohort.sdrfs {
-        if projects.contains(&s.project.as_str()) {
-            problems.errors.push(format!(
-                "cohort.sdrfs: project {} is listed twice",
-                s.project
-            ));
-        }
-        projects.push(&s.project);
-    }
-    for p in &cohort.exclude {
-        if !projects.contains(&p.as_str()) {
-            problems
-                .errors
-                .push(format!("cohort.exclude: {p} is not in cohort.sdrfs"));
-        }
-    }
-    let mut overridden: Vec<&str> = Vec::new();
-    for o in &cohort.overrides {
-        if !projects.contains(&o.project.as_str()) {
-            problems.errors.push(format!(
-                "cohort.overrides: {} is not in cohort.sdrfs",
-                o.project
-            ));
-        }
-        if overridden.contains(&o.project.as_str()) {
-            problems
-                .errors
-                .push(format!("cohort.overrides: {} has two entries", o.project));
-        }
-        overridden.push(&o.project);
-        check_override(&o.project, &o.search, &mut problems);
-    }
+    let projects = check_projects(cohort, &mut problems);
 
     let abs = |p: &Path| {
         if p.is_absolute() {
@@ -644,53 +612,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         .map(abs)
         .unwrap_or_else(|| base.join(&cohort_name));
 
-    let mut parts: Vec<Part> = Vec::new();
-    for s in cohort
-        .sdrfs
-        .iter()
-        .filter(|s| !cohort.exclude.contains(&s.project))
-    {
-        let path = if s.sdrf.is_absolute() {
-            s.sdrf.clone()
-        } else {
-            base.join(&s.sdrf)
-        };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) => {
-                problems.errors.push(format!(
-                    "{}: cannot read {}: {e}",
-                    s.project,
-                    path.display()
-                ));
-                continue;
-            }
-        };
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        match sdrf::split(&text, dir) {
-            Ok(groups) => {
-                if groups.len() > 1 {
-                    problems.warnings.push(format!(
-                        "{}: {} splits into {} settings groups; each is searched with its own \
-                         settings",
-                        s.project,
-                        path.display(),
-                        groups.len()
-                    ));
-                }
-                for settings in groups {
-                    parts.push(Part {
-                        project: s.project.clone(),
-                        sdrf: path.clone(),
-                        settings,
-                    });
-                }
-            }
-            Err(e) => problems
-                .errors
-                .push(format!("{}: {}: {e}", s.project, path.display())),
-        }
-    }
+    let parts = read_parts(cohort, base, &mut problems);
 
     let mut runs: Vec<PlannedRun> = Vec::new();
     let mut keys: Vec<(Kind, String)> = Vec::new();
@@ -715,77 +637,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
             }
         };
         let args = r.args();
-        let mut files: Vec<PathBuf> = Vec::new();
-        let mut missing: Vec<String> = Vec::new();
-        for (k, f) in part.settings.data_files.iter().enumerate() {
-            let name = part
-                .settings
-                .data_names
-                .get(k)
-                .and_then(|n| Path::new(n).file_name())
-                .or_else(|| f.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            match (&data_dir, &index) {
-                (Some(root), Some(idx)) => match locate(idx, root, &part.project, &projects, &name)
-                {
-                    Ok(p) => files.push(p),
-                    Err(e) => missing.push(e),
-                },
-                (Some(_), None) => {}
-                (None, _) => {
-                    if !f.exists() {
-                        missing.push(format!("{name}: not found next to the SDRF"));
-                    }
-                    files.push(f.clone());
-                }
-            }
-        }
-        if !missing.is_empty() {
-            let msg = format!(
-                "{}: {} of {} data files in {} are missing: {}",
-                part.project,
-                missing.len(),
-                part.settings.data_files.len(),
-                part.sdrf.display(),
-                missing.join("; ")
-            );
-            if data_dir.is_some() {
-                problems.errors.push(msg);
-            } else {
-                problems.warnings.push(format!(
-                    "{msg}; set cohort.data_dir to the folder that holds them"
-                ));
-            }
-        }
-        let empty: Vec<&PathBuf> = files
-            .iter()
-            .filter(|f| std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.len() == 0))
-            .collect();
-        if let Some(first) = empty.first() {
-            problems.errors.push(format!(
-                "{}: {} of {} data files in {} are empty (e.g. {}); an interrupted download? \
-                 fetch them again",
-                part.project,
-                empty.len(),
-                files.len(),
-                part.sdrf.display(),
-                first.display()
-            ));
-        }
-        let unread: Vec<&PathBuf> = files.iter().filter(|f| !readable(f)).collect();
-        if let Some(first) = unread.first() {
-            problems.warnings.push(format!(
-                "{}: {} of {} data files in {} are not spectrum files andes reads (e.g. {}); \
-                 convert or extract each to mzML, Thermo .raw, Bruker .d or MGF with the same \
-                 stem and plan again",
-                part.project,
-                unread.len(),
-                files.len(),
-                part.sdrf.display(),
-                first.display()
-            ));
-        }
+        let files = part_files(part, &data_dir, &index, &projects, &mut problems);
         for file in &files {
             let run = run_name(template, &part.project, file);
             if !valid_run_name(&run) {
@@ -835,8 +687,197 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
     if !problems.errors.is_empty() {
         return Err(problems);
     }
-    let groups = keys
+    let groups = plan_groups(&keys, &runs, &output_dir);
+    Ok(Plan {
+        cohort: cohort_name,
+        output_dir,
+        runs,
+        groups,
+        warnings: problems.warnings,
+    })
+}
+
+/// The projects `cohort.sdrfs` lists, in order; duplicate projects, and `exclude` or `overrides`
+/// entries naming an unlisted project, are recorded in `problems`.
+fn check_projects<'a>(cohort: &'a CohortCfg, problems: &mut Problems) -> Vec<&'a str> {
+    let mut projects: Vec<&str> = Vec::new();
+    for s in &cohort.sdrfs {
+        if projects.contains(&s.project.as_str()) {
+            problems.errors.push(format!(
+                "cohort.sdrfs: project {} is listed twice",
+                s.project
+            ));
+        }
+        projects.push(&s.project);
+    }
+    for p in &cohort.exclude {
+        if !projects.contains(&p.as_str()) {
+            problems
+                .errors
+                .push(format!("cohort.exclude: {p} is not in cohort.sdrfs"));
+        }
+    }
+    let mut overridden: Vec<&str> = Vec::new();
+    for o in &cohort.overrides {
+        if !projects.contains(&o.project.as_str()) {
+            problems.errors.push(format!(
+                "cohort.overrides: {} is not in cohort.sdrfs",
+                o.project
+            ));
+        }
+        if overridden.contains(&o.project.as_str()) {
+            problems
+                .errors
+                .push(format!("cohort.overrides: {} has two entries", o.project));
+        }
+        overridden.push(&o.project);
+        check_override(&o.project, &o.search, problems);
+    }
+    projects
+}
+
+/// Each listed SDRF that is not excluded, split into its settings groups; unreadable or
+/// unparsable SDRFs are recorded in `problems`.
+fn read_parts(cohort: &CohortCfg, base: &Path, problems: &mut Problems) -> Vec<Part> {
+    let mut parts: Vec<Part> = Vec::new();
+    for s in cohort
+        .sdrfs
         .iter()
+        .filter(|s| !cohort.exclude.contains(&s.project))
+    {
+        let path = if s.sdrf.is_absolute() {
+            s.sdrf.clone()
+        } else {
+            base.join(&s.sdrf)
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                problems.errors.push(format!(
+                    "{}: cannot read {}: {e}",
+                    s.project,
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        match sdrf::split(&text, dir) {
+            Ok(groups) => {
+                if groups.len() > 1 {
+                    problems.warnings.push(format!(
+                        "{}: {} splits into {} settings groups; each is searched with its own \
+                         settings",
+                        s.project,
+                        path.display(),
+                        groups.len()
+                    ));
+                }
+                for settings in groups {
+                    parts.push(Part {
+                        project: s.project.clone(),
+                        sdrf: path.clone(),
+                        settings,
+                    });
+                }
+            }
+            Err(e) => problems
+                .errors
+                .push(format!("{}: {}: {e}", s.project, path.display())),
+        }
+    }
+    parts
+}
+
+/// The spectrum files of one part: found under `data_dir` through `index`, or next to the
+/// SDRF when `data_dir` is unset. Missing, empty and unreadable files are recorded in `problems`.
+fn part_files(
+    part: &Part,
+    data_dir: &Option<PathBuf>,
+    index: &Option<BTreeMap<String, Vec<PathBuf>>>,
+    projects: &[&str],
+    problems: &mut Problems,
+) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for (k, f) in part.settings.data_files.iter().enumerate() {
+        let name = part
+            .settings
+            .data_names
+            .get(k)
+            .and_then(|n| Path::new(n).file_name())
+            .or_else(|| f.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match (data_dir, index) {
+            (Some(root), Some(idx)) => match locate(idx, root, &part.project, projects, &name) {
+                Ok(p) => files.push(p),
+                Err(e) => missing.push(e),
+            },
+            (Some(_), None) => {}
+            (None, _) => {
+                if !f.exists() {
+                    missing.push(format!("{name}: not found next to the SDRF"));
+                }
+                files.push(f.clone());
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let msg = format!(
+            "{}: {} of {} data files in {} are missing: {}",
+            part.project,
+            missing.len(),
+            part.settings.data_files.len(),
+            part.sdrf.display(),
+            missing.join("; ")
+        );
+        if data_dir.is_some() {
+            problems.errors.push(msg);
+        } else {
+            problems.warnings.push(format!(
+                "{msg}; set cohort.data_dir to the folder that holds them"
+            ));
+        }
+    }
+    let empty: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.len() == 0))
+        .collect();
+    if let Some(first) = empty.first() {
+        problems.errors.push(format!(
+            "{}: {} of {} data files in {} are empty (e.g. {}); an interrupted download? \
+             fetch them again",
+            part.project,
+            empty.len(),
+            files.len(),
+            part.sdrf.display(),
+            first.display()
+        ));
+    }
+    let unread: Vec<&PathBuf> = files.iter().filter(|f| !readable(f)).collect();
+    if let Some(first) = unread.first() {
+        problems.warnings.push(format!(
+            "{}: {} of {} data files in {} are not spectrum files andes reads (e.g. {}); \
+             convert or extract each to mzML, Thermo .raw, Bruker .d or MGF with the same \
+             stem and plan again",
+            part.project,
+            unread.len(),
+            files.len(),
+            part.sdrf.display(),
+            first.display()
+        ));
+    }
+    files
+}
+
+/// One group per settings key, with its members' runs, projects and rescoring inputs.
+fn plan_groups(
+    keys: &[(Kind, String)],
+    runs: &[PlannedRun],
+    output_dir: &Path,
+) -> Vec<PlannedGroup> {
+    keys.iter()
         .map(|(key, name)| {
             let members: Vec<&PlannedRun> = runs.iter().filter(|r| &r.group == name).collect();
             let mut projects: Vec<String> = Vec::new();
@@ -859,14 +900,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                 inputs: members.iter().map(|r| input(r)).collect(),
             }
         })
-        .collect();
-    Ok(Plan {
-        cohort: cohort_name,
-        output_dir,
-        runs,
-        groups,
-        warnings: problems.warnings,
-    })
+        .collect()
 }
 
 #[cfg(test)]

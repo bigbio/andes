@@ -630,14 +630,15 @@ fn pin_of(table: &Path) -> PathBuf {
     ))
 }
 
+/// The link classes one Percolator model scores and the PIN features it leaves out.
+type InterModel = (Vec<xl::rollup::LinkClass>, Vec<&'static str>);
+
 /// The Percolator models of the inter-links: the link classes each one scores and the PIN
 /// features it leaves out. The gap to the next candidate pair is always left out. When the
 /// PINs carry fragment-intensity features (`--predict ms2`), `InterAmbiguous` gets a model of
 /// its own without them: a peptide's fragment intensities confirm the peptide but not which of
 /// its near-identical proteins it came from, which is what the class is uncertain about.
-fn inter_models(
-    tables: &[PathBuf],
-) -> Result<Vec<(Vec<xl::rollup::LinkClass>, Vec<&'static str>)>, Box<dyn Error>> {
+fn inter_models(tables: &[PathBuf]) -> Result<Vec<InterModel>, Box<dyn Error>> {
     use std::io::BufRead;
     use xl::rollup::LinkClass::{Inter, InterAmbiguous};
     let gap = crate::xl::fdr::GAP_FEATURES.to_vec();

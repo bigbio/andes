@@ -374,3 +374,48 @@ fn mass_pairs_find_full_and_half_pairs() {
     assert_eq!(half[0].iso, 0);
     assert_eq!(half[0].b_stub_ions, 1);
 }
+
+#[test]
+fn two_peptides_linked_at_the_same_or_the_next_residue_of_one_protein_are_flagged() {
+    use model::amino_acid::set::AminoAcidSetBuilder;
+    use model::protein::{Protein, ProteinDb};
+    let db = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: String::new(),
+            sequence: b"MSEKAFKLFDDDETGKISFKNLKGSTPEDLRK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = crate::index::SearchIndex::from_target_db(&db, "XXX_");
+    let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = crate::params::SearchParams::default_tryptic(aa);
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
+    let prepared =
+        PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX_").unwrap();
+    let table = XlCandidates::from_index(&prepared, &linker("DSS"));
+    let sited: Vec<(&XlPeptide, LinkSite, i64)> = table
+        .peptides()
+        .iter()
+        .filter(|p| !p.is_decoy)
+        .flat_map(|p| {
+            p.sites.iter().flat_map(move |s| {
+                p.occurrences_at(s)
+                    .iter()
+                    .map(move |&(_, start)| (p, *s, start as i64 + s.pos as i64))
+            })
+        })
+        .collect();
+    let find = |want: &dyn Fn(i64) -> bool| {
+        sited.iter().enumerate().find_map(|(i, a)| {
+            sited[i + 1..]
+                .iter()
+                .find(|b| a.0.bare() != b.0.bare() && want(a.2 - b.2))
+                .map(|b| (a, b))
+        })
+    };
+    let (a, b) = find(&|d| d == 0).expect("two peptides sharing a linkable residue");
+    assert!(link_sites_adjacent(&prepared, a.0, &a.1, b.0, &b.1));
+    let (a, b) = find(&|d| d.abs() >= 2).expect("two peptides with distant sites");
+    assert!(!link_sites_adjacent(&prepared, a.0, &a.1, b.0, &b.1));
+}

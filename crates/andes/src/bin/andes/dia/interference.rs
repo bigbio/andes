@@ -117,6 +117,7 @@ pub(super) struct Coeluting {
 
 /// Whether each precursor of one window (sorted here by RT) has a higher-scoring one within
 /// `rule.1` s of RT, in an overlapping mobility slice, holding at least `rule.0` of its fragments.
+/// Forms of the same sequence never remove each other, as in [`estimate_interference`].
 fn interfered(ps: &mut [Coeluting], rule: (f64, f64)) -> Vec<bool> {
     ps.sort_by(|a, b| a.rt.total_cmp(&b.rt));
     (0..ps.len())
@@ -127,7 +128,11 @@ fn interfered(ps: &mut [Coeluting], rule: (f64, f64)) -> Vec<bool> {
                 .iter()
                 .take_while(|x| x.rt <= p.rt + rule.1)
                 .any(|x| {
-                    if x.score <= p.score || x.mob.1 <= p.mob.0 || p.mob.1 <= x.mob.0 {
+                    if x.score <= p.score
+                        || x.mob.1 <= p.mob.0
+                        || p.mob.1 <= x.mob.0
+                        || x.seq == p.seq
+                    {
                         return false;
                     }
                     let shared = p.frags.iter().filter(|f| x.frags.binary_search(f).is_ok());

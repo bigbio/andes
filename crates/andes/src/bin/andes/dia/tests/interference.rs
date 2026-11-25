@@ -72,3 +72,22 @@ fn interference_estimate_finds_the_coelution_scale_and_a_safe_share() {
     assert_eq!(null_pairs("PEPTIDEK"), 0);
     assert_eq!(null_pairs("PEPTLDEK"), 1);
 }
+
+#[test]
+fn interference_never_removes_a_form_of_the_same_sequence() {
+    let (_, m) = parse_peptide("K.PEPTIDEK.L").unwrap();
+    let f = fragment_bins(&m, 2);
+    let p = |key, score, seq: &str| Coeluting {
+        key,
+        score,
+        rt: 100.0,
+        mob: (10, 30),
+        seq: seq.to_string(),
+        frags: f.clone(),
+    };
+    let mut same = vec![p(0, 5.0, "PEPTIDEK"), p(1, 4.0, "PEPTIDEK")];
+    assert_eq!(interfered(&mut same, (0.5, 4.0)), [false, false]);
+    let mut other = vec![p(0, 5.0, "PEPTIDEK"), p(1, 4.0, "PEPTLDEK")];
+    let hit = interfered(&mut other, (0.5, 4.0));
+    assert!(hit[other.iter().position(|x| x.key == 1).unwrap()]);
+}

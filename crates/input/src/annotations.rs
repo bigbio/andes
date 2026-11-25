@@ -193,36 +193,7 @@ pub(crate) fn add_claims(
         }
     }
 
-    for (r, extra) in sites {
-        stats.sites += extra.len();
-        let p = &mut db.proteins[r];
-        let mut info = p
-            .annotation
-            .as_deref()
-            .cloned()
-            .unwrap_or_else(|| ProteinAnnotation::new(Vec::new(), None));
-        let mut all = info.mod_sites.clone();
-        all.extend(extra.iter().map(|(m, _)| *m));
-        info.mod_sites = ProteinAnnotation::new(all, None).mod_sites;
-        let mut claims = info.site_claims.clone();
-        for (m, tier) in &extra {
-            match claims.iter_mut().find(|c| {
-                c.knockoff_of.is_none()
-                    && c.position == m.position
-                    && (c.mass_delta - m.mass_delta).abs() <= model::protein::SITE_MASS_TOLERANCE
-            }) {
-                Some(c) => c.tier = c.tier.min(*tier),
-                None => claims.push(SiteClaim {
-                    position: m.position,
-                    mass_delta: m.mass_delta,
-                    tier: *tier,
-                    knockoff_of: None,
-                }),
-            }
-        }
-        info = info.with_site_claims(claims);
-        p.annotation = Some(Arc::new(info));
-    }
+    add_site_claims(db, sites, stats);
 
     let family_of = |p: &Protein| -> Arc<str> {
         p.origin().map_or_else(
@@ -266,31 +237,7 @@ pub(crate) fn add_claims(
         .map(|(i, _)| i)
         .collect();
 
-    let mut existing: HashMap<(Arc<str>, EntryKind, Vec<u8>), usize> = HashMap::new();
-    let mut members: HashMap<(Arc<str>, Arc<str>), Vec<usize>> = HashMap::new();
-    for (i, p) in db.proteins.iter().enumerate() {
-        let Some(o) = p.origin() else {
-            continue;
-        };
-        if o.kind == EntryKind::Reference {
-            continue;
-        }
-        match &o.knockoff_of {
-            Some(of) => members
-                .entry((o.family.clone(), of.clone()))
-                .or_default()
-                .push(i),
-            None => {
-                existing
-                    .entry((o.family.clone(), o.kind, p.sequence.clone()))
-                    .or_insert(i);
-                members
-                    .entry((o.family.clone(), o.feature.clone()))
-                    .or_default()
-                    .push(i);
-            }
-        }
-    }
+    let (existing, members) = entry_index(db);
 
     for (r, list) in claims {
         let reference = db.proteins[r].clone();
@@ -355,6 +302,81 @@ pub(crate) fn add_claims(
         });
     }
     Ok(())
+}
+
+/// Merges the file's plain site claims (no sequence edit or processing) into each reference's
+/// modification sites and site claims, keeping the better prior tier of a claim listed twice.
+fn add_site_claims(
+    db: &mut ProteinDb,
+    sites: BTreeMap<usize, Vec<(ModSite, PriorTier)>>,
+    stats: &mut AnnotationLoadStats,
+) {
+    for (r, extra) in sites {
+        stats.sites += extra.len();
+        let p = &mut db.proteins[r];
+        let mut info = p
+            .annotation
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| ProteinAnnotation::new(Vec::new(), None));
+        let mut all = info.mod_sites.clone();
+        all.extend(extra.iter().map(|(m, _)| *m));
+        info.mod_sites = ProteinAnnotation::new(all, None).mod_sites;
+        let mut claims = info.site_claims.clone();
+        for (m, tier) in &extra {
+            match claims.iter_mut().find(|c| {
+                c.knockoff_of.is_none()
+                    && c.position == m.position
+                    && (c.mass_delta - m.mass_delta).abs() <= model::protein::SITE_MASS_TOLERANCE
+            }) {
+                Some(c) => c.tier = c.tier.min(*tier),
+                None => claims.push(SiteClaim {
+                    position: m.position,
+                    mass_delta: m.mass_delta,
+                    tier: *tier,
+                    knockoff_of: None,
+                }),
+            }
+        }
+        info = info.with_site_claims(claims);
+        p.annotation = Some(Arc::new(info));
+    }
+}
+
+/// The database's non-reference entries by family, kind and sequence (`existing`), and the
+/// members of each family feature, knockoffs under the feature they knock off (`members`).
+type EntryIndex = (
+    HashMap<(Arc<str>, EntryKind, Vec<u8>), usize>,
+    HashMap<(Arc<str>, Arc<str>), Vec<usize>>,
+);
+
+fn entry_index(db: &ProteinDb) -> EntryIndex {
+    let mut existing: HashMap<(Arc<str>, EntryKind, Vec<u8>), usize> = HashMap::new();
+    let mut members: HashMap<(Arc<str>, Arc<str>), Vec<usize>> = HashMap::new();
+    for (i, p) in db.proteins.iter().enumerate() {
+        let Some(o) = p.origin() else {
+            continue;
+        };
+        if o.kind == EntryKind::Reference {
+            continue;
+        }
+        match &o.knockoff_of {
+            Some(of) => members
+                .entry((o.family.clone(), of.clone()))
+                .or_default()
+                .push(i),
+            None => {
+                existing
+                    .entry((o.family.clone(), o.kind, p.sequence.clone()))
+                    .or_insert(i);
+                members
+                    .entry((o.family.clone(), o.feature.clone()))
+                    .or_default()
+                    .push(i);
+            }
+        }
+    }
+    (existing, members)
 }
 
 fn variant_positions(p: &Protein) -> impl Iterator<Item = usize> + '_ {

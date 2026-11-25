@@ -1113,9 +1113,17 @@ pub(crate) fn precursor_q(
     targets: &mut HashMap<String, output::PercolatorPsm>,
     decoys: &HashMap<String, output::PercolatorPsm>,
 ) -> Result<PrecursorQ, String> {
-    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = text.lines().filter(|l| !l.is_empty());
-    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    let header = {
+        use std::io::BufRead;
+        let f = std::fs::File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+        std::io::BufReader::new(f)
+            .lines()
+            .find(|l| !matches!(l, Ok(l) if l.is_empty()))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", pin.display()))?
+            .unwrap_or_default()
+    };
+    let h: Vec<&str> = header.split('\t').collect();
     let at = |n: &str| {
         h.iter()
             .position(|c| *c == n)
@@ -1135,43 +1143,72 @@ pub(crate) fn precursor_q(
     };
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
-    for (i, line) in lines.enumerate() {
-        let x: Vec<&str> = line.split('\t').collect();
-        if x.len() <= c_pep.max(c_label).max(c_id) {
-            return Err(format!("{}: short PIN row {}", pin.display(), i + 2));
-        }
-        let (decoy, peptide, charge) = match &table {
-            Some(t) => {
-                let r = t
-                    .rows
-                    .get(i)
-                    .ok_or_else(|| format!("{}: row {} not read", pin.display(), i + 2))?;
-                let peptide = if r.form == NONE {
-                    x[c_pep].to_string()
-                } else {
-                    format!("#{}", r.form)
+    type Parsed<'a> = Option<(bool, String, u8, &'a str, f64, &'a str)>;
+    let targets_ro: &HashMap<String, output::PercolatorPsm> = targets;
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |first, lines| {
+            let parsed: Vec<Result<Parsed<'_>, String>> = lines
+                .par_iter()
+                .enumerate()
+                .map(|(j, line)| {
+                    let i = first + j;
+                    let x: Vec<&str> = line.split('\t').collect();
+                    if x.len() <= c_pep.max(c_label).max(c_id) {
+                        return Err(format!("{}: short PIN row {}", pin.display(), i + 2));
+                    }
+                    let (decoy, peptide, charge) = match &table {
+                        Some(t) => {
+                            let r = t.rows.get(i).ok_or_else(|| {
+                                format!("{}: row {} not read", pin.display(), i + 2)
+                            })?;
+                            let peptide = if r.form == NONE {
+                                x[c_pep].to_string()
+                            } else {
+                                format!("#{}", r.form)
+                            };
+                            (r.decoy, peptide, r.charge)
+                        }
+                        None => (
+                            x[c_label].trim() == "-1",
+                            x[c_pep].to_string(),
+                            charge_cols
+                                .iter()
+                                .find(|(c, _)| x.get(*c) == Some(&"1"))
+                                .map_or(0, |c| c.1),
+                        ),
+                    };
+                    let id = x[c_id];
+                    let psm = if decoy {
+                        decoys.get(id)
+                    } else {
+                        targets_ro.get(id)
+                    };
+                    let Some(score) = psm.and_then(|p| p.score) else {
+                        return Ok(None);
+                    };
+                    Ok(Some((
+                        decoy,
+                        peptide,
+                        charge,
+                        id,
+                        score,
+                        c_file.map_or("", |i| x[i]),
+                    )))
+                })
+                .collect();
+            for p in parsed {
+                let Some((decoy, peptide, charge, id, score, run)) = p? else {
+                    continue;
                 };
-                (r.decoy, peptide, r.charge)
+                let n = keys.len() as u32;
+                let k = *keys.entry((run.to_string(), peptide, charge)).or_insert(n);
+                rows.push((k, score, decoy, id.to_string()));
             }
-            None => (
-                x[c_label].trim() == "-1",
-                x[c_pep].to_string(),
-                charge_cols
-                    .iter()
-                    .find(|(c, _)| x.get(*c) == Some(&"1"))
-                    .map_or(0, |c| c.1),
-            ),
-        };
-        let id = x[c_id];
-        let psm = if decoy { decoys.get(id) } else { targets.get(id) };
-        let Some(score) = psm.and_then(|p| p.score) else {
-            continue;
-        };
-        let run = c_file.map_or("", |i| x[i]).to_string();
-        let n = keys.len() as u32;
-        let k = *keys.entry((run, peptide, charge)).or_insert(n);
-        rows.push((k, score, decoy, id.to_string()));
-    }
+            Ok(())
+        },
+    )?;
     let q = precursor_q_values(keys.len(), &rows);
     let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();
     let n_decoys = q.iter().filter(|p| p.is_some_and(|p| p.1)).count();

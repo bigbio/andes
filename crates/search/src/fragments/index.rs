@@ -346,6 +346,7 @@ impl ChunkFragmentIndex {
             vote_peaks,
             &|_| true,
             None,
+            false,
         )
     }
 
@@ -361,6 +362,7 @@ impl ChunkFragmentIndex {
         vote_peaks: usize,
         keep: &dyn Fn(f64) -> bool,
         rt: Option<&FormRtSource<'_>>,
+        windows_only: bool,
     ) -> Vec<(u32, u16)> {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
@@ -414,10 +416,14 @@ impl ChunkFragmentIndex {
             }
             _ => Vec::new(),
         };
+        let ranges: smallvec::SmallVec<[(f64, f64); 16]> = if windows_only {
+            merged_ranges(&exact)
+        } else {
+            smallvec::smallvec![(lo, hi)]
+        };
         let mut sel = self.vote(
             spec,
-            lo,
-            hi,
+            &ranges,
             fragment_tol,
             min_matched,
             vote_peaks,
@@ -460,8 +466,7 @@ impl ChunkFragmentIndex {
         }
         let mut sel = self.vote(
             spec,
-            lo,
-            hi,
+            &[(lo, hi)],
             fragment_tol,
             min_matched,
             vote_peaks,
@@ -476,25 +481,33 @@ impl ChunkFragmentIndex {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Counts, for every form whose mass lies in one of `mass_ranges` (sorted, disjoint), the
+    /// peaks of `spec` that match one of its b/y ions, and returns the forms with at least
+    /// `min_matched` matches as `(form id, matches, summed matched intensity)`.
     fn vote(
         &self,
         spec: &Spectrum,
-        lo: f64,
-        hi: f64,
+        mass_ranges: &[(f64, f64)],
         fragment_tol: Tolerance,
         min_matched: u16,
         vote_peaks: usize,
         complement_masses: &[f64],
     ) -> Vec<(u32, u16, f32)> {
-        let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
-        let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
-        if id_lo >= id_hi {
+        let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
+        let spans: smallvec::SmallVec<[(u32, u32, usize, usize); 16]> = mass_ranges
+            .iter()
+            .filter_map(|&(lo, hi)| {
+                let a = self.form_mass.partition_point(|&m| m < lo) as u32;
+                let b = self.form_mass.partition_point(|&m| m <= hi) as u32;
+                (a < b).then(|| (a, b, block_of(a), block_of(b - 1)))
+            })
+            .collect();
+        let (Some(first_span), Some(last_span)) = (spans.first(), spans.last()) else {
             return Vec::new();
-        }
+        };
+        let (id_lo, id_hi) = (first_span.0, last_span.1);
         let n_bins = self.bin_start.len() - 1;
         let width = (id_hi - id_lo) as usize;
-        let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
-        let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
         let row_len = self.n_blocks + 1;
         VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
@@ -524,22 +537,24 @@ impl ChunkFragmentIndex {
                 for bb in first..=last {
                     let base = self.bin_start[bb] as usize;
                     let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
-                    let seg =
-                        &self.entries[base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
-                    for e in seg {
-                        if e.0 < id_lo {
-                            continue;
-                        }
-                        if e.0 >= id_hi {
-                            break;
-                        }
-                        if ((e.1 as f64) - mz).abs() <= tol_da {
-                            let slot = &mut counts[(e.0 - id_lo) as usize];
-                            if slot.0 == 0 {
-                                touched.push(e.0);
+                    for &(s_lo, s_hi, blk_lo, blk_hi) in &spans {
+                        let seg = &self.entries
+                            [base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
+                        for e in seg {
+                            if e.0 < s_lo {
+                                continue;
                             }
-                            slot.0 += 1;
-                            slot.1 += intensity;
+                            if e.0 >= s_hi {
+                                break;
+                            }
+                            if ((e.1 as f64) - mz).abs() <= tol_da {
+                                let slot = &mut counts[(e.0 - id_lo) as usize];
+                                if slot.0 == 0 {
+                                    touched.push(e.0);
+                                }
+                                slot.0 += 1;
+                                slot.1 += intensity;
+                            }
                         }
                     }
                 }
@@ -614,6 +629,20 @@ impl ChunkFragmentIndex {
         }
         out
     }
+}
+
+/// `ranges` sorted by start, with overlapping or touching ranges merged.
+fn merged_ranges(ranges: &[(f64, f64)]) -> smallvec::SmallVec<[(f64, f64); 16]> {
+    let mut v: smallvec::SmallVec<[(f64, f64); 16]> = ranges.iter().copied().collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
+    for (a, b) in v {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
 }
 
 const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;

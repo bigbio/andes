@@ -831,6 +831,7 @@ impl<'a> PreparedSearch<'a> {
                 crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
                 &gate,
                 rt_source.as_ref(),
+                params.dia && ms1_gate.is_some(),
             );
             let relabel =
                 |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);

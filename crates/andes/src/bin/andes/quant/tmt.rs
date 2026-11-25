@@ -714,7 +714,7 @@ pub(crate) fn finalize(
     join.run(tables)?;
     log::debug!(
         target: "tmt",
-        "run loop: join {:.1} s, study table {:.1} s, features {:.1} s",
+        "run loop: join {:.1} s, features {:.1} s, waiting on the writers {:.1} s",
         join.spent[0].as_secs_f64(),
         join.spent[1].as_secs_f64(),
         join.spent[2].as_secs_f64()

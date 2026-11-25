@@ -600,29 +600,7 @@ pub(crate) fn finalize(
         let table = read_run_table(path)?;
         match &writer {
             None => {
-                let meta = vec![
-                    (TMT_PLEX_KEY, table.layout.plex.name().to_string()),
-                    (TMT_CORRECTED_KEY, table.layout.corrected.to_string()),
-                    (TMT_UNMIX_KEY, table.unmix_mode.clone()),
-                    (TMT_STUDY_PSM_FDR_KEY, psm_fdr.to_string()),
-                    (
-                        TMT_STUDY_PROTEIN_FDR_KEY,
-                        a.proteins.protein_fdr.to_string(),
-                    ),
-                    (
-                        TMT_STUDY_PEP_KEY,
-                        a.pep.map_or_else(|| "none".to_string(), |p| p.to_string()),
-                    ),
-                    (TMT_STUDY_RUNS_KEY, tables.len().to_string()),
-                    (
-                        TMT_STUDY_SDRF_KEY,
-                        design
-                            .as_ref()
-                            .and_then(|d| d.path.file_name())
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                    ),
-                ];
+                let meta = study_meta(a, &table, psm_fdr, tables.len(), design.as_ref());
                 let w = TmtStudyWriter::create(&out_path, table.layout, &meta)?;
                 writer = Some((w, table.layout, table.unmix_mode.clone()));
             }
@@ -739,6 +717,74 @@ pub(crate) fn finalize(
         );
         tally.write_pg(dir, &groups, &runs)?;
     }
+    log_study_summary(&StudySummary {
+        n_runs: runs.len(),
+        out_path: &out_path,
+        read,
+        pooled_at_q,
+        unjoined,
+        written,
+        counts: &counts,
+        tally: &tally,
+        groups_at_fdr: inf
+            .groups
+            .iter()
+            .filter(|g| g.q_value <= a.proteins.protein_fdr)
+            .count(),
+        t0,
+    });
+    Ok(())
+}
+
+/// The study table's metadata: plex, correction, unmixing, the FDR settings, the run count and
+/// the SDRF file name.
+fn study_meta(
+    a: &crate::cli::QuantFinalizeArgs,
+    table: &RunTable,
+    psm_fdr: f64,
+    n_tables: usize,
+    design: Option<&IsobaricDesign>,
+) -> Vec<(&'static str, String)> {
+    vec![
+        (TMT_PLEX_KEY, table.layout.plex.name().to_string()),
+        (TMT_CORRECTED_KEY, table.layout.corrected.to_string()),
+        (TMT_UNMIX_KEY, table.unmix_mode.clone()),
+        (TMT_STUDY_PSM_FDR_KEY, psm_fdr.to_string()),
+        (
+            TMT_STUDY_PROTEIN_FDR_KEY,
+            a.proteins.protein_fdr.to_string(),
+        ),
+        (
+            TMT_STUDY_PEP_KEY,
+            a.pep.map_or_else(|| "none".to_string(), |p| p.to_string()),
+        ),
+        (TMT_STUDY_RUNS_KEY, n_tables.to_string()),
+        (
+            TMT_STUDY_SDRF_KEY,
+            design
+                .and_then(|d| d.path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+    ]
+}
+
+/// What the TMT study summary reports.
+struct StudySummary<'a> {
+    n_runs: usize,
+    out_path: &'a Path,
+    read: usize,
+    pooled_at_q: usize,
+    unjoined: usize,
+    written: usize,
+    counts: &'a StudyCounts,
+    tally: &'a GroupTally,
+    groups_at_fdr: usize,
+    t0: std::time::Instant,
+}
+
+/// The end-of-study summary table on the `summary` log target.
+fn log_study_summary(sum: &StudySummary<'_>) {
     let pct = |n: usize, d: usize| {
         if d == 0 {
             0.0
@@ -749,57 +795,64 @@ pub(crate) fn finalize(
     let s = |label: &str, n: usize, note: String| {
         log::info!(target: "summary", "{label:<44}{n:>12}   {note}");
     };
-    log::info!(target: "summary", "TMT study  {} runs  {}", runs.len(), out_path.display());
+    log::info!(target: "summary", "TMT study  {} runs  {}", sum.n_runs, sum.out_path.display());
     s(
         "pooled target PSMs at q <= --psm-fdr",
-        pooled_at_q,
-        format!("of {read}"),
+        sum.pooled_at_q,
+        format!("of {}", sum.read),
     );
     s(
         "  joined to a run's reporter row",
-        pooled_at_q - unjoined,
-        format!("{:.1} %", pct(pooled_at_q - unjoined, pooled_at_q)),
+        sum.pooled_at_q - sum.unjoined,
+        format!(
+            "{:.1} %",
+            pct(sum.pooled_at_q - sum.unjoined, sum.pooled_at_q)
+        ),
     );
     s(
         "  without a reporter row",
-        unjoined,
+        sum.unjoined,
         "no quantification scan, scan range short of the reporters, or run not in --quant-dir"
             .into(),
     );
-    s("run PSMs with reporters", counts.run_rows, String::new());
-    s("  above q or not rescored", counts.not_at_q, String::new());
-    s("rows written", written, String::new());
+    s(
+        "run PSMs with reporters",
+        sum.counts.run_rows,
+        String::new(),
+    );
+    s(
+        "  above q or not rescored",
+        sum.counts.not_at_q,
+        String::new(),
+    );
+    s("rows written", sum.written, String::new());
     s(
         "  passing the gate",
-        counts.gate_passed,
+        sum.counts.gate_passed,
         format!(
             "{:.1} %; failed the run's gate (purity, S/N) {}; weight purity^2 x (1 - PEP)",
-            pct(counts.gate_passed, written),
-            written - counts.gate_passed
+            pct(sum.counts.gate_passed, sum.written),
+            sum.written - sum.counts.gate_passed
         ),
     );
     s(
         "  in a protein group at --protein-fdr",
-        counts.grouped,
+        sum.counts.grouped,
         format!(
             "{} unique; no group {}, group above the cut {}",
-            counts.unique, tally.no_group, tally.above_cut
+            sum.counts.unique, sum.tally.no_group, sum.tally.above_cut
         ),
     );
     s(
         "target protein groups at --protein-fdr",
-        inf.groups
-            .iter()
-            .filter(|g| g.q_value <= a.proteins.protein_fdr)
-            .count(),
-        format!("{} with rows", tally.counts.len()),
+        sum.groups_at_fdr,
+        format!("{} with rows", sum.tally.counts.len()),
     );
     log::info!(
         target: "summary",
         "wall {:.1} s",
-        t0.elapsed().as_secs_f64()
+        sum.t0.elapsed().as_secs_f64()
     );
-    Ok(())
 }
 
 #[cfg(test)]

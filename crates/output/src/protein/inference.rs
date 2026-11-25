@@ -244,8 +244,12 @@ fn group_evidence(
         named: vec![BTreeSet::new(); n_groups],
         per_accession: vec![BTreeMap::new(); n_groups],
     };
-    let rows: Vec<(&String, &PercolatorPsm)> = targets.iter().collect();
-    for chunk in rows.chunks(PSMS_PER_PASS) {
+    let mut rows = targets.iter();
+    loop {
+        let chunk: Vec<(&String, &PercolatorPsm)> = rows.by_ref().take(PSMS_PER_PASS).collect();
+        if chunk.is_empty() {
+            break;
+        }
         let found: Vec<Option<Evidence<'_>>> = chunk
             .par_iter()
             .with_min_len(1024)

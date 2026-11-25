@@ -258,13 +258,17 @@ pub(crate) struct Pooled {
 
 /// The pooled target PSMs at q <= `max_q` and, when given, PEP <= `max_pep`, keyed by (run,
 /// SpecId), collected while the pooled results are read for the study's inference; the run is
-/// the SpecId's `<run>/` prefix.
+/// the SpecId's `<run>/` prefix. They are kept as a compact list in file order while the
+/// inference runs and keyed when it is done.
 #[derive(Default)]
 pub(crate) struct PooledTargets {
-    map: HashMap<u128, Pooled>,
+    rows: Vec<PooledRow>,
+    files: Vec<(PathBuf, usize)>,
     read: usize,
-    repeated: Option<(PathBuf, u128)>,
 }
+
+/// A pooled target row: its key, q, PEP and score (NaN when it has none; scores are finite).
+type PooledRow = (u128, [f64; 3]);
 
 impl PooledTargets {
     /// The key and pooled values of a target row at the thresholds.
@@ -272,50 +276,68 @@ impl PooledTargets {
         row: &output::PsmResultRow<'_>,
         max_q: f64,
         max_pep: Option<f64>,
-    ) -> Option<(u128, Pooled)> {
+    ) -> Option<PooledRow> {
         if row.q_value > max_q || max_pep.is_some_and(|c| row.pep > c) {
             return None;
         }
         let key = psm_key(output::spec_id_run(row.psm_id), row.psm_id);
-        Some((
-            key,
-            Pooled {
-                q: row.q_value,
-                pep: row.pep,
-                score: row.score,
-                joined: false,
-            },
-        ))
+        Some((key, [row.q_value, row.pep, row.score.unwrap_or(f64::NAN)]))
     }
 
     /// Adds a target row of `path`, in file order.
-    pub(crate) fn take(&mut self, path: &Path, row: Option<(u128, Pooled)>) {
+    pub(crate) fn take(&mut self, path: &Path, row: Option<PooledRow>) {
         self.read += 1;
-        let Some((key, v)) = row else { return };
-        if self.repeated.is_none() && self.map.insert(key, v).is_some() {
-            self.repeated = Some((path.to_path_buf(), key));
+        let Some(row) = row else { return };
+        if self.files.last().is_none_or(|(p, _)| p != path) {
+            self.files.push((path.to_path_buf(), self.rows.len()));
         }
+        self.rows.push(row);
     }
 
     /// The pooled PSMs with the number of target PSMs read; an error names the first PSMId
     /// seen twice.
     pub(crate) fn finish(self) -> Result<(HashMap<u128, Pooled>, usize), String> {
-        let Some((path, key)) = self.repeated else {
-            return Ok((self.map, self.read));
-        };
-        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        let file = std::fs::File::open(&path).map_err(|e| err(&e))?;
-        let mut reader =
-            output::PsmResultReader::new(std::io::BufReader::new(file)).map_err(|e| err(&e))?;
-        while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
-            if psm_key(output::spec_id_run(row.psm_id), row.psm_id) == key {
-                return Err(err(&format!(
-                    "duplicate PSMId `{}` in the pooled results",
-                    row.psm_id
-                )));
+        let mut map = HashMap::with_capacity(self.rows.len());
+        for (i, &(key, [q, pep, score])) in self.rows.iter().enumerate() {
+            let v = Pooled {
+                q,
+                pep,
+                score: (!score.is_nan()).then_some(score),
+                joined: false,
+            };
+            if map.insert(key, v).is_some() {
+                let f = self.files.partition_point(|&(_, start)| start <= i);
+                let path = &self.files[f.saturating_sub(1)].0;
+                return Err(repeated_pooled_id(path, key));
             }
         }
-        Err(err(&"a repeated PSMId is no longer in the file"))
+        Ok((map, self.read))
+    }
+}
+
+/// The error for the PSMId of `path` whose join key is `key`, seen twice in the pooled results.
+fn repeated_pooled_id(path: &Path, key: u128) -> String {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return err(&e),
+    };
+    let mut reader = match output::PsmResultReader::new(std::io::BufReader::new(file)) {
+        Ok(r) => r,
+        Err(e) => return err(&e),
+    };
+    loop {
+        match reader.next_row() {
+            Ok(Some(row)) if psm_key(output::spec_id_run(row.psm_id), row.psm_id) == key => {
+                return err(&format!(
+                    "duplicate PSMId `{}` in the pooled results",
+                    row.psm_id
+                ));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return err(&"a repeated PSMId is no longer in the file"),
+            Err(e) => return err(&e),
+        }
     }
 }
 

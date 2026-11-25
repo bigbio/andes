@@ -3,7 +3,7 @@ use std::path::Path;
 use std::collections::HashMap;
 
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
-use thermorawfilereader::{RawFileReader, RawSpectrum};
+use thermorawfilereader::{RawFileReader, RawSpectrum, TrailerValues};
 
 use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType};
@@ -76,6 +76,7 @@ fn fetch_scan(handle: &RawFileReader, index: usize, cap: Capture) -> Option<Fetc
     let raw = handle.get(index)?;
     let level = raw.ms_level();
     let faims = faims_cv(&raw);
+    let mut trailers = ScanTrailers::of(handle, index);
     let ms1 = (level == 1 && cap.ms1).then(|| Ms1Scan {
         rt: raw.time() * 60.0,
         peaks: extract_peaks(&raw),
@@ -88,19 +89,19 @@ fn fetch_scan(handle: &RawFileReader, index: usize, cap: Capture) -> Option<Fetc
             level,
             faims_cv: faims,
             ms1,
-            product: Some(product_scan(handle, index, &raw, cap.noise)),
+            product: Some(product_scan(&mut trailers, &raw, cap.noise)),
             ms2: None,
         });
     }
     let ms2 = cap
         .level
         .is_none_or(|want| want == level)
-        .then(|| ThermoRawReader::convert(&raw, handle))
+        .then(|| ThermoRawReader::convert(&raw, &mut trailers))
         .flatten()
         .map(|spec| {
             let context = cap
                 .context
-                .then(|| scan_context(handle, index, &raw, &spec, cap.noise));
+                .then(|| scan_context(&mut trailers, &raw, &spec, cap.noise));
             (spec, context)
         });
     Some(FetchedScan {
@@ -112,33 +113,66 @@ fn fetch_scan(handle: &RawFileReader, index: usize, cap: Capture) -> Option<Fetc
     })
 }
 
-fn scan_context(
-    handle: &RawFileReader,
+/// The trailer values of one scan, read from the file at most once.
+struct ScanTrailers<'h> {
+    handle: &'h RawFileReader,
     index: usize,
+    values: Option<Option<TrailerValues>>,
+}
+
+impl<'h> ScanTrailers<'h> {
+    fn of(handle: &'h RawFileReader, index: usize) -> Self {
+        Self {
+            handle,
+            index,
+            values: None,
+        }
+    }
+
+    fn values(&mut self) -> Option<&TrailerValues> {
+        self.values
+            .get_or_insert_with(|| self.handle.get_raw_trailers_for(self.index))
+            .as_ref()
+    }
+
+    fn master_scan(&mut self) -> Option<usize> {
+        master_scan_in(self.values()?)
+    }
+
+    fn isolation_width(&mut self, ms_level: u8) -> Option<f64> {
+        if ms_level < 2 {
+            return None;
+        }
+        isolation_width_in(self.values()?, ms_level)
+    }
+}
+
+fn scan_context(
+    trailers: &mut ScanTrailers<'_>,
     raw: &RawSpectrum,
     spec: &Spectrum,
     noise: bool,
 ) -> ScanContext {
     ScanContext {
         id: spec.title.clone(),
-        parent_id: master_scan_number(handle, index)
+        parent_id: trailers
+            .master_scan()
             .map(|scan| with_scan_number(&spec.title, scan)),
         scan_window: scan_window(raw),
         faims_cv: faims_cv(raw),
-        noise: noise.then(|| reporter_noise(handle, index)).flatten(),
+        noise: noise
+            .then(|| reporter_noise(trailers.handle, trailers.index))
+            .flatten(),
         ion_mobility: None,
     }
 }
 
 /// The MS3+ scan at `index`, linked to its parent scan by the master scan number.
-fn product_scan(
-    handle: &RawFileReader,
-    index: usize,
-    raw: &RawSpectrum,
-    noise: bool,
-) -> ProductScan {
-    let parent_id =
-        master_scan_number(handle, index).map(|scan| with_scan_number(&raw.native_id(), scan));
+fn product_scan(trailers: &mut ScanTrailers<'_>, raw: &RawSpectrum, noise: bool) -> ProductScan {
+    let (handle, index) = (trailers.handle, trailers.index);
+    let parent_id = trailers
+        .master_scan()
+        .map(|scan| with_scan_number(&raw.native_id(), scan));
     ProductScan {
         id: raw.native_id(),
         scan: Some(raw.index() as i32 + 1),
@@ -348,7 +382,7 @@ impl ThermoRawReader {
         self.len == 0
     }
 
-    fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
+    fn convert(raw: &RawSpectrum, trailers: &mut ScanTrailers<'_>) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         let p = raw.precursor()?;
@@ -365,7 +399,7 @@ impl ThermoRawReader {
         let (lo, up) = full_width_isolation_bounds(
             lo,
             w.upper(),
-            isolation_width_trailer(handle, raw.index(), raw.ms_level()),
+            trailers.isolation_width(raw.ms_level()),
         );
         let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
             if tg > 0.0 && up > lo {
@@ -481,8 +515,7 @@ impl ThermoRawReader {
     }
 }
 
-fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
-    let trailers = handle.get_raw_trailers_for(index)?;
+fn master_scan_in(trailers: &TrailerValues) -> Option<usize> {
     let value = trailers
         .iter()
         .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
@@ -490,11 +523,11 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
 }
 
 fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
-    if ms_level < 2 {
-        return None;
-    }
+    ScanTrailers::of(handle, index).isolation_width(ms_level)
+}
+
+fn isolation_width_in(trailers: &TrailerValues, ms_level: u8) -> Option<f64> {
     let label = format!("MS{ms_level} Isolation Width");
-    let trailers = handle.get_raw_trailers_for(index)?;
     let value = trailers.iter().find_map(|t| {
         (t.label.trim().trim_end_matches(':').trim() == label).then(|| t.value.trim().to_string())
     })?;

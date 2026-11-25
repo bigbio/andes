@@ -27,7 +27,7 @@ use crate::spectra::{
 
 /// The most readers a Thermo .raw read uses at once (each on its own thread).
 #[cfg(feature = "thermo")]
-pub(super) const THERMO_READERS_MAX: usize = 8;
+pub(super) const THERMO_READERS_MAX: usize = 4;
 
 fn index_chunk_span_da(flag: Option<f64>) -> f64 {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;

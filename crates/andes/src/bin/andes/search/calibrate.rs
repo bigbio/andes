@@ -21,7 +21,7 @@ const SECS_PER_MIN: f64 = 60.0;
 const DIA_MOBILITY_MIN_ANCHORS: usize = 100;
 /// Quantile of the anchors' 1/K0 distance between their MS1 peak and their mobility slice
 /// that becomes the MS1 gate's mobility margin.
-const DIA_MOBILITY_MARGIN_QUANTILE: f64 = 0.99;
+const DIA_MOBILITY_MARGIN_QUANTILE: f64 = 0.9;
 
 /// Calibration sample sizes in search order: the first sample (`DIA_RT_CAL_FRACTION` of the
 /// run, at least `DIA_RT_CAL_MIN_SPECTRA`), then doubling up to every spectrum of the run.

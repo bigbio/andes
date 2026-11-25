@@ -55,6 +55,27 @@ pub fn ms2_features(
     peaks: &[(f64, f32)],
     tol: FragmentTolerance,
 ) -> [f64; 8] {
+    ms2_features_with(pred, ions, mass, charge, |_, mz| {
+        let w = tol.window(mz);
+        let lo = peaks.partition_point(|(m, _)| *m < mz - w);
+        peaks[lo..]
+            .iter()
+            .take_while(|(m, _)| *m <= mz + w)
+            .map(|(_, i)| *i as f64)
+            .fold(0.0, f64::max)
+    })
+}
+
+/// [`ms2_features`] with each fragment's observed intensity from `observed(k, mz)`: `k` counts
+/// the fragments in the order they are enumerated (residue position, then the ions of `ions`
+/// at most `charge`), `mz` is the fragment's m/z.
+pub fn ms2_features_with(
+    pred: &[f32],
+    ions: &[Ion],
+    mass: &Mass,
+    charge: u8,
+    mut observed: impl FnMut(usize, f64) -> f64,
+) -> [f64; 8] {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
     let mut p = Vec::new();
@@ -69,13 +90,7 @@ pub fn ms2_features(
             }
             let neutral = if bion { prefix } else { total - prefix + H2O };
             let mz = (neutral + z as f64 * PROTON) / z as f64;
-            let w = tol.window(mz);
-            let lo = peaks.partition_point(|(m, _)| *m < mz - w);
-            let obs = peaks[lo..]
-                .iter()
-                .take_while(|(m, _)| *m <= mz + w)
-                .map(|(_, i)| *i as f64)
-                .fold(0.0, f64::max);
+            let obs = observed(p.len(), mz);
             p.push(pred.get(i * ions.len() + k).copied().unwrap_or(0.0) as f64);
             o.push(obs);
             is_b.push(bion);

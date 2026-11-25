@@ -325,8 +325,7 @@ mod tests {
             .any(|h| (h.backbone_mass - true_backbone).abs() < 0.01 && h.source == Source::Db);
         assert!(
             found,
-            "did not find backbone at {:.4} in DB branch",
-            true_backbone
+            "did not find backbone at {true_backbone:.4} in DB branch",
         );
     }
 
@@ -386,8 +385,7 @@ mod tests {
         let has_db = hits.iter().any(|h| h.source == Source::Db);
         assert!(
             has_db,
-            "expected at least one annotated (Db) hit, got {:?}",
-            hits
+            "expected at least one annotated (Db) hit, got {hits:?}",
         );
     }
 
@@ -723,8 +721,7 @@ mod tests {
         let primary = crate::backbone::solve_backbone(&peaks, precursor, 2, 20.0, 50);
         assert!(
             primary.is_empty(),
-            "premise: quorum-2 solver should find nothing with a single core-Y rung, got {:?}",
-            primary
+            "premise: quorum-2 solver should find nothing with a single core-Y rung, got {primary:?}",
         );
 
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 50);
@@ -734,8 +731,7 @@ mod tests {
         assert!(
             found,
             "quorum-1 cascade must recover the true backbone for a weak-ladder \
-             known-glycan spectrum; got {:?}",
-            hits
+             known-glycan spectrum; got {hits:?}",
         );
     }
 

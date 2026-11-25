@@ -20,11 +20,16 @@ impl ClassCounts {
         }
     }
 
+    /// The decoy estimate of the false target-target fraction of a non-homotypic class. TT
+    /// with one wrong peptide number about TD - 2 DD and TT with two about DD; the first
+    /// part is clipped at zero, so the estimate is max(TD - DD, DD) + 1, at least
+    /// `MIN_FALSE`, over TT.
     pub fn fdr(&self) -> f64 {
         if self.tt == 0 {
             return 1.0;
         }
-        let false_tt = (self.td as f64 + 1.0 - self.dd as f64).max(MIN_FALSE);
+        let dd = self.dd as f64;
+        let false_tt = ((self.td as f64 - dd).max(dd) + 1.0).max(MIN_FALSE);
         (false_tt / self.tt as f64).min(1.0)
     }
 
@@ -84,12 +89,28 @@ mod tests {
         };
         assert!((c.fdr() - 0.06).abs() < 1e-12);
         let c = ClassCounts {
-            tt: 10,
-            td: 1,
+            tt: 100,
+            td: 0,
+            dd: 0,
+        };
+        assert!((c.fdr() - 0.02).abs() < 1e-12);
+        assert_eq!(ClassCounts::default().fdr(), 1.0);
+    }
+
+    #[test]
+    fn the_false_target_estimate_is_never_below_the_decoy_decoy_count() {
+        let c = ClassCounts {
+            tt: 74,
+            td: 7,
+            dd: 7,
+        };
+        assert!((c.fdr() - 8.0 / 74.0).abs() < 1e-12);
+        let c = ClassCounts {
+            tt: 100,
+            td: 12,
             dd: 3,
         };
-        assert!((c.fdr() - 0.2).abs() < 1e-12);
-        assert_eq!(ClassCounts::default().fdr(), 1.0);
+        assert!((c.fdr() - 0.10).abs() < 1e-12);
     }
 
     #[test]
@@ -100,7 +121,12 @@ mod tests {
             dd: 9,
         };
         assert!((c.fdr_homotypic() - 0.10).abs() < 1e-12);
-        assert!((c.fdr() - 0.02).abs() < 1e-12);
+        let c = ClassCounts {
+            tt: 100,
+            td: 9,
+            dd: 0,
+        };
+        assert!((c.fdr_homotypic() - 0.10).abs() < 1e-12);
         let q = q_values_homotypic(&[3.0, 2.0, 1.0], &[TT, TT, DD]);
         assert!((q[0] - 1.0).abs() < 1e-12 && (q[2] - 1.0).abs() < 1e-12);
     }

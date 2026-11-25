@@ -339,6 +339,15 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
     let (k, k_learned) = learn_rt_multiplier(&z);
 
     let by_ident = positions_by_ident(&ids, &id_pos);
+    let tau = ctx.p.wrong_log2 * std::f64::consts::SQRT_2;
+    let view = RunScans {
+        ctx,
+        r16,
+        scans,
+        corrected: &corrected,
+        tol,
+        tau,
+    };
 
     let mut out = RunOut {
         profile,
@@ -348,49 +357,7 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         cands: Vec::new(),
         counts: Counts::default(),
     };
-    let tau = ctx.p.wrong_log2 * std::f64::consts::SQRT_2;
-
-    for (key, positions) in &by_ident {
-        if positions.len() < 2 {
-            continue;
-        }
-        let first = ids
-            .iter()
-            .find(|i| i.key == *key)
-            .expect("a key of by_ident is in ids");
-        let ladder = ctx.ladder(&first.peptidoform, first.charge);
-        for &b in positions {
-            let a = positions
-                .iter()
-                .copied()
-                .filter(|&a| a != b)
-                .min_by(|&x, &y| {
-                    (scans[x].rt - scans[b].rt)
-                        .abs()
-                        .total_cmp(&(scans[y].rt - scans[b].rt).abs())
-                })
-                .expect("two or more positions");
-            let Some(dev) = log2_deviation(&corrected[b], &corrected[a]) else {
-                continue;
-            };
-            let wrong = dev > tau || out.profile.leak(&corrected[b]);
-            let x = covariates(
-                ctx,
-                &scans[b],
-                &corrected[b],
-                &out.profile,
-                &ladder,
-                tol,
-                first.charge,
-            );
-            out.floor.push(TrainRow {
-                x: x.to_vec(),
-                y: f64::from(u8::from(wrong)),
-                run: r16,
-                donors: Vec::new(),
-            });
-        }
-    }
+    out.floor = view.floor_rows(&ids, &by_ident, &out.profile);
 
     let mut cands: Vec<TransferRow> = Vec::new();
     let mut half_windows: Vec<f64> = Vec::new();
@@ -509,54 +476,7 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
                     donors: donors.clone(),
                 });
             }
-            let sc = &scans[f.pos];
-            let rep = sc.reporters.as_ref().expect("checked above");
-            let donor_run = ctx
-                .best_run
-                .get(&m.key)
-                .map(|&(_, d)| ctx.stems[d as usize].clone())
-                .unwrap_or_default();
-            cands.push(TransferRow {
-                run: stem.clone(),
-                native_id: sc.native_id.clone(),
-                spec_key: sc.spec_key.clone(),
-                scan: scan_number(&sc.native_id),
-                rt: sc.rt,
-                precursor_mz: sc.precursor_mz,
-                peptidoform: peptidoform.to_string(),
-                charge: m.charge,
-                calc_mz: m.mz,
-                proteins: ctx.stored.proteins[pid as usize]
-                    .split(';')
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                raw: rep.raw.clone(),
-                corrected: corrected[f.pos].clone(),
-                purity: rep.purity,
-                info: TransferInfo {
-                    quant_q: 1.0,
-                    p_wrong: 1.0,
-                    noise_floor: 0.0,
-                    p_identity: 1.0,
-                    p_value: 1.0,
-                    angle: f.m.angle,
-                    n_matched: f.m.n_matched,
-                    explained: f.m.explained,
-                    rt_z: f.rt_z as f32,
-                    ppm: f.ppm as f32,
-                    donor_q,
-                    n_donors: e.donors.len().min(u16::MAX as usize) as u16,
-                    donor_run,
-                    batch_cos: f32::NAN,
-                },
-                accepted: false,
-                scan_features: sx,
-                xfer: xx,
-                donors: donors.clone(),
-                run_index: r16,
-                donor_pep: e.donor_psm.pep,
-            });
+            cands.push(view.transfer_row(e, f, sx, xx, &donors));
         }
     }
 
@@ -579,6 +499,136 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         out.cands.len()
     );
     Ok(out)
+}
+
+/// One run's MS2 scans and their corrected reporter vectors, as `process_run` reads them.
+struct RunScans<'a, 'c> {
+    ctx: &'a Ctx<'c>,
+    r16: u16,
+    scans: &'a [quant::ms2::Ms2Scan],
+    corrected: &'a [Vec<f32>],
+    tol: Tolerance,
+    tau: f64,
+}
+
+impl RunScans<'_, '_> {
+    /// The noise-floor training rows: each identified scan of a precursor identified on two or
+    /// more scans, labelled wrong when its reporters deviate from its nearest-RT sibling's by
+    /// more than `tau` or leak into empty channels.
+    fn floor_rows(
+        &self,
+        ids: &[IdRow],
+        by_ident: &HashMap<&str, Vec<usize>>,
+        profile: &RunProfile,
+    ) -> Vec<TrainRow> {
+        let mut floor = Vec::new();
+        for (key, positions) in by_ident {
+            if positions.len() < 2 {
+                continue;
+            }
+            let first = ids
+                .iter()
+                .find(|i| i.key == *key)
+                .expect("a key of by_ident is in ids");
+            let ladder = self.ctx.ladder(&first.peptidoform, first.charge);
+            for &b in positions {
+                let a = positions
+                    .iter()
+                    .copied()
+                    .filter(|&a| a != b)
+                    .min_by(|&x, &y| {
+                        (self.scans[x].rt - self.scans[b].rt)
+                            .abs()
+                            .total_cmp(&(self.scans[y].rt - self.scans[b].rt).abs())
+                    })
+                    .expect("two or more positions");
+                let Some(dev) = log2_deviation(&self.corrected[b], &self.corrected[a]) else {
+                    continue;
+                };
+                let wrong = dev > self.tau || profile.leak(&self.corrected[b]);
+                let x = covariates(
+                    self.ctx,
+                    &self.scans[b],
+                    &self.corrected[b],
+                    profile,
+                    &ladder,
+                    self.tol,
+                    first.charge,
+                );
+                floor.push(TrainRow {
+                    x: x.to_vec(),
+                    y: f64::from(u8::from(wrong)),
+                    run: self.r16,
+                    donors: Vec::new(),
+                });
+            }
+        }
+        floor
+    }
+
+    /// The transfer candidate of library entry `e` on scan `f`, not yet scored.
+    fn transfer_row(
+        &self,
+        e: &quant::library::LibraryEntry,
+        f: &Found,
+        sx: [f64; N_SCAN],
+        xx: [f64; N_XFER],
+        donors: &[u16],
+    ) -> TransferRow {
+        let pid = e.precursor;
+        let m = &self.ctx.stored.library.meta[pid as usize];
+        let peptidoform = split_key(&m.key);
+        let donor_q = e.donor_psm.q;
+        let sc = &self.scans[f.pos];
+        let rep = sc.reporters.as_ref().expect("checked above");
+        let donor_run = self
+            .ctx
+            .best_run
+            .get(&m.key)
+            .map(|&(_, d)| self.ctx.stems[d as usize].clone())
+            .unwrap_or_default();
+        TransferRow {
+            run: self.ctx.stems[self.r16 as usize].clone(),
+            native_id: sc.native_id.clone(),
+            spec_key: sc.spec_key.clone(),
+            scan: scan_number(&sc.native_id),
+            rt: sc.rt,
+            precursor_mz: sc.precursor_mz,
+            peptidoform: peptidoform.to_string(),
+            charge: m.charge,
+            calc_mz: m.mz,
+            proteins: self.ctx.stored.proteins[pid as usize]
+                .split(';')
+                .filter(|a| !a.is_empty())
+                .map(str::to_string)
+                .collect(),
+            raw: rep.raw.clone(),
+            corrected: self.corrected[f.pos].clone(),
+            purity: rep.purity,
+            info: TransferInfo {
+                quant_q: 1.0,
+                p_wrong: 1.0,
+                noise_floor: 0.0,
+                p_identity: 1.0,
+                p_value: 1.0,
+                angle: f.m.angle,
+                n_matched: f.m.n_matched,
+                explained: f.m.explained,
+                rt_z: f.rt_z as f32,
+                ppm: f.ppm as f32,
+                donor_q,
+                n_donors: e.donors.len().min(u16::MAX as usize) as u16,
+                donor_run,
+                batch_cos: f32::NAN,
+            },
+            accepted: false,
+            scan_features: sx,
+            xfer: xx,
+            donors: donors.to_vec(),
+            run_index: self.r16,
+            donor_pep: e.donor_psm.pep,
+        }
+    }
 }
 
 /// The RT z-scores of the run's identified PSMs: (observed - predicted) / predicted spread, with

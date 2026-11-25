@@ -341,13 +341,11 @@ fn core_y_ranking_promotes_supported_backbone_over_unsupported() {
 
     assert_eq!(
         true_hits, 6,
-        "expected all 6 core-Y hits for true_bb, got {}",
-        true_hits
+        "expected all 6 core-Y hits for true_bb, got {true_hits}",
     );
     assert_eq!(
         noise_hits, 0,
-        "expected 0 core-Y hits for noise_bb, got {}",
-        noise_hits
+        "expected 0 core-Y hits for noise_bb, got {noise_hits}",
     );
 
     let mut candidates = [

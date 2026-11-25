@@ -56,8 +56,7 @@ fn full_spectrum_with_all_fields() {
 fn charge_strips_sign() {
     for (line, expected) in [("CHARGE=2+", 2), ("CHARGE=3+", 3), ("CHARGE=+4", 4)] {
         let mgf = format!(
-            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{}\n100 1\nEND IONS\n",
-            line
+            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{line}\n100 1\nEND IONS\n",
         );
         let v = parse_ok(&mgf);
         assert_eq!(v[0].precursor_charge, Some(expected), "line={line}");
@@ -68,8 +67,7 @@ fn charge_strips_sign() {
 fn charge_list_is_unknown() {
     for line in ["CHARGE=2+ and 3+", "CHARGE=2+,3+"] {
         let mgf = format!(
-            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{}\n100 1\nEND IONS\n",
-            line
+            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{line}\n100 1\nEND IONS\n",
         );
         let v = parse_ok(&mgf);
         assert_eq!(v[0].precursor_charge, None, "line={line}");
@@ -80,8 +78,7 @@ fn charge_list_is_unknown() {
 fn negative_charge_errors() {
     for line in ["CHARGE=1-", "CHARGE=-2"] {
         let mgf = format!(
-            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{}\n100 1\nEND IONS\n",
-            line
+            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{line}\n100 1\nEND IONS\n",
         );
         let err = parse_all(&mgf).into_iter().next().unwrap().unwrap_err();
         assert!(

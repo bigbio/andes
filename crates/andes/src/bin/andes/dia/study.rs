@@ -638,56 +638,9 @@ pub(crate) fn finalize(
         }
     };
     if transfer {
-        let want = stems.join("\n");
-        let current: Vec<String> = stems
-            .iter()
-            .map(|s| crate::dia::transfer::run_inputs(&a.quant_dir, s))
-            .collect::<Result<_, _>>()?;
-        for s in stems {
-            let p = table_path(s);
-            let built = read_pass2_meta(&p)?
-                .into_iter()
-                .find(|(k, _)| k == crate::dia::transfer::RUNS_KEY)
-                .map(|(_, v)| v);
-            if built.as_deref() != Some(want.as_str()) {
-                return Err(format!(
-                    "{}: built from other runs than the study's {} (stale transfer); run \
-                     `andes quant extract --quant-dir {} --run {s}` again",
-                    p.display(),
-                    stems.join(", "),
-                    a.quant_dir.display()
-                ));
-            }
-            let built = read_pass2_meta(&p)?
-                .into_iter()
-                .find(|(k, _)| k == crate::dia::transfer::INPUTS_KEY)
-                .map(|(_, v)| v);
-            crate::dia::transfer::check_inputs(&a.quant_dir, &p, s, built.as_deref(), &current)?;
-        }
-        log::info!(
-            target: "dia",
-            "DIA study with cross-run candidate transfer: every run's pass-2 table holds its own \
-             and its transferred nominees (column {})",
-            crate::dia::pass2::XFER_COLUMN
-        );
+        check_transfer_tables(a, stems, &table_path)?;
     }
-    let mut stored: Vec<(&str, String)> = Vec::with_capacity(stems.len());
-    for s in stems {
-        let p = table_path(s);
-        let meta = read_pass2_meta(&p)?;
-        let r = meta
-            .into_iter()
-            .find(|(k, _)| k == RESCORE_KEY)
-            .map(|(_, v)| v)
-            .ok_or_else(|| {
-                format!(
-                    "{}: run {s} was searched without --rescore; a DIA study \
-                     is rescored with the settings of its runs",
-                    p.display()
-                )
-            })?;
-        stored.push((s.as_str(), r));
-    }
+    let stored = rescore_settings(stems, &table_path)?;
     if stored.is_empty() {
         return Err(format!("{}: no DIA runs", dir.display()));
     }
@@ -780,38 +733,7 @@ pub(crate) fn finalize(
         let cands = quant_candidates(&t);
         drop(t);
         drop(xr);
-        let (mut map, _) = output::run_percolator_with_decoys(&backend, &pin, &extra)
-            .map_err(|e| format!("Percolator on {}: {e}", pin.display()))?;
-        let dpath = output::decoy_results_path(&pin);
-        let text =
-            std::fs::read_to_string(&dpath).map_err(|e| format!("{}: {e}", dpath.display()))?;
-        let decoys =
-            output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", dpath.display()))?;
-        drop(text);
-        let ((nt, nd, n01), _, _) = crate::dia::precursor_q(&pin, &[], &mut map, &decoys, None)?;
-        log::info!(
-            target: "rescore",
-            "run {s}: precursor-level q (DIA): {nt} target and {nd} decoy precursors, {n01} at \
-             q <= 0.01 [{:.2}s]",
-            t_run.elapsed().as_secs_f64()
-        );
-        if has_xfer {
-            let c = crate::dia::precursor_q_by_class(
-                &pin,
-                crate::dia::pass2::XFER_COLUMN,
-                &mut map,
-                &decoys,
-            )?;
-            log::info!(
-                target: "rescore",
-                "run {s}: target precursors at q <= 0.01 own / transferred: class-wise q {} / {} \
-                 (reported), one pooled competition would give {} / {}",
-                c[1][0],
-                c[1][1],
-                c[0][0],
-                c[0][1]
-            );
-        }
+        let (map, decoys) = rescore_run(s, &pin, &backend, &extra, has_xfer, t_run)?;
         let rows = reported_rows(s, &cands, &map, a.quant_fdr);
         drop(cands);
         log::info!(
@@ -847,39 +769,159 @@ pub(crate) fn finalize(
     );
     drop(quant_rows);
     if let Some(database) = &a.database {
-        let inf = crate::inference::infer_from_maps(
-            database,
-            &a.proteins,
-            all_targets,
-            &all_decoys,
-        )
-        .map_err(|e| e.to_string())?;
-        let path = with_suffix(&a.output, ".pg.parquet");
-        output::write_pg_parquet(
-            &path,
-            &inf,
-            stems,
-            stems.len() == 1,
-            a.proteins.protein_fdr,
-            None,
-            None,
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-        let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
-        log::info!(
-            target: "inference",
-            "wrote {} ({} of {} target groups at protein q<={} over {} runs)",
-            path.display(),
-            at(a.proteins.protein_fdr),
-            inf.groups.len(),
-            a.proteins.protein_fdr,
-            stems.len()
-        );
+        write_protein_groups(a, database, stems, all_targets, &all_decoys)?;
     }
     log::info!(
         target: "total",
         "DIA study finalized in {:.2} s",
         t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+type PsmMap = std::collections::HashMap<String, output::PercolatorPsm>;
+
+/// With cross-run transfer: every run's pass-2 table must be built from the study's runs and
+/// from its current inputs.
+fn check_transfer_tables(
+    a: &crate::cli::QuantFinalizeArgs,
+    stems: &[String],
+    table_path: &dyn Fn(&str) -> PathBuf,
+) -> Result<(), String> {
+    let want = stems.join("\n");
+    let current: Vec<String> = stems
+        .iter()
+        .map(|s| crate::dia::transfer::run_inputs(&a.quant_dir, s))
+        .collect::<Result<_, _>>()?;
+    for s in stems {
+        let p = table_path(s);
+        let built = read_pass2_meta(&p)?
+            .into_iter()
+            .find(|(k, _)| k == crate::dia::transfer::RUNS_KEY)
+            .map(|(_, v)| v);
+        if built.as_deref() != Some(want.as_str()) {
+            return Err(format!(
+                "{}: built from other runs than the study's {} (stale transfer); run \
+                 `andes quant extract --quant-dir {} --run {s}` again",
+                p.display(),
+                stems.join(", "),
+                a.quant_dir.display()
+            ));
+        }
+        let built = read_pass2_meta(&p)?
+            .into_iter()
+            .find(|(k, _)| k == crate::dia::transfer::INPUTS_KEY)
+            .map(|(_, v)| v);
+        crate::dia::transfer::check_inputs(&a.quant_dir, &p, s, built.as_deref(), &current)?;
+    }
+    log::info!(
+        target: "dia",
+        "DIA study with cross-run candidate transfer: every run's pass-2 table holds its own \
+         and its transferred nominees (column {})",
+        crate::dia::pass2::XFER_COLUMN
+    );
+    Ok(())
+}
+
+/// Each run's stored rescoring settings, from its pass-2 table.
+fn rescore_settings<'s>(
+    stems: &'s [String],
+    table_path: &dyn Fn(&str) -> PathBuf,
+) -> Result<Vec<(&'s str, String)>, String> {
+    let mut stored: Vec<(&str, String)> = Vec::with_capacity(stems.len());
+    for s in stems {
+        let p = table_path(s);
+        let meta = read_pass2_meta(&p)?;
+        let r = meta
+            .into_iter()
+            .find(|(k, _)| k == RESCORE_KEY)
+            .map(|(_, v)| v)
+            .ok_or_else(|| {
+                format!(
+                    "{}: run {s} was searched without --rescore; a DIA study \
+                     is rescored with the settings of its runs",
+                    p.display()
+                )
+            })?;
+        stored.push((s.as_str(), r));
+    }
+    Ok(stored)
+}
+
+/// Percolator on run `s`'s precursor PIN, then precursor-level q-values (per transfer class
+/// too when `has_xfer`). Returns the target and decoy results.
+fn rescore_run(
+    s: &str,
+    pin: &Path,
+    backend: &PercolatorBackend,
+    extra: &[String],
+    has_xfer: bool,
+    t_run: std::time::Instant,
+) -> Result<(PsmMap, PsmMap), String> {
+    let (mut map, _) = output::run_percolator_with_decoys(backend, pin, extra)
+        .map_err(|e| format!("Percolator on {}: {e}", pin.display()))?;
+    let dpath = output::decoy_results_path(pin);
+    let text = std::fs::read_to_string(&dpath).map_err(|e| format!("{}: {e}", dpath.display()))?;
+    let decoys =
+        output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", dpath.display()))?;
+    drop(text);
+    let ((nt, nd, n01), _, _) = crate::dia::precursor_q(pin, &[], &mut map, &decoys, None)?;
+    log::info!(
+        target: "rescore",
+        "run {s}: precursor-level q (DIA): {nt} target and {nd} decoy precursors, {n01} at \
+         q <= 0.01 [{:.2}s]",
+        t_run.elapsed().as_secs_f64()
+    );
+    if has_xfer {
+        let c = crate::dia::precursor_q_by_class(
+            pin,
+            crate::dia::pass2::XFER_COLUMN,
+            &mut map,
+            &decoys,
+        )?;
+        log::info!(
+            target: "rescore",
+            "run {s}: target precursors at q <= 0.01 own / transferred: class-wise q {} / {} \
+             (reported), one pooled competition would give {} / {}",
+            c[1][0],
+            c[1][1],
+            c[0][0],
+            c[0][1]
+        );
+    }
+    Ok((map, decoys))
+}
+
+/// Protein inference over every run's PSMs; writes `<base>.pg.parquet`.
+fn write_protein_groups(
+    a: &crate::cli::QuantFinalizeArgs,
+    database: &Path,
+    stems: &[String],
+    all_targets: PsmMap,
+    all_decoys: &PsmMap,
+) -> Result<(), String> {
+    let inf = crate::inference::infer_from_maps(database, &a.proteins, all_targets, all_decoys)
+        .map_err(|e| e.to_string())?;
+    let path = with_suffix(&a.output, ".pg.parquet");
+    output::write_pg_parquet(
+        &path,
+        &inf,
+        stems,
+        stems.len() == 1,
+        a.proteins.protein_fdr,
+        None,
+        None,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
+    log::info!(
+        target: "inference",
+        "wrote {} ({} of {} target groups at protein q<={} over {} runs)",
+        path.display(),
+        at(a.proteins.protein_fdr),
+        inf.groups.len(),
+        a.proteins.protein_fdr,
+        stems.len()
     );
     Ok(())
 }

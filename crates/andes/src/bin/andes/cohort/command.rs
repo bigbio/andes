@@ -520,7 +520,8 @@ fn project_of<'a>(run: &'a str, projects: &'a Projects) -> &'a str {
 }
 
 /// The decoy estimate of a share's false target-target CSMs, as a fraction of its TT:
-/// (TD - DD) / TT, and (TD + DD) / TT for homotypic links, whose decoys are only TD and DD.
+/// max(TD - DD, DD) / TT, as `xl::fdr::ClassCounts::fdr` without its pseudo-count and floor,
+/// and (TD + DD) / TT for homotypic links, whose decoys are only TD and DD.
 fn share_fdr(c: &xl::fdr::ClassCounts, link: xl::rollup::LinkClass) -> f64 {
     if c.tt == 0 {
         return 0.0;
@@ -528,7 +529,7 @@ fn share_fdr(c: &xl::fdr::ClassCounts, link: xl::rollup::LinkClass) -> f64 {
     let false_tt = if link == xl::rollup::LinkClass::Homotypic {
         (c.td + c.dd) as f64
     } else {
-        (c.td as f64 - c.dd as f64).max(0.0)
+        (c.td as f64 - c.dd as f64).max(c.dd as f64)
     };
     false_tt / c.tt as f64
 }
@@ -588,7 +589,7 @@ fn report_project_error(rows: &[output::crosslinks::XlProjectRow]) {
         .max(7);
     log::info!(
         target: "cohort",
-        "each project's share of the pooled list (decoy estimate = (TD - DD) / TT; \
+        "each project's share of the pooled list (decoy estimate = max(TD - DD, DD) / TT; \
          homotypic (TD + DD) / TT):"
     );
     log::info!(

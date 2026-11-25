@@ -213,7 +213,7 @@ pub(crate) fn run_train_from_search(
         trained_param.data_type.protocol.name(),
     );
     let n_partitions = trained_param.partitions.len();
-    log::info!("trained model has {} partitions", n_partitions);
+    log::info!("trained model has {n_partitions} partitions");
 
     let model_id = args
         .model_id
@@ -792,7 +792,7 @@ pub(crate) fn unix_days_to_iso8601(days: u64) -> String {
     let day = e - (153 * m + 2) / 5 + 1;
     let month = m + 3 - 12 * (m / 10);
     let year = 100 * b + d - 4800 + m / 10;
-    format!("{:04}-{:02}-{:02}", year, month, day)
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[cfg(test)]

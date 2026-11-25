@@ -20,7 +20,7 @@ fn test_mgf_parses_completely() {
     let mut count = 0;
     for result in reader {
         let s = result.unwrap_or_else(|e| panic!("parse error: {e}"));
-        assert!(!s.peaks.is_empty(), "spectrum {} has no peaks", count);
+        assert!(!s.peaks.is_empty(), "spectrum {count} has no peaks");
         count += 1;
     }
     assert!(count > 0, "test.mgf produced 0 spectra");

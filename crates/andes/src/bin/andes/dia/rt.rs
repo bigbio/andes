@@ -6,13 +6,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use model::stats::{median_mut, Even};
 
 use crate::acquisition::Acquisition;
 use model::{InstrumentType, Spectrum};
 use onnx_infer::predictors::calibration::RtCalibration;
-use onnx_infer::predictors::form::{parse_peptide, Form, Mass};
-use onnx_infer::predictors::spectral::{ms2_features, FragmentTolerance, MS2_FEATURES};
+use onnx_infer::predictors::form::{Form, Mass};
+use onnx_infer::predictors::spectral::{
+    ms2_features, ms2_features_with, FragmentTolerance, MS2_FEATURES,
+};
 use onnx_infer::predictors::{
     DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
 };
@@ -20,6 +24,7 @@ use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 use search::tdc::{qvalues, ScoredLabel};
 
 use crate::cli::{Cli, PredictFeature, PredictorBackend};
+pub(crate) use crate::dia::pin::read_pin;
 
 static ANDES_RT_WEIGHTS: &[u8] =
     include_bytes!("../../../../../../resources/predictors/andes_rt.artn");
@@ -405,17 +410,22 @@ impl Predictors {
                             .iter()
                             .map(|&(i, _, _)| (i, rt_fold(&table.rows[i])))
                             .collect();
-                        for (i, r) in table.rows.iter().enumerate() {
-                            if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
-                                continue;
-                            }
-                            let p = raw[r.form as usize] as f64;
-                            if p.is_finite() && obs[i].is_finite() {
-                                let own = fold_of.get(&i).and_then(|&k| held_out[k].as_ref());
-                                cal_rt[i] = own.unwrap_or(&c).apply(p);
-                                diff[i] = (obs[i] - cal_rt[i]).abs();
-                            }
-                        }
+                        cal_rt
+                            .par_iter_mut()
+                            .zip(diff.par_iter_mut())
+                            .enumerate()
+                            .for_each(|(i, (cal_i, diff_i))| {
+                                let r = &table.rows[i];
+                                if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
+                                    return;
+                                }
+                                let p = raw[r.form as usize] as f64;
+                                if p.is_finite() && obs[i].is_finite() {
+                                    let own = fold_of.get(&i).and_then(|&k| held_out[k].as_ref());
+                                    *cal_i = own.unwrap_or(&c).apply(p);
+                                    *diff_i = (obs[i] - *cal_i).abs();
+                                }
+                            });
                     }
                 }
                 for (m, d) in miss.iter_mut().zip(&diff) {
@@ -440,8 +450,10 @@ impl Predictors {
                     100.0 * n_miss as f64 / n as f64
                 );
             }
-            for col in &mut cols {
-                impute_median(col, &miss);
+            for group in cols.chunks_mut(IMPUTE_COLUMNS_AT_ONCE) {
+                group
+                    .par_iter_mut()
+                    .for_each(|col| impute_median(col, &miss));
             }
             blocks.push((cols, miss));
         }
@@ -584,21 +596,19 @@ impl Predictors {
         let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
             let spec = &spectra[r.spec as usize];
             let (_, mass) = &forms[r.form as usize];
-            let mut v =
-                ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
-            if let Some((slot, windows)) = &dia {
-                let (scans, center) =
-                    crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
-                v.extend(crate::dia::evidence(
-                    prediction,
-                    pred.ions(),
-                    mass,
-                    r.charge,
-                    &scans,
-                    center,
-                    tol,
-                ));
-            }
+            let Some((slot, windows)) = &dia else {
+                return ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol)
+                    .to_vec();
+            };
+            let (scans, center) = crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
+            let (frags, traces) =
+                crate::dia::fragment_evidence(prediction, pred.ions(), mass, r.charge, &scans, tol);
+            let ns = scans.len();
+            let mut v = ms2_features_with(prediction, pred.ions(), mass, r.charge, |k, _| {
+                traces[k * ns + center]
+            })
+            .to_vec();
+            v.extend(crate::dia::evidence_of(&frags, &traces, ns, center));
             v
         };
         let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
@@ -663,6 +673,8 @@ impl Predictors {
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+/// Feature columns imputed at once; each holds a copy of its finite values while it runs.
+const IMPUTE_COLUMNS_AT_ONCE: usize = 4;
 /// Column prefix of the andes-rt source, whose calibrated prediction is `andesrt_predicted_rt`.
 const ANDES_RT_PREFIX: &str = "andesrt";
 
@@ -695,10 +707,10 @@ pub(crate) struct PinRow {
 pub(crate) struct PinTable {
     pub(crate) rows: Vec<PinRow>,
     pub(crate) forms: Vec<(Form, Mass)>,
-    peptide_col: usize,
+    pub(super) peptide_col: usize,
 }
 
-fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
+pub(super) fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
     let mut m: HashMap<String, u32> = HashMap::with_capacity(spectra.len());
     for (i, s) in spectra.iter().enumerate() {
         let scan = s.scan.unwrap_or(0);
@@ -712,7 +724,12 @@ fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
     m
 }
 
-fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, scan: i32) -> u32 {
+pub(super) fn locate(
+    bases: &HashMap<String, u32>,
+    spectra: &[Spectrum],
+    spec_id: &str,
+    scan: i32,
+) -> u32 {
     let mut s = spec_id;
     for _ in 0..2 {
         let Some((head, _)) = s.rsplit_once('_') else {
@@ -728,7 +745,7 @@ fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, sca
     NONE
 }
 
-fn row_charge(
+pub(super) fn row_charge(
     hot: Option<u8>,
     edges: (u8, u8),
     exp_mass: Option<f64>,
@@ -757,126 +774,6 @@ fn row_charge(
     } else {
         z
     }
-}
-
-pub(crate) fn read_pin(
-    pin: &Path,
-    spectra: &[Spectrum],
-    new_cols: &[String],
-) -> Result<PinTable, String> {
-    let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = BufReader::new(f).lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| format!("{}: empty PIN", pin.display()))?
-        .map_err(|e| format!("{}: {e}", pin.display()))?;
-    let h: Vec<&str> = header.split('\t').collect();
-    let col = |name: &str| {
-        h.iter()
-            .position(|c| *c == name)
-            .ok_or_else(|| format!("{}: PIN has no {name} column", pin.display()))
-    };
-    let (c_id, c_label, c_scan, c_pep) = (
-        col("SpecId")?,
-        col("Label")?,
-        col("ScanNr")?,
-        col("Peptide")?,
-    );
-    let c_score = col("RawScore").or_else(|_| col("RankScore"))?;
-    for c in new_cols {
-        if h.contains(&c.as_str()) {
-            return Err(format!("{}: PIN already has a {c} column", pin.display()));
-        }
-    }
-    let charge_cols: Vec<(usize, u8)> = h
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
-        .collect();
-    let charge_edges = (
-        charge_cols.iter().map(|c| c.1).min().unwrap_or(0),
-        charge_cols.iter().map(|c| c.1).max().unwrap_or(0),
-    );
-    let c_exp_mass = h.iter().position(|c| *c == "ExpMass");
-    let need = charge_cols
-        .iter()
-        .map(|(i, _)| *i)
-        .chain([c_id, c_label, c_scan, c_pep, c_score])
-        .chain(c_exp_mass)
-        .max()
-        .unwrap_or(0);
-    let bases = spectrum_bases(spectra);
-    let mut forms: Vec<(Form, Mass)> = Vec::new();
-    let mut form_ix: HashMap<Form, u32> = HashMap::new();
-    let mut by_peptide: HashMap<String, u32> = HashMap::new();
-    let mut rows = Vec::new();
-    let mut unlocated = 0usize;
-    for (lineno, line) in lines.enumerate() {
-        let line = line.map_err(|e| format!("{}: {e}", pin.display()))?;
-        if line.is_empty() {
-            continue;
-        }
-        let x: Vec<&str> = line.split('\t').collect();
-        if x.len() <= need {
-            return Err(format!(
-                "{}: line {} has {} columns, expected more than {need}",
-                pin.display(),
-                lineno + 2,
-                x.len()
-            ));
-        }
-        let scan: i32 = x[c_scan].trim().parse().map_err(|_| {
-            format!(
-                "{}: line {} ScanNr {:?} is not an integer",
-                pin.display(),
-                lineno + 2,
-                x[c_scan]
-            )
-        })?;
-        let spec = locate(&bases, spectra, x[c_id], scan);
-        unlocated += usize::from(spec == NONE);
-        let form = match by_peptide.get(x[c_pep]) {
-            Some(&f) => f,
-            None => {
-                let f = parse_peptide(x[c_pep]).map_or(NONE, |(f, m)| {
-                    *form_ix.entry(f.clone()).or_insert_with(|| {
-                        forms.push((f, m));
-                        (forms.len() - 1) as u32
-                    })
-                });
-                by_peptide.insert(x[c_pep].to_string(), f);
-                f
-            }
-        };
-        let hot = charge_cols
-            .iter()
-            .find(|(i, _)| x[*i] == "1")
-            .map(|(_, z)| *z);
-        let charge = row_charge(
-            hot,
-            charge_edges,
-            c_exp_mass.and_then(|i| x[i].trim().parse().ok()),
-            (spec != NONE).then(|| spectra[spec as usize].precursor_mz),
-        );
-        rows.push(PinRow {
-            spec,
-            form,
-            charge,
-            decoy: x[c_label].trim() == "-1",
-            score: x[c_score].trim().parse().unwrap_or(f64::NEG_INFINITY),
-        });
-    }
-    if unlocated > 0 {
-        log::warn!(
-            target: "predict",
-            "{unlocated} PIN rows match no searched spectrum; they are marked missing"
-        );
-    }
-    Ok(PinTable {
-        rows,
-        forms,
-        peptide_col: c_pep,
-    })
 }
 
 /// Folds of the RT calibration's cross-fit; a peptidoform's anchors share a fold.
@@ -1004,61 +901,74 @@ pub(crate) fn write_pin_with_flags(
             .map_or_else(|| "pin".into(), |n| n.to_string_lossy())
     ));
     let io = |e: std::io::Error| format!("{}: {e}", tmp.display());
-    let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = BufReader::new(f).lines();
-    let mut w = BufWriter::new(File::create(&tmp).map_err(io)?);
+    let w = std::cell::RefCell::new(BufWriter::new(File::create(&tmp).map_err(io)?));
     let k = table.peptide_col;
-    let header = lines
-        .next()
-        .ok_or_else(|| format!("{}: empty PIN", pin.display()))?
-        .map_err(|e| format!("{}: {e}", pin.display()))?;
-    let h: Vec<&str> = header.split('\t').collect();
-    writeln!(
-        w,
-        "{}\t{}\t{}",
-        h[..k].join("\t"),
-        cols.join("\t"),
-        h[k..].join("\t")
-    )
-    .map_err(io)?;
-    let mut row = 0usize;
-    let mut buf = String::new();
-    for line in lines {
-        let line = line.map_err(|e| format!("{}: {e}", pin.display()))?;
-        if line.is_empty() {
-            continue;
-        }
-        let (head, tail) = split_before_field(&line, k).ok_or_else(|| {
-            format!(
-                "{}: changed while adding predicted features (row {} has at most {k} columns)",
-                pin.display(),
-                row + 1
-            )
-        })?;
-        buf.clear();
-        buf.push_str(head);
-        for v in values {
-            buf.push('\t');
-            push_value(&mut buf, v[row]);
-        }
-        for f in flags {
-            buf.push('\t');
-            push_value(&mut buf, f64::from(u8::from(f[row])));
-        }
-        buf.push('\t');
-        buf.push_str(tail);
-        buf.push('\n');
-        w.write_all(buf.as_bytes()).map_err(io)?;
-        row += 1;
-    }
-    if row != table.rows.len() {
+    let n = table.rows.len();
+    let mut rows = 0usize;
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let k = k.min(h.len());
+            let (a, b) = (h[..k].join("\t"), h[k..].join("\t"));
+            writeln!(w.borrow_mut(), "{a}\t{}\t{b}", cols.join("\t")).map_err(io)
+        },
+        |first, lines| {
+            if first + lines.len() > n {
+                return Err(format!(
+                    "{}: changed while adding predicted features ({} rows, expected {n})",
+                    pin.display(),
+                    first + lines.len()
+                ));
+            }
+            let out: Vec<Result<String, String>> = lines
+                .par_chunks(crate::dia::blocks::LINES_PER_TASK)
+                .enumerate()
+                .map(|(c, chunk)| {
+                    let mut buf = String::new();
+                    for (j, line) in chunk.iter().enumerate() {
+                        let row = first + c * crate::dia::blocks::LINES_PER_TASK + j;
+                        let (head, tail) = split_before_field(line, k).ok_or_else(|| {
+                            format!(
+                                "{}: changed while adding predicted features (row {} has at \
+                                 most {k} columns)",
+                                pin.display(),
+                                row + 1
+                            )
+                        })?;
+                        buf.push_str(head);
+                        for v in values {
+                            buf.push('\t');
+                            push_value(&mut buf, v[row]);
+                        }
+                        for f in flags {
+                            buf.push('\t');
+                            push_value(&mut buf, f64::from(u8::from(f[row])));
+                        }
+                        buf.push('\t');
+                        buf.push_str(tail);
+                        buf.push('\n');
+                    }
+                    Ok(buf)
+                })
+                .collect();
+            let mut w = w.borrow_mut();
+            for part in out {
+                w.write_all(part?.as_bytes()).map_err(io)?;
+            }
+            rows = first + lines.len();
+            Ok(())
+        },
+    )?;
+    if rows != n {
         return Err(format!(
             "{}: changed while adding predicted features ({} rows, expected {})",
             pin.display(),
-            row,
-            table.rows.len()
+            rows,
+            n
         ));
     }
+    let mut w = w.into_inner();
     w.flush().map_err(io)?;
     drop(w);
     std::fs::rename(&tmp, pin).map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))

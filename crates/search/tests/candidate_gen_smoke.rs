@@ -607,8 +607,7 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
 
     assert_eq!(
         target_count, 1,
-        "expected 1 candidate for non-M protein, got {}",
-        target_count
+        "expected 1 candidate for non-M protein, got {target_count}",
     );
 }
 
@@ -784,8 +783,7 @@ fn met_alone_does_not_trigger_cleavage() {
 
     assert_eq!(
         target_count, 1,
-        "expected 1 candidate for M-only protein, got {}",
-        target_count
+        "expected 1 candidate for M-only protein, got {target_count}",
     );
 }
 

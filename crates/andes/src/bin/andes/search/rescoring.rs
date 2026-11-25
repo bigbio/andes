@@ -83,50 +83,37 @@ pub(super) fn rescore_pin(
         }
         let extra = output::percolator_args_with_threads(&user_args, cli.threads);
         let t_resc = std::time::Instant::now();
-        let (mut map, mut decoys) =
-            output::run_percolator_with_decoys(&backend, output_pin_path, &extra)
-                .map_err(|e| format!("{e}"))?;
-        crate::memory::mark_stage("rescoring");
-        if cli.dia
-            && crate::dia::refine_rt(output_pin_path, spectra, &|id: &str| {
-                map.get(id).is_some_and(|p| p.q_value <= 0.01)
-            })?
-        {
-            (map, decoys) = output::run_percolator_with_decoys(&backend, output_pin_path, &extra)
-                .map_err(|e| format!("{e}"))?;
-            crate::memory::mark_stage("rescoring after the RT refit");
-        }
-        let path = output::decoy_results_path(output_pin_path);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        rescore_decoy_psms =
-            output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut pass1_q = 0;
-        let mut pass1_best = Vec::new();
-        let mut pass1_removed = std::collections::HashSet::new();
-        if cli.dia {
-            let ((t, d, n), best, removed) = crate::dia::precursor_q(
-                output_pin_path,
-                spectra,
-                &mut map,
-                &rescore_decoy_psms,
-                cli.dia_interference,
-            )?;
-            pass1_q = n;
-            pass1_best = best;
-            pass1_removed = removed;
-            if free_peaks {
-                for s in spectra.iter_mut() {
-                    s.peaks = Vec::new();
-                }
-                crate::memory::release_free_memory();
+        if cli.dia && free_peaks {
+            for s in spectra.iter_mut() {
+                s.peaks = Vec::new();
             }
-            crate::memory::mark_stage("precursor q");
-            log::info!(
-                target: "rescore",
-                "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
-            );
+            crate::memory::release_free_memory();
         }
+        let seed = crate::dia::score::percolator_seed(&user_args);
+        let early = dia_pass2
+            .as_ref()
+            .filter(|_| cli.dia && cli.quant_dir.is_none());
+        let (pass1, learned) = std::thread::scope(|sc| -> Result<_, String> {
+            let job = early.map(|t| sc.spawn(move || crate::dia::score::learn(t, &[], seed)));
+            let pass1 = rescore_pass1(cli, output_pin_path, spectra, &backend, &extra);
+            let learned = match job {
+                Some(h) => Some(
+                    h.join()
+                        .map_err(|_| "the precursor learned score panicked".to_string())?,
+                ),
+                None => None,
+            };
+            Ok((pass1?, learned))
+        })?;
+        let Pass1 {
+            targets: mut map,
+            decoy_ids: mut decoys,
+            decoys: pass1_decoys,
+            q_count: pass1_q,
+            best: pass1_best,
+            removed: pass1_removed,
+        } = pass1;
+        rescore_decoy_psms = pass1_decoys;
         let mut results_pin = output_pin_path.clone();
         if let (Some(t), Some(dir)) = (dia_pass2.as_ref(), cli.quant_dir.as_deref()) {
             crate::dia::study::store_run(
@@ -141,7 +128,6 @@ pub(super) fn rescore_pin(
             *dia_pass2 = None;
         }
         if let Some(t) = dia_pass2.take() {
-            let seed = crate::dia::score::percolator_seed(&user_args);
             let rescore = |pin: &Path| -> Result<crate::dia::score::Rescored, String> {
                 let (targets, decoy_ids) =
                     output::run_percolator_with_decoys(&backend, pin, &extra)
@@ -164,6 +150,7 @@ pub(super) fn rescore_pin(
                 &pass1_best,
                 &pass1_removed,
                 rescore,
+                learned,
             ) {
                 Ok(r) => {
                     log::info!(
@@ -215,5 +202,66 @@ pub(super) fn rescore_pin(
         row_scores,
         dia_replaced,
         dia_precursor_ids,
+    })
+}
+
+/// Pass 1's rescored PSMs: target rows, decoy ids and decoy rows by SpecId, and on DIA the
+/// precursor-level target count at q <= 0.01 and the best `(score, is decoy)` of every precursor.
+struct Pass1 {
+    targets: std::collections::HashMap<String, output::PercolatorPsm>,
+    decoy_ids: std::collections::HashSet<String>,
+    decoys: std::collections::HashMap<String, output::PercolatorPsm>,
+    q_count: usize,
+    best: Vec<(f64, bool)>,
+    removed: std::collections::HashSet<(String, String, u8)>,
+}
+
+/// Rescores the pass-1 PIN: Percolator, on DIA the RT refit and a second Percolator run when
+/// the refit changed the PIN, then on DIA the precursor-level q-values.
+fn rescore_pass1(
+    cli: &Cli,
+    pin: &Path,
+    spectra: &[Spectrum],
+    backend: &output::PercolatorBackend,
+    extra: &[String],
+) -> Result<Pass1, String> {
+    let (mut map, mut decoys) =
+        output::run_percolator_with_decoys(backend, pin, extra).map_err(|e| format!("{e}"))?;
+    crate::memory::mark_stage("rescoring");
+    if cli.dia
+        && crate::dia::refine_rt(pin, spectra, &|id: &str| {
+            map.get(id).is_some_and(|p| p.q_value <= 0.01)
+        })?
+    {
+        (map, decoys) =
+            output::run_percolator_with_decoys(backend, pin, extra).map_err(|e| format!("{e}"))?;
+        crate::memory::mark_stage("rescoring after the RT refit");
+    }
+    let path = output::decoy_results_path(pin);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let decoy_psms =
+        output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut q_count = 0;
+    let mut best = Vec::new();
+    let mut removed = std::collections::HashSet::new();
+    if cli.dia {
+        let ((t, d, n), b, r) =
+            crate::dia::precursor_q(pin, spectra, &mut map, &decoy_psms, cli.dia_interference)?;
+        q_count = n;
+        best = b;
+        removed = r;
+        crate::memory::mark_stage("precursor q");
+        log::info!(
+            target: "rescore",
+            "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
+        );
+    }
+    Ok(Pass1 {
+        targets: map,
+        decoy_ids: decoys,
+        decoys: decoy_psms,
+        q_count,
+        best,
+        removed,
     })
 }

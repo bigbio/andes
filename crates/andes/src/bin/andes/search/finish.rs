@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use model::Spectrum;
+use rayon::prelude::*;
 use search::TopNQueue;
 
 use super::outputs::{release_at_exit, write_proteoform_table, write_search_tsv, PsmTables};
@@ -331,39 +332,11 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     let mut open_search_summary: Option<String> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
-        let stem = report_base
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "andes".to_string());
-        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        let (stem, dir) = report_stem(&report_base);
         let q_tag = format!("{fdr}").replace('.', "p");
         let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
-        let pep_cap = cli.pep;
-        let mut accepted: Vec<&output::PercolatorPsm> = map
-            .iter()
-            .filter(|(id, p)| {
-                p.q_value <= cutoffs.of(id)
-                    && pep_cap.is_none_or(|t| p.pep <= t)
-                    && !knockoff_rows.contains(*id)
-                    && cli.protein_fdr.is_none_or(|t| {
-                        protein_groups
-                            .as_ref()
-                            .and_then(|inf| inf.group_of(p))
-                            .is_some_and(|g| g.q_value <= t)
-                    })
-            })
-            .map(|(_, p)| p)
-            .collect();
-        accepted.sort_by(|a, b| a.report_cmp(b));
-        let mut pep_note = pep_cap
-            .map(|t| format!(" and PEP<={t}"))
-            .unwrap_or_default();
-        if pin_index.has_alternative_entries && proteoform_fdr != fdr {
-            pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
-        }
-        if let Some(t) = cli.protein_fdr {
-            pep_note.push_str(&format!(", protein groups at q<={t}"));
-        }
+        let accepted = accepted_psms(&cli, map, cutoffs, &knockoff_rows, protein_groups.as_ref());
+        let pep_note = cut_note(&cli, &pin_index, fdr, proteoform_fdr);
         match write_filtered_tsv(&filtered_path, &accepted, protein_groups.as_ref()) {
             Ok(()) => log::info!(
                 target: "output",
@@ -457,18 +430,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         summary.open_search = open_search_summary.take();
     }
     log::info!(target: "summary", "{}", run_stats.render_with(id_summary.as_ref()));
-    let stats_path = {
-        let stem = report_base
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "andes".to_string());
-        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
-        dir.join(format!("{stem}.statistics.log"))
-    };
-    match output::write_statistics_log(&run_stats, id_summary.as_ref(), &stats_path) {
-        Ok(()) => log::info!(target: "output", "Wrote statistics: {}", stats_path.display()),
-        Err(e) => log::warn!(target: "output", "could not write {}: {e}", stats_path.display()),
-    }
+    write_statistics(&run_stats, id_summary.as_ref(), &report_base);
 
     knockoff_rows.extend(rerank_dropped);
     if !dia_precursor_ids.is_empty() {
@@ -516,6 +478,76 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         protein_groups,
         cutoffs,
     })
+}
+
+/// The report's file stem (`andes` without one) and its directory.
+fn report_stem(report_base: &Path) -> (String, &Path) {
+    let stem = report_base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+    (stem, dir)
+}
+
+/// The rescored PSMs that pass their q-value cutoff, `--pep` and `--protein-fdr` and are not
+/// knockoff rows, in report order.
+fn accepted_psms<'m>(
+    cli: &Cli,
+    map: &'m HashMap<String, output::PercolatorPsm>,
+    cutoffs: &output::Cutoffs,
+    knockoff_rows: &HashSet<String>,
+    protein_groups: Option<&output::Inference>,
+) -> Vec<&'m output::PercolatorPsm> {
+    let pep_cap = cli.pep;
+    let mut accepted: Vec<&'m output::PercolatorPsm> = map
+        .iter()
+        .filter(|(id, p)| {
+            p.q_value <= cutoffs.of(id)
+                && pep_cap.is_none_or(|t| p.pep <= t)
+                && !knockoff_rows.contains(*id)
+                && cli.protein_fdr.is_none_or(|t| {
+                    protein_groups
+                        .and_then(|inf| inf.group_of(p))
+                        .is_some_and(|g| g.q_value <= t)
+                })
+        })
+        .map(|(_, p)| p)
+        .collect();
+    accepted.sort_by(|a, b| a.report_cmp(b));
+    accepted
+}
+
+/// The cut beyond the PSM q-value, as appended to the summary: PEP, proteoform and protein
+/// group cutoffs when set.
+fn cut_note(cli: &Cli, pin_index: &search::SearchIndex, fdr: f64, proteoform_fdr: f64) -> String {
+    let pep_cap = cli.pep;
+    let mut pep_note = pep_cap
+        .map(|t| format!(" and PEP<={t}"))
+        .unwrap_or_default();
+    if pin_index.has_alternative_entries && proteoform_fdr != fdr {
+        pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
+    }
+    if let Some(t) = cli.protein_fdr {
+        pep_note.push_str(&format!(", protein groups at q<={t}"));
+    }
+    pep_note
+}
+
+/// Writes `<stem>.statistics.log` beside the report.
+fn write_statistics(
+    run_stats: &output::RunStatistics,
+    id_summary: Option<&output::IdentificationSummary>,
+    report_base: &Path,
+) {
+    let stats_path = {
+        let (stem, dir) = report_stem(report_base);
+        dir.join(format!("{stem}.statistics.log"))
+    };
+    match output::write_statistics_log(run_stats, id_summary, &stats_path) {
+        Ok(()) => log::info!(target: "output", "Wrote statistics: {}", stats_path.display()),
+        Err(e) => log::warn!(target: "output", "could not write {}: {e}", stats_path.display()),
+    }
 }
 
 /// What writing the PIN and rescoring it read and own; the scorer is borrowed, as the IPF scorer
@@ -624,7 +656,7 @@ pub(super) fn write_pin_and_rescore(
         && cli.output_tsv.is_none())
     .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
     if fact_rows.is_some() {
-        queues = Vec::new();
+        std::mem::take(&mut queues).into_par_iter().for_each(drop);
         crate::memory::release_free_memory();
     }
     log::info!(

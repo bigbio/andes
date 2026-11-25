@@ -50,6 +50,59 @@ pub(super) fn interference_removed(
     removed
 }
 
+/// Precursor keys that interference removal takes out, by `choice`, each run on its own: `keys`
+/// maps `(run, peptide form, charge)` to a key, `rows` and `line_of` are the scored PIN rows and
+/// their PIN lines, `q0` the precursor q before removal.
+pub(super) fn removed_keys(
+    keys: &HashMap<(String, String, u8), u32>,
+    rows: &[(u32, f64, bool, String)],
+    line_of: &[usize],
+    q0: &[Option<(f64, bool, f64)>],
+    table: &crate::dia::rt::PinTable,
+    spectra: &[Spectrum],
+    choice: Interference,
+) -> Vec<bool> {
+    let mut run_of = vec![0u32; keys.len()];
+    let mut runs: HashMap<&str, u32> = HashMap::new();
+    for ((run, _, _), k) in keys {
+        let n = runs.len() as u32;
+        run_of[*k as usize] = *runs.entry(run.as_str()).or_insert(n);
+    }
+    let mut windows = coeluting_windows(rows, line_of, q0, &run_of, table, spectra);
+    let mut removed = vec![false; keys.len()];
+    let mut by_run: std::collections::BTreeMap<u32, HashMap<(u32, i64), Vec<Coeluting>>> =
+        Default::default();
+    for (k, v) in windows.drain() {
+        by_run.entry(k.0).or_default().insert(k, v);
+    }
+    let run_name: HashMap<u32, &str> = runs.iter().map(|(n, &i)| (i, *n)).collect();
+    for (run, mut windows) in by_run {
+        let name = run_name.get(&run).copied().unwrap_or_default();
+        let rule = match choice {
+            Interference::Fixed(f, drt) => Some((f, drt)),
+            Interference::Auto => {
+                let e = estimate_interference(&windows);
+                log::info!(target: "dia", "interference removal, auto, run {name}: {e}");
+                e.rule
+            }
+        };
+        let Some(rule) = rule else { continue };
+        let hit = interference_removed(&mut windows, keys.len(), rule);
+        log::info!(
+            target: "dia",
+            "interference removal, run {name} (shared fragments >= {}, RT within {} s): \
+             {} precursors removed",
+            rule.0,
+            rule.1,
+            hit.iter().filter(|r| **r).count()
+        );
+        for (r, h) in removed.iter_mut().zip(hit) {
+            *r |= h;
+        }
+    }
+    removed
+}
+
 /// The best row of each precursor at q <= [`INTERFERENCE_POOL_Q`], grouped by run and isolation
 /// window, for [`interference_removed`] and [`estimate_interference`].
 pub(super) fn coeluting_windows(

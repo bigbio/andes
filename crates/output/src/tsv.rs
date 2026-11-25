@@ -193,7 +193,7 @@ fn write_psm_row<W: Write>(
         .unwrap_or_else(|| "UNKNOWN".to_string());
 
     let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-    let precursor = format!("{:.4}", precursor_mz);
+    let precursor = format!("{precursor_mz:.4}");
 
     let isotope_error: i32 = psm.isotope_offset as i32;
 
@@ -201,7 +201,7 @@ fn write_psm_row<W: Write>(
         format!("{:.4}", psm.mass_error_ppm)
     } else {
         let da = psm.mass_error_ppm * 1e-6 * precursor_mz;
-        format!("{:.4}", da)
+        format!("{da:.4}")
     };
 
     let charge = psm.charge_used;
@@ -228,17 +228,7 @@ fn write_psm_row<W: Write>(
         )
     } else {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            spec_file_name,
-            spec_id,
-            scan_num,
-            frag_method,
-            precursor,
-            isotope_error,
-            precursor_error,
-            charge,
-            peptide,
-            protein,
+            "{spec_file_name}\t{spec_id}\t{scan_num}\t{frag_method}\t{precursor}\t{isotope_error}\t{precursor_error}\t{charge}\t{peptide}\t{protein}",
         )
     };
     let mods = modifications_field(&cand.peptide);
@@ -264,8 +254,7 @@ fn write_psm_row<W: Write>(
     };
     writeln!(
         writer,
-        "{}\t{}\t{}\t{}\t{}\t{}{}",
-        lead, raw_score, mods, family, kind, feature, open_search_tail
+        "{lead}\t{raw_score}\t{mods}\t{family}\t{kind}\t{feature}{open_search_tail}",
     )
 }
 
@@ -589,8 +578,7 @@ mod tests {
         let peptide_col = &rows[0][9];
         assert!(
             peptide_col.contains("+15.99"),
-            "peptide column should contain oxidation mod delta (+15.99...), got: {}",
-            peptide_col
+            "peptide column should contain oxidation mod delta (+15.99...), got: {peptide_col}",
         );
     }
 
@@ -685,7 +673,7 @@ mod tests {
             .iter()
             .position(|c| c == "Protein")
             .expect("Protein column missing");
-        let expected_decoy = format!("XXX_{}", accession);
+        let expected_decoy = format!("XXX_{accession}");
         assert_eq!(
             rows[0][prot_col], expected_decoy,
             "Protein column should carry decoy prefix for decoy PSM"

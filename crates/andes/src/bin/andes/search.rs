@@ -11,6 +11,7 @@ mod rescored;
 mod rescoring;
 mod resolve;
 mod setup;
+mod stream;
 
 use std::path::{Path, PathBuf};
 
@@ -158,6 +159,19 @@ pub(crate) fn run(
     }
 
     let file_params = setup::file_params(&params, &file_cal);
+    let bench_mode = cli.max_spectra > 0;
+    let high_res = acquisition.high_res;
+    let tmt_level = setup::tmt_level_for(&cli, high_res, &spectrum_path, is_mzml, is_raw);
+    let mut quant =
+        quant_collector(&cli, high_res, tmt_level, &scorer, is_mgf, is_d, spectrum_paths)?;
+    let xl_ms3_capture = setup::xl_ms3_capture(&cli);
+    let ms1_input = chimeric_active || mono_active;
+    let prefetched = stream::prefetch_first_file(
+        &cli,
+        (&params, standalone, ms1_input, xl_ms3_capture),
+        (bench_mode, bench_cap),
+        quant.as_ref(),
+    );
     trace.clock.stage("index");
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
@@ -189,31 +203,11 @@ pub(crate) fn run(
     );
     setup::finish_index_open(&cli, &mut prepared, t_index)?;
 
-    let bench_mode = cli.max_spectra > 0;
-
-    let high_res = acquisition.high_res;
-    let tmt_level = setup::tmt_level_for(&cli, high_res, &spectrum_path, is_mzml, is_raw);
-    let mut quant = quant_collector(
-        &cli,
-        high_res,
-        tmt_level,
-        &scorer,
-        is_mgf,
-        is_d,
-        spectrum_paths,
-    )?;
     let (predictors, keep_peaks) =
         setup::predictors(&cli, standalone, &acquisition, param.data_type.instrument)?;
-    let xl_ms3_capture = cli
-        .xl
-        .as_ref()
-        .is_some_and(|x| x.0.iter().any(|l| l.cleavage.is_some()));
-
     let t_search_start = std::time::Instant::now();
 
     setup::warn_mgf_ms_level(&cli, is_mgf);
-
-    let ms1_input = chimeric_active || mono_active;
 
     let mut measurer = FragmentErrorMeasurer {
         enabled: acquisition.high_res && frag_tol_override.is_none() && !standalone,
@@ -241,6 +235,7 @@ pub(crate) fn run(
         spectrum_paths.len(),
         setup::open_mono_dump(&cli, mono_active, &mono_params)?,
     );
+    outputs.prefetched = prefetched;
     trace.clock.stage("search");
     setup::search_files(
         &file_inputs,
@@ -262,6 +257,7 @@ pub(crate) fn run(
         mono_table,
         mono_stats,
         mono_dump,
+        ..
     } = outputs;
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
     prepared.params = &params;

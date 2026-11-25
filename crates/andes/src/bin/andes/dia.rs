@@ -586,33 +586,24 @@ pub(crate) fn evidence(
             frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
         }
     }
-    let trace = |mz: f64| -> Vec<f64> {
-        let w = tol.window(mz);
-        scans
-            .iter()
-            .map(|s| {
-                let lo = s.partition_point(|p| p.0 < mz - w);
-                s[lo..]
-                    .iter()
-                    .take_while(|p| p.0 <= mz + w)
-                    .fold(0.0, |m, p| f64::max(m, p.1 as f64))
-            })
-            .collect()
-    };
-    let traces: Vec<Vec<f64>> = frags.iter().map(|f| trace(f.0)).collect();
+    let ns = scans.len();
+    let traces = fragment_traces(&frags, scans, tol);
+    let trace = |k: usize| &traces[k * ns..(k + 1) * ns];
     let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
     let lo = center.saturating_sub(1);
     let hi = (center + 2).min(scans.len());
     let apex = (lo..hi)
         .max_by(|&x, &y| {
-            let at = |s: usize| traces.iter().zip(&p).map(|(t, w)| t[s] * w).sum::<f64>();
+            let at = |s: usize| (0..frags.len()).map(|k| trace(k)[s] * p[k]).sum::<f64>();
             at(x)
                 .total_cmp(&at(y))
                 .then(y.abs_diff(center).cmp(&x.abs_diff(center)))
         })
         .unwrap_or(center);
     let (a, b) = (apex.saturating_sub(1), (apex + 2).min(scans.len()));
-    let sum3: Vec<f64> = traces.iter().map(|t| t[a..b].iter().sum()).collect();
+    let sum3: Vec<f64> = (0..frags.len())
+        .map(|k| trace(k)[a..b].iter().sum())
+        .collect();
     let sp: f64 = p.iter().sum();
     let sum3_angle = angle(&p, &sum3);
     let sum3_explained = if sp > 0.0 {
@@ -632,16 +623,18 @@ pub(crate) fn evidence(
     let norm: Vec<Vec<f64>> = top
         .iter()
         .map(|&k| {
-            let m = traces[k].iter().cloned().fold(0.0, f64::max);
-            traces[k]
+            let m = trace(k).iter().cloned().fold(0.0, f64::max);
+            trace(k)
                 .iter()
                 .map(|v| if m > 0.0 { v / m } else { 0.0 })
                 .collect()
         })
         .collect();
+    let mut v: Vec<f64> = Vec::with_capacity(norm.len());
     let profile: Vec<f64> = (0..scans.len())
         .map(|s| {
-            let mut v: Vec<f64> = norm.iter().map(|t| t[s]).collect();
+            v.clear();
+            v.extend(norm.iter().map(|t| t[s]));
             v.sort_by(f64::total_cmp);
             match v.len() {
                 0 => 0.0,
@@ -653,15 +646,15 @@ pub(crate) fn evidence(
     let pn = profile.len().max(1) as f64;
     let pm = profile.iter().sum::<f64>() / pn;
     let pvar: f64 = profile.iter().map(|v| (v - pm) * (v - pm)).sum();
-    let corrs: Vec<f64> = top.iter().map(|&k| pearson(&traces[k], &profile)).collect();
+    let corrs: Vec<f64> = top.iter().map(|&k| pearson(trace(k), &profile)).collect();
     let pf_corr = corrs.iter().sum::<f64>() / corrs.len().max(1) as f64;
     let pf_clean =
         corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64 / top.len().max(1) as f64;
     let proj: Vec<f64> = top
         .iter()
         .map(|&k| {
-            let tm = traces[k].iter().sum::<f64>() / pn;
-            let cov: f64 = traces[k]
+            let tm = trace(k).iter().sum::<f64>() / pn;
+            let cov: f64 = trace(k)
                 .iter()
                 .zip(&profile)
                 .map(|(x, y)| (x - tm) * (y - pm))
@@ -681,6 +674,44 @@ pub(crate) fn evidence(
         pf_clean,
         angle(&ptop, &proj),
     ]
+}
+
+/// The highest peak intensity within `tol` of each fragment's m/z in each scan, fragment-major
+/// (`frags.len()` rows of `scans.len()` values; 0 without a peak). Each scan's peaks are walked
+/// once, in the fragments' m/z order, instead of a binary search per fragment; a window whose
+/// lower edge falls below the previous one is searched afresh, so every fragment sees the peaks
+/// a binary search would give it.
+fn fragment_traces(
+    frags: &[(f64, f64)],
+    scans: &[&[(f64, f32)]],
+    tol: FragmentTolerance,
+) -> Vec<f64> {
+    let ns = scans.len();
+    let mut order: Vec<usize> = (0..frags.len()).collect();
+    order.sort_by(|&a, &b| frags[a].0.total_cmp(&frags[b].0));
+    let mut out = vec![0.0f64; frags.len() * ns];
+    for (s, peaks) in scans.iter().enumerate() {
+        let mut lo = 0usize;
+        let mut prev = f64::NEG_INFINITY;
+        for &k in &order {
+            let mz = frags[k].0;
+            let w = tol.window(mz);
+            let edge = mz - w;
+            if edge >= prev {
+                while lo < peaks.len() && peaks[lo].0 < edge {
+                    lo += 1;
+                }
+            } else {
+                lo = peaks.partition_point(|p| p.0 < edge);
+            }
+            prev = edge;
+            out[k * ns + s] = peaks[lo..]
+                .iter()
+                .take_while(|p| p.0 <= mz + w)
+                .fold(0.0, |m, p| f64::max(m, p.1 as f64));
+        }
+    }
+    out
 }
 
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {

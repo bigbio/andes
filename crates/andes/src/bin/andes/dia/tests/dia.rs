@@ -419,3 +419,45 @@ fn evidence_ignores_an_interfered_fragment() {
         "an interfered trace is not counted clean: {ramp:?}"
     );
 }
+
+#[test]
+fn fragment_traces_match_a_binary_search_per_fragment() {
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for tol in [FragmentTolerance::Ppm(20.0), FragmentTolerance::Da(0.02)] {
+        for _ in 0..50 {
+            let scans: Vec<Vec<(f64, f32)>> = (0..7)
+                .map(|_| {
+                    let mut p: Vec<(f64, f32)> = (0..300)
+                        .map(|_| (100.0 + 400.0 * next(), (1000.0 * next()) as f32))
+                        .collect();
+                    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    p
+                })
+                .collect();
+            let refs: Vec<&[(f64, f32)]> = scans.iter().map(Vec::as_slice).collect();
+            let mut frags: Vec<(f64, f64)> = (0..120)
+                .map(|_| (100.0 + 400.0 * next(), next()))
+                .collect();
+            frags.push(frags[3]);
+            frags.push((refs[2][10].0, 1.0));
+            let got = fragment_traces(&frags, &refs, tol);
+            for (k, &(mz, _)) in frags.iter().enumerate() {
+                for (s, peaks) in refs.iter().enumerate() {
+                    let w = tol.window(mz);
+                    let lo = peaks.partition_point(|p| p.0 < mz - w);
+                    let want = peaks[lo..]
+                        .iter()
+                        .take_while(|p| p.0 <= mz + w)
+                        .fold(0.0, |m, p| f64::max(m, p.1 as f64));
+                    assert_eq!(got[k * refs.len() + s].to_bits(), want.to_bits());
+                }
+            }
+        }
+    }
+}

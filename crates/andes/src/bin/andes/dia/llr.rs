@@ -383,7 +383,8 @@ pub(crate) fn add_to_pin(
     };
 
     let layout = &predicted.ions;
-    let spec_rows = |s: usize, cals: &[Calib]| -> Vec<(u32, Vec<IonObs>)> {
+    type SpecRows = Vec<(u32, Vec<IonObs>)>;
+    let spec_rows = |s: usize, cals: &[Calib], want: &dyn Fn(usize) -> bool| -> SpecRows {
         let cal = cals[run_of(s).min(n_runs - 1)];
         let (w, p) = slot[s];
         let win = &windows[w as usize];
@@ -394,6 +395,7 @@ pub(crate) fn add_to_pin(
         let here = spectra[s].peaks.as_slice();
         by_spec[s]
             .iter()
+            .filter(|&&i| want(i as usize))
             .map(|&i| {
                 let r = &table.rows[i as usize];
                 let (_, mass) = &table.forms[r.form as usize];
@@ -420,7 +422,7 @@ pub(crate) fn add_to_pin(
             || vec![Vec::new(); n_runs],
             |mut acc, s| {
                 let run = run_of(s).min(n_runs - 1);
-                for (i, ions) in spec_rows(s, &first) {
+                for (i, ions) in spec_rows(s, &first, &|i| anchor[i]) {
                     if anchor[i as usize] {
                         acc[run].extend(
                             ions.iter()
@@ -469,7 +471,7 @@ pub(crate) fn add_to_pin(
             || vec![Counts::default(); n_runs * 2],
             |mut acc, s| {
                 let run = run_of(s).min(n_runs - 1);
-                for (i, ions) in spec_rows(s, &cals) {
+                for (i, ions) in spec_rows(s, &cals, &|i| anchor[i] || table.rows[i].decoy) {
                     let i = i as usize;
                     let r = &table.rows[i];
                     let c = &mut acc[run * 2 + fold(r.form)];
@@ -518,7 +520,7 @@ pub(crate) fn add_to_pin(
             .filter(|&s| !by_spec[s].is_empty())
             .map(|s| {
                 let run = run_of(s).min(n_runs - 1);
-                let rows = spec_rows(s, &cals);
+                let rows = spec_rows(s, &cals, &|_| true);
                 let mut outs = Vec::with_capacity(rows.len());
                 let mut terms: Vec<Vec<(f64, f64)>> = Vec::with_capacity(rows.len());
                 for (i, ions) in &rows {

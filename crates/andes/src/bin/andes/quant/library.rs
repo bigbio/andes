@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use model::isomers::bundled_unimod_mass;
 use model::IsomerClass;
 use output::library::{write_library, StoredLibrary};
-use output::quantities::runs::{open_run_quant_table, read_run_quant_mods};
+use output::quantities::runs::{open_run_quant_table, read_run_quant_mods, RunQuantBatches};
 use quant::align::AlignParams;
 use quant::library::{is_donor_psm, Library, LibraryBuilder, PrecursorMeta, PsmIn};
 use rayon::prelude::*;
 
 use super::extract::{split_key, BestForm, DonorPsms};
-use super::scores::{ScoreLoader, SpecIdKeys, MAX_JOIN_MISMATCH};
+use super::scores::{RunScores, ScoreLoader, ScoreSet, SpecIdKeys, MAX_JOIN_MISMATCH};
 use super::{artifact, ENVELOPE_LEN, MS1_SUFFIX, TABLE_SUFFIX};
 
 const META_COLUMNS: [&str; 7] = [
@@ -203,60 +203,14 @@ pub(crate) fn build_and_write_library(
         .iter()
         .map(|s| artifact(dir, s, TABLE_SUFFIX))
         .collect();
-    let open = |r: usize, columns: &[&str]| {
-        let batches = open_run_quant_table(&paths[r], columns)?;
-        if batches.run() != stems[r] {
-            return Err(format!(
-                "{}: the table is of run {:?}, not {:?}",
-                paths[r].display(),
-                batches.run(),
-                stems[r]
-            ));
-        }
-        Ok(batches)
+    let tables = RunTables {
+        paths: &paths,
+        stems,
     };
     let started = std::time::Instant::now();
     let merged = matches!(scores, ScoreLoader::Merged(_));
-    let mut merge = KeyMerge::default();
-    let spec_keys = SpecIdKeys::default();
-    let columns: Vec<&str> = META_COLUMNS
-        .iter()
-        .copied()
-        .chain(merged.then_some("spec_id"))
-        .collect();
     let all_runs: Vec<usize> = (0..stems.len()).collect();
-    for group in all_runs.chunks(PARALLEL_RUNS) {
-        let read: Vec<Result<RunKeys, String>> = group
-            .par_iter()
-            .map(|&r| {
-                let mut run = RunKeys::default();
-                for batch in open(r, &columns)? {
-                    for row in batch? {
-                        run.rows += 1;
-                        if merged {
-                            run.spec.push(spec_keys.key(&row.spec_id));
-                        }
-                        let target = !row.is_decoy;
-                        match run.keys.get_mut(row.precursor_key.as_str()) {
-                            Some(m) => {
-                                if target && !m.has_target {
-                                    *m = KeyMeta::of(&row, r);
-                                }
-                            }
-                            None => {
-                                let meta = KeyMeta::of(&row, r);
-                                run.keys.insert(row.precursor_key, meta);
-                            }
-                        }
-                    }
-                }
-                Ok(run)
-            })
-            .collect();
-        for (&r, run) in group.iter().zip(read) {
-            merge.add(r, run?);
-        }
-    }
+    let merge = read_keys(&tables, merged, &all_runs)?;
     let KeyMerge {
         mut keys,
         seen,
@@ -269,7 +223,8 @@ pub(crate) fn build_and_write_library(
         ScoreLoader::Merged(load) => {
             let set = load(n_spec_ids)?;
             if let Some((a, b, row)) = shared {
-                let id = open(b, &["spec_id"])?
+                let id = tables
+                    .open(b, &["spec_id"])?
                     .flat_map(|batch| batch.into_iter().flatten())
                     .nth(row)
                     .map_or_else(String::new, |r| r.spec_id);
@@ -302,83 +257,19 @@ pub(crate) fn build_and_write_library(
     let mut best = vec![None::<BestForm>; meta.len()];
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let (mut n_psms, mut donor_psms, mut n_joined) = (0usize, 0usize, 0usize);
-    let join = |r: usize| -> Result<RunJoin, String> {
-        let own;
-        let set = match (&merged_scores, &per_run) {
-            (Some(m), _) => m,
-            (None, Some(load)) => {
-                own = load(&stems[r])?;
-                &own
-            }
-            (None, None) => unreachable!("one score source"),
-        };
-        let mut class = IsomerClass::default();
-        let mut run = RunJoin::default();
-        for batch in open(r, &JOIN_COLUMNS)? {
-            for row in batch? {
-                run.rows += 1;
-                let (id, site) = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
-                    format!(
-                        "{}: precursor {:?} changed between two reads of the table",
-                        paths[r].display(),
-                        row.precursor_key
-                    )
-                })?;
-                if row.is_decoy && target_key[id as usize] {
-                    run.shadowed += 1;
-                    continue;
-                }
-                let Some(&j) = set.get(&row.spec_id) else {
-                    if row.is_decoy {
-                        run.unscored_d += 1;
-                    } else {
-                        run.unscored_t += 1;
-                    }
-                    continue;
-                };
-                run.joined += 1;
-                class
-                    .parse_into(&row.peptidoform, resolve)
-                    .map_err(|e| format!("{}: {e}", paths[r].display()))?;
-                if !set.agrees(&j, row.is_decoy, &class) {
-                    run.mismatched += 1;
-                    continue;
-                }
-                let p = PsmIn {
-                    q_gate: j.pooled_q,
-                    run: r as u16,
-                    precursor: id,
-                    rt: row.rt_s,
-                    score: j.score,
-                    q: j.q,
-                    pep: j.pep,
-                    is_decoy: row.is_decoy,
-                    faims_cv: row.faims_cv,
-                    ion_mobility: row.ion_mobility,
-                };
-                let donor = is_donor_psm(&p, donor_q, donor_pep);
-                run.psms
-                    .push((p, site, donor.then(|| row.spec_id.as_str().into())));
-            }
-        }
-        if per_run.is_some() && run.joined == 0 && run.rows > 0 && !set.psms.is_empty() {
-            return Err(format!(
-                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
-                stems[r],
-                set.psms.len(),
-                set.source
-            ));
-        }
-        if run.mismatched as f64 > MAX_JOIN_MISMATCH * run.joined as f64 {
-            return Err(format!(
-                "run {}: {} of {} PSMs joined on SpecId disagree with {} on the peptide, its modifications or the target/decoy label; are these the rescoring results of this run?",
-                stems[r], run.mismatched, run.joined, set.source
-            ));
-        }
-        Ok(run)
+    let inputs = JoinInputs {
+        tables: &tables,
+        merged_scores: &merged_scores,
+        per_run: &per_run,
+        id_of: &id_of,
+        target_key: &target_key,
+        resolve,
+        donor_q,
+        donor_pep,
     };
     for group in all_runs.chunks(PARALLEL_RUNS) {
-        let joined: Vec<Result<RunJoin, String>> = group.par_iter().map(|&r| join(r)).collect();
+        let joined: Vec<Result<RunJoin, String>> =
+            group.par_iter().map(|&r| inputs.join(r)).collect();
         for run in joined {
             let run = run?;
             unscored_t += run.unscored_t;
@@ -488,6 +379,163 @@ pub(crate) fn build_and_write_library(
         dir.join(output::library::ALIGNMENT_FILE).display()
     );
     Ok(stored)
+}
+
+/// The runs' quant tables, opened by run index and checked to be the table of that run.
+struct RunTables<'a> {
+    paths: &'a [PathBuf],
+    stems: &'a [String],
+}
+
+impl RunTables<'_> {
+    fn open(&self, r: usize, columns: &[&str]) -> Result<RunQuantBatches, String> {
+        let batches = open_run_quant_table(&self.paths[r], columns)?;
+        if batches.run() != self.stems[r] {
+            return Err(format!(
+                "{}: the table is of run {:?}, not {:?}",
+                self.paths[r].display(),
+                batches.run(),
+                self.stems[r]
+            ));
+        }
+        Ok(batches)
+    }
+}
+
+/// Every run's precursor keys, and its SpecIds when the scores are one merged result, read
+/// `PARALLEL_RUNS` runs at a time.
+fn read_keys(tables: &RunTables<'_>, merged: bool, all_runs: &[usize]) -> Result<KeyMerge, String> {
+    let mut merge = KeyMerge::default();
+    let spec_keys = SpecIdKeys::default();
+    let columns: Vec<&str> = META_COLUMNS
+        .iter()
+        .copied()
+        .chain(merged.then_some("spec_id"))
+        .collect();
+    for group in all_runs.chunks(PARALLEL_RUNS) {
+        let read: Vec<Result<RunKeys, String>> = group
+            .par_iter()
+            .map(|&r| {
+                let mut run = RunKeys::default();
+                for batch in tables.open(r, &columns)? {
+                    for row in batch? {
+                        run.rows += 1;
+                        if merged {
+                            run.spec.push(spec_keys.key(&row.spec_id));
+                        }
+                        let target = !row.is_decoy;
+                        match run.keys.get_mut(row.precursor_key.as_str()) {
+                            Some(m) => {
+                                if target && !m.has_target {
+                                    *m = KeyMeta::of(&row, r);
+                                }
+                            }
+                            None => {
+                                let meta = KeyMeta::of(&row, r);
+                                run.keys.insert(row.precursor_key, meta);
+                            }
+                        }
+                    }
+                }
+                Ok(run)
+            })
+            .collect();
+        for (&r, run) in group.iter().zip(read) {
+            merge.add(r, run?);
+        }
+    }
+    Ok(merge)
+}
+
+/// What joining one run's PSMs to their rescoring scores reads.
+struct JoinInputs<'a, R> {
+    tables: &'a RunTables<'a>,
+    merged_scores: &'a Option<ScoreSet>,
+    per_run: &'a Option<RunScores<'a>>,
+    id_of: &'a HashMap<&'a str, (u32, u32)>,
+    target_key: &'a [bool],
+    resolve: R,
+    donor_q: f64,
+    donor_pep: Option<f64>,
+}
+
+impl<R: Fn(&str) -> Option<f64> + Sync> JoinInputs<'_, R> {
+    /// Run `r`'s PSMs joined on SpecId to their scores, with the counts of those skipped.
+    fn join(&self, r: usize) -> Result<RunJoin, String> {
+        let own;
+        let set = match (self.merged_scores, self.per_run) {
+            (Some(m), _) => m,
+            (None, Some(load)) => {
+                own = load(&self.tables.stems[r])?;
+                &own
+            }
+            (None, None) => unreachable!("one score source"),
+        };
+        let mut class = IsomerClass::default();
+        let mut run = RunJoin::default();
+        for batch in self.tables.open(r, &JOIN_COLUMNS)? {
+            for row in batch? {
+                run.rows += 1;
+                let (id, site) = *self.id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
+                    format!(
+                        "{}: precursor {:?} changed between two reads of the table",
+                        self.tables.paths[r].display(),
+                        row.precursor_key
+                    )
+                })?;
+                if row.is_decoy && self.target_key[id as usize] {
+                    run.shadowed += 1;
+                    continue;
+                }
+                let Some(&j) = set.get(&row.spec_id) else {
+                    if row.is_decoy {
+                        run.unscored_d += 1;
+                    } else {
+                        run.unscored_t += 1;
+                    }
+                    continue;
+                };
+                run.joined += 1;
+                class
+                    .parse_into(&row.peptidoform, &self.resolve)
+                    .map_err(|e| format!("{}: {e}", self.tables.paths[r].display()))?;
+                if !set.agrees(&j, row.is_decoy, &class) {
+                    run.mismatched += 1;
+                    continue;
+                }
+                let p = PsmIn {
+                    q_gate: j.pooled_q,
+                    run: r as u16,
+                    precursor: id,
+                    rt: row.rt_s,
+                    score: j.score,
+                    q: j.q,
+                    pep: j.pep,
+                    is_decoy: row.is_decoy,
+                    faims_cv: row.faims_cv,
+                    ion_mobility: row.ion_mobility,
+                };
+                let donor = is_donor_psm(&p, self.donor_q, self.donor_pep);
+                run.psms
+                    .push((p, site, donor.then(|| row.spec_id.as_str().into())));
+            }
+        }
+        if self.per_run.is_some() && run.joined == 0 && run.rows > 0 && !set.psms.is_empty() {
+            return Err(format!(
+                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
+                self.tables.stems[r],
+                set.psms.len(),
+                set.source
+            ));
+        }
+        if run.mismatched as f64 > MAX_JOIN_MISMATCH * run.joined as f64 {
+            return Err(format!(
+                "run {}: {} of {} PSMs joined on SpecId disagree with {} on the peptide, its modifications or the target/decoy label; are these the rescoring results of this run?",
+                self.tables.stems[r], run.mismatched, run.joined, set.source
+            ));
+        }
+        Ok(run)
+    }
 }
 
 /// Each site key's precursor id and site index, for joining PSMs to the library.

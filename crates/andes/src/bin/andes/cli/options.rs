@@ -392,6 +392,13 @@ pub(crate) struct SearchArgs {
           help_heading = H_MODES)]
     pub(crate) dia_ms1_tol_ppm: f64,
 
+    /// diaPASEF MS1 gate in mobility (experiment): 1/K0 margin around the scan's mobility slice
+    ///
+    /// With a value, a candidate passes the MS1 gate only when its MS1 peak lies inside the
+    /// MS2 scan's mobility slice widened by this margin (Vs/cm2) on each side.
+    #[arg(long, value_name = "K0", hide = true)]
+    pub(crate) dia_ms1_mobility_margin: Option<f64>,
+
     /// --dia --rescore: drop precursors whose fragments a stronger co-eluting precursor explains
     ///
     /// `F:DRT`, e.g. `0.4:4`, or `auto`. Before the precursor-level q, a precursor leaves the

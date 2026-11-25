@@ -23,6 +23,8 @@ pub(crate) struct RunScans {
     pub ms1: Vec<Ms1Scan>,
     pub ms3: Vec<ProductScan>,
     pub contexts: Vec<ScanContext>,
+    /// 1/K0 per TIMS scan number of a diaPASEF run (empty otherwise).
+    pub scan_mobility: Vec<f32>,
 }
 
 pub(super) struct RunCapture {

@@ -166,6 +166,7 @@ pub(super) fn resolve_search_params(
         }
         params.dia = true;
         params.dia_ms1_tol_ppm = cli.dia_ms1_tol_ppm;
+        params.dia_ms1_mobility_margin = cli.dia_ms1_mobility_margin;
     }
     params.require_nxst_sequon = cli.glyco && cli.glyco_index_sequon_only;
     if params.require_nxst_sequon {

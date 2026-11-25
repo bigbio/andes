@@ -148,6 +148,7 @@ fn parse_streamed(settings: StreamSettings, tx: SyncSender<Vec<Spectrum>>) -> St
             ms1: reader.take_run_ms1(),
             ms3: reader.take_product_scans(),
             contexts: reader.take_scan_contexts(),
+            scan_mobility: Vec::new(),
         };
         Ok((stats, scans))
     } else if file_is_raw {
@@ -166,6 +167,7 @@ fn parse_streamed(settings: StreamSettings, tx: SyncSender<Vec<Spectrum>>) -> St
                 ms1: reader.take_run_ms1(),
                 ms3: reader.take_product_scans(),
                 contexts: reader.take_scan_contexts(),
+                scan_mobility: Vec::new(),
             };
             Ok((stats, scans))
         }
@@ -186,10 +188,12 @@ fn parse_streamed(settings: StreamSettings, tx: SyncSender<Vec<Spectrum>>) -> St
                 .with_ms1_mobility(true)
                 .with_scan_context_capture(capture_context);
             let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+            let scan_mobility = reader.dia_scan_mobility();
             let scans = RunScans {
                 ms1: reader.take_run_ms1(),
                 ms3: Vec::new(),
                 contexts: reader.take_scan_contexts(),
+                scan_mobility,
             };
             Ok((stats, scans))
         }

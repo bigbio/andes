@@ -450,8 +450,9 @@ fn study_rescore(
 /// Stores a run of a DIA study: its pass-1 PIN as `<stem>.pin` and its pass-2 table as
 /// `<stem>.parquet` in `<quant_dir>/dia_pass2/`, the table last (its presence marks a complete
 /// run). `rescore` is the run's Percolator backend and arguments; `None` without rescoring.
-/// `removed` holds the `(FileName, Peptide, charge)` target precursors that --dia-interference
-/// took out of pass 1, stored as `<stem>.removed.tsv` for [`finalize`] (no file when empty).
+/// `removed` holds the `(FileName, Peptide, charge)` precursors, targets and decoys, that
+/// --dia-interference took out of pass 1, stored as `<stem>.removed.tsv` for [`finalize`] (no
+/// file when empty).
 pub(crate) fn store_run(
     quant_dir: &Path,
     spectrum: &Path,
@@ -1213,6 +1214,7 @@ mod tests {
         let removed = HashSet::from([
             ("run01.mzML".to_string(), "K.PEPT[+80]K.A".to_string(), 2u8),
             ("run01.mzML".to_string(), "K.PEPTK.A".to_string(), 3u8),
+            ("run01.mzML".to_string(), "K.TPEPK.A".to_string(), 3u8),
         ]);
         write_removed(&path, &removed).unwrap();
         assert_eq!(read_removed(&path).unwrap(), removed);

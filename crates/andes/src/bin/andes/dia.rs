@@ -1030,7 +1030,8 @@ pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
 }
 
 /// Precursor counts of [`precursor_q`], the best `(score, is decoy)` of every precursor, and the
-/// `(FileName, Peptide, charge)` of the target precursors that interference removal dropped.
+/// `(FileName, Peptide, charge)` of the precursors, of both labels, that interference removal
+/// dropped.
 pub(crate) type PrecursorQ = (
     (usize, usize, usize),
     Vec<(f64, bool)>,
@@ -1170,10 +1171,10 @@ pub(crate) fn precursor_q(
             }
         }
     }
-    let removed_targets = rows
+    let removed_precursors = rows
         .iter()
         .zip(raw)
-        .filter(|(r, _)| removed[r.0 as usize] && !r.2)
+        .filter(|(r, _)| removed[r.0 as usize])
         .map(|(_, n)| n)
         .collect();
     rows.retain(|r| !removed[r.0 as usize]);
@@ -1191,7 +1192,7 @@ pub(crate) fn precursor_q(
         }
     }
     let best = q.iter().flatten().map(|p| (p.0, p.1)).collect();
-    Ok(((n_targets, n_decoys, passing), best, removed_targets))
+    Ok(((n_targets, n_decoys, passing), best, removed_precursors))
 }
 
 /// Best score of each precursor and its precursor-level q: `(best score, is decoy, q)`,

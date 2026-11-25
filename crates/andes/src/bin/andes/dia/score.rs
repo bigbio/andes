@@ -382,9 +382,9 @@ pub(crate) struct PrecursorPin {
 
 /// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
 /// per pass-2 precursor with the learned score (left out when its first round is degenerate),
-/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row. Target rows whose
+/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row. Rows whose
 /// `(FileName, Peptide, charge)` is in `removed` (precursors that --dia-interference took out of
-/// the competition) are left out.
+/// the competition) are left out, targets and decoys alike.
 pub(crate) fn write_precursor_pin(
     pin: &Path,
     out_pin: &Path,
@@ -465,7 +465,7 @@ pub(crate) fn write_precursor_pin(
     let mut left_out = 0usize;
     for i in 0..n {
         use std::fmt::Write as _;
-        if !t.decoy[i] && !removed.is_empty() {
+        if !removed.is_empty() {
             let file = p1.run_file.get(&t.run[i]).cloned().unwrap_or_default();
             if removed.contains(&(file, t.peptide[i].clone(), t.charge[i])) {
                 left_out += 1;
@@ -511,7 +511,7 @@ pub(crate) fn write_precursor_pin(
     if left_out > 0 {
         log::info!(
             target: "dia",
-            "precursor PIN: {left_out} target rows of interference-removed precursors left out"
+            "precursor PIN: {left_out} rows of interference-removed precursors left out"
         );
     }
     log::info!(
@@ -610,7 +610,7 @@ fn pass1_preferred(pass1: &[(f64, bool)], precursor: &[(f64, bool)]) -> Option<S
 ///   `(score, is decoy)` of every pass-1 precursor) by more than the decoy noise at q 0.005
 ///   and 0.01 (`pass1_preferred`).
 ///
-/// Target rows of the precursors in `removed` (by `(FileName, Peptide, charge)`, see
+/// Rows of the precursors in `removed` (by `(FileName, Peptide, charge)`, see
 /// [`write_precursor_pin`]) are left out, so interference removal holds on this path too.
 ///
 /// Any error while writing or rescoring also keeps pass 1.
@@ -1000,12 +1000,17 @@ mod tests {
         let r = rescore_precursors(&pin, &pass2(8), 42, &[], &none, more).unwrap();
         assert_eq!(r.n_q, 150);
         assert_eq!(r.ids.targets.len(), 4);
-        let removed = HashSet::from([("run".to_string(), "K.PEPT2K.A".to_string(), 2u8)]);
+        let removed = HashSet::from([
+            ("run".to_string(), "K.PEPT2K.A".to_string(), 2u8),
+            ("run".to_string(), "K.PEPT3K.A".to_string(), 2u8),
+        ]);
         let r = rescore_precursors(&pin, &pass2(8), 42, &[], &removed, more_again).unwrap();
-        assert_eq!(r.ids.targets.len(), 3, "the removed precursor's target row is left out");
+        assert_eq!(r.ids.targets.len(), 3, "the removed target row is left out");
+        assert_eq!(r.ids.decoys.len(), 3, "the removed decoy row is left out");
         assert!(!r.ids.targets.contains(&"s3".to_string()));
+        assert!(!r.ids.decoys.contains(&"s4".to_string()));
         let text = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
-        assert!(!text.lines().any(|l| l.starts_with("s3\t")));
+        assert!(!text.lines().any(|l| l.starts_with("s3\t") || l.starts_with("s4\t")));
         assert!(!r.ids.learned, "8 rows are too few to train the learned score");
         assert_eq!(r.replaced.len(), 2);
         let degenerate = |_: &Path| -> Result<Rescored, String> {

@@ -74,17 +74,17 @@ pub(crate) fn read_blocks(
         });
         let mut header: Option<_> = Some(on_header);
         let mut first = 0usize;
-        let mut lines: Vec<&str> = Vec::new();
         for block in rx {
             let block = block.map_err(|e| err(&e))?;
-            let text = std::str::from_utf8(&block).map_err(|_| err(&"stream did not contain valid UTF-8"))?;
+            let text = std::str::from_utf8(&block)
+                .map_err(|_| err(&"stream did not contain valid UTF-8"))?;
             let mut body = text;
             if let Some(h) = header.take() {
                 let (line, rest) = text.split_once('\n').unwrap_or((text, ""));
                 h(line.strip_suffix('\r').unwrap_or(line))?;
                 body = rest;
             }
-            lines.clear();
+            let mut lines: Vec<&str> = Vec::new();
             push_lines(body, &mut lines);
             on_block(first, &lines)?;
             first += lines.len();

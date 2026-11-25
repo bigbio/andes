@@ -431,14 +431,6 @@ pub(crate) fn compute_psm_features_with_edge(
         .activation
         .predicts_neutral_losses();
     let predicted = predict_by_ions_with_losses(peptide, 1..=1, predict_losses);
-    let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    let mut b_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
-    let mut y_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
-
-    let mut matched_ions: SmallVec<[MatchedIon; 96]> = SmallVec::new();
-    let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
-
     let feat_tol = scorer.pin_match_tolerance();
     let feature_tol_is_ppm = matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
     let feature_tol = feat_tol.raw_value();
@@ -447,51 +439,15 @@ pub(crate) fn compute_psm_features_with_edge(
     let model_tol_is_ppm = matches!(model_tol, model::tolerance::Tolerance::Ppm(_));
     let model_tol = model_tol.raw_value();
 
-    const H2O_LOSS_DA: f64 = model::mass::H2O;
-    const NH3_LOSS_DA: f64 = model::mass::NH3;
-    let mut neutral_loss_ion_count: u32 = 0;
-
-    for p in &predicted {
-        let tol_da = if feature_tol_is_ppm {
-            p.mz * feature_tol / 1e6
-        } else {
-            feature_tol
-        };
-        if let Some((rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
-            let is_b = matches!(p.kind, IonKind::B | IonKind::C);
-            matched_ions.push((intensity, peak_mz, p.mz, is_b, FragmentIon::of_predicted(p)));
-            matched_ion_ranks.push(rank);
-
-            let pos = (p.position - 1) as usize;
-            match p.kind {
-                IonKind::B | IonKind::C => {
-                    if pos < b_matched.len() {
-                        b_matched[pos] = true;
-                        if !p.is_loss() && rank < b_rank[pos] {
-                            b_rank[pos] = rank;
-                        }
-                    }
-                }
-                IonKind::Y | IonKind::Z => {
-                    if pos < y_matched.len() {
-                        y_matched[pos] = true;
-                        if !p.is_loss() && rank < y_rank[pos] {
-                            y_rank[pos] = rank;
-                        }
-                    }
-                }
-            }
-
-            let ion_charge = 1.0_f64;
-            let h2o_target = p.mz - H2O_LOSS_DA / ion_charge;
-            let nh3_target = p.mz - NH3_LOSS_DA / ion_charge;
-            if scored_spec.nearest_peak_full(h2o_target, tol_da).is_some()
-                || scored_spec.nearest_peak_full(nh3_target, tol_da).is_some()
-            {
-                neutral_loss_ion_count += 1;
-            }
-        }
-    }
+    let MainIonMatches {
+        b_matched,
+        y_matched,
+        b_rank,
+        y_rank,
+        mut matched_ions,
+        matched_ion_ranks,
+        neutral_loss_ion_count,
+    } = main_ion_matches(scored_spec, &predicted, n, feature_tol, feature_tol_is_ppm);
 
     let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
         + y_matched.iter().filter(|&&m| m).count()) as u32;
@@ -556,21 +512,8 @@ pub(crate) fn compute_psm_features_with_edge(
     let chance_match_surprise =
         chance_match_surprise(scored_spec, &matched_ions, feature_tol, feature_tol_is_ppm);
 
-    let mut complementary_sites: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    for i in 1..n {
-        complementary_sites[i - 1] = b_any_matched[i - 1] && y_any_matched[n - i - 1];
-    }
-    let longest_complementary_ladder = longest_run(&complementary_sites);
-
-    let mut complementary_ion_balance = 0.0_f32;
-    for i in 1..n {
-        let rb = b_rank[i - 1];
-        let ry = y_rank[n - i - 1];
-        if rb != u32::MAX && ry != u32::MAX {
-            let diff = (rb as i64 - ry as i64).unsigned_abs() as f32;
-            complementary_ion_balance += 1.0 / (1.0 + diff);
-        }
-    }
+    let (longest_complementary_ladder, complementary_ion_balance) =
+        complementary_ions(&b_any_matched, &y_any_matched, &b_rank, &y_rank, n);
 
     let mean_matched_intensity_rank = if matched_ion_ranks.is_empty() {
         0.0
@@ -688,4 +631,114 @@ pub(crate) fn compute_psm_features_with_edge(
         open_delta: 0.0,
         open_used_shift: false,
     }
+}
+
+/// The singly charged b/y (c/z) ions matched to the spectrum: per backbone site whether each
+/// series matched and its best intensity rank, every matched ion with its rank, and how many
+/// matched ions also have an H2O or NH3 loss peak.
+struct MainIonMatches {
+    b_matched: SmallVec<[bool; 64]>,
+    y_matched: SmallVec<[bool; 64]>,
+    b_rank: SmallVec<[u32; 64]>,
+    y_rank: SmallVec<[u32; 64]>,
+    matched_ions: SmallVec<[MatchedIon; 96]>,
+    matched_ion_ranks: SmallVec<[u32; 96]>,
+    neutral_loss_ion_count: u32,
+}
+
+fn main_ion_matches(
+    scored_spec: &ScoredSpectrum<'_>,
+    predicted: &[scoring_crate::psm::PredictedIon],
+    n: usize,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> MainIonMatches {
+    let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut b_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
+    let mut y_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
+
+    let mut matched_ions: SmallVec<[MatchedIon; 96]> = SmallVec::new();
+    let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
+    const H2O_LOSS_DA: f64 = model::mass::H2O;
+    const NH3_LOSS_DA: f64 = model::mass::NH3;
+    let mut neutral_loss_ion_count: u32 = 0;
+
+    for p in predicted {
+        let tol_da = if feature_tol_is_ppm {
+            p.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        if let Some((rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
+            let is_b = matches!(p.kind, IonKind::B | IonKind::C);
+            matched_ions.push((intensity, peak_mz, p.mz, is_b, FragmentIon::of_predicted(p)));
+            matched_ion_ranks.push(rank);
+
+            let pos = (p.position - 1) as usize;
+            match p.kind {
+                IonKind::B | IonKind::C => {
+                    if pos < b_matched.len() {
+                        b_matched[pos] = true;
+                        if !p.is_loss() && rank < b_rank[pos] {
+                            b_rank[pos] = rank;
+                        }
+                    }
+                }
+                IonKind::Y | IonKind::Z => {
+                    if pos < y_matched.len() {
+                        y_matched[pos] = true;
+                        if !p.is_loss() && rank < y_rank[pos] {
+                            y_rank[pos] = rank;
+                        }
+                    }
+                }
+            }
+
+            let ion_charge = 1.0_f64;
+            let h2o_target = p.mz - H2O_LOSS_DA / ion_charge;
+            let nh3_target = p.mz - NH3_LOSS_DA / ion_charge;
+            if scored_spec.nearest_peak_full(h2o_target, tol_da).is_some()
+                || scored_spec.nearest_peak_full(nh3_target, tol_da).is_some()
+            {
+                neutral_loss_ion_count += 1;
+            }
+        }
+    }
+    MainIonMatches {
+        b_matched,
+        y_matched,
+        b_rank,
+        y_rank,
+        matched_ions,
+        matched_ion_ranks,
+        neutral_loss_ion_count,
+    }
+}
+
+/// The longest run of backbone sites matched by both series, and the rank balance of the
+/// complementary b/y pairs (each pair adds `1 / (1 + |rank_b - rank_y|)`).
+fn complementary_ions(
+    b_any_matched: &[bool],
+    y_any_matched: &[bool],
+    b_rank: &[u32],
+    y_rank: &[u32],
+    n: usize,
+) -> (u32, f32) {
+    let mut complementary_sites: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    for i in 1..n {
+        complementary_sites[i - 1] = b_any_matched[i - 1] && y_any_matched[n - i - 1];
+    }
+    let longest_complementary_ladder = longest_run(&complementary_sites);
+
+    let mut complementary_ion_balance = 0.0_f32;
+    for i in 1..n {
+        let rb = b_rank[i - 1];
+        let ry = y_rank[n - i - 1];
+        if rb != u32::MAX && ry != u32::MAX {
+            let diff = (rb as i64 - ry as i64).unsigned_abs() as f32;
+            complementary_ion_balance += 1.0 / (1.0 + diff);
+        }
+    }
+    (longest_complementary_ladder, complementary_ion_balance)
 }

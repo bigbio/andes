@@ -125,23 +125,51 @@ fn block_text(block: &[u8]) -> (&str, bool) {
     }
 }
 
+/// The parsed rows of a block, the error of its first malformed row, and whether the block
+/// stopped at bytes that are not UTF-8.
+type Parsed<T> = (Vec<T>, Option<PercolatorError>, bool);
+
+/// Hands a block's rows to `on_block`, then returns the error that ended the block, if any.
+fn deliver<T>(
+    parsed: Parsed<T>,
+    on_block: &mut impl FnMut(Vec<T>) -> Result<(), PercolatorError>,
+) -> Result<(), PercolatorError> {
+    let (values, err, invalid) = parsed;
+    on_block(values)?;
+    match err {
+        Some(e) => Err(e),
+        None if invalid => Err(utf8_error()),
+        None => Ok(()),
+    }
+}
+
 /// Reads a Percolator result file from `reader`: `map` turns each data row into a `T` (rows in
-/// parallel), and `on_block` gets the values of each block of rows in file order. A malformed
-/// row, or bytes that are not UTF-8, end the read with the error [`PsmResultReader`] gives on
-/// that row; the values of the rows before it reach `on_block` first.
+/// parallel), and `on_block` gets the values of each block of rows in file order, while the
+/// next block is parsed. A malformed row, or bytes that are not UTF-8, end the read with the
+/// error [`PsmResultReader`] gives on that row; the values of the rows before it reach
+/// `on_block` first.
 ///
 /// [`PsmResultReader`]: super::PsmResultReader
 pub fn read_psm_results<T: Send>(
     reader: impl Read + Send,
     map: impl Fn(PsmResultRow<'_>) -> T + Sync,
-    mut on_block: impl FnMut(Vec<T>) -> Result<(), PercolatorError>,
+    mut on_block: impl FnMut(Vec<T>) -> Result<(), PercolatorError> + Send,
 ) -> Result<(), PercolatorError> {
     let (tx, rx) = sync_channel::<std::io::Result<Vec<u8>>>(1);
     std::thread::scope(|scope| {
         scope.spawn(move || fill_blocks(reader, &tx));
         let mut columns: Option<ResultColumns> = None;
+        let mut pending: Option<Parsed<T>> = None;
         for block in rx {
-            let block = block.map_err(PercolatorError::Io)?;
+            let block = match block {
+                Ok(b) => b,
+                Err(e) => {
+                    if let Some(p) = pending.take() {
+                        deliver(p, &mut on_block)?;
+                    }
+                    return Err(PercolatorError::Io(e));
+                }
+            };
             let (text, invalid) = block_text(&block);
             let (cols, body) = match columns {
                 Some(c) => (c, text),
@@ -155,14 +183,19 @@ pub fn read_psm_results<T: Send>(
             };
             let mut lines: Vec<&str> = Vec::new();
             push_lines(body, &mut lines);
-            let (values, err) = parse_rows(&cols, &lines, &map);
-            on_block(values)?;
-            if let Some(e) = err {
-                return Err(e);
+            let (done, (values, err)) = rayon::join(
+                || pending.take().map_or(Ok(()), |p| deliver(p, &mut on_block)),
+                || parse_rows(&cols, &lines, &map),
+            );
+            done?;
+            let stop = err.is_some() || invalid;
+            pending = Some((values, err, invalid));
+            if stop {
+                break;
             }
-            if invalid {
-                return Err(utf8_error());
-            }
+        }
+        if let Some(p) = pending {
+            deliver(p, &mut on_block)?;
         }
         if columns.is_none() {
             ResultColumns::from_header("")?;

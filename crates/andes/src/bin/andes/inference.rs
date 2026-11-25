@@ -51,7 +51,7 @@ struct ParsedRow<X> {
 pub(crate) fn read_all_with<X: Send>(
     paths: &[PathBuf],
     pick: impl Fn(&output::PsmResultRow<'_>) -> X + Sync,
-    mut take: impl FnMut(&Path, X),
+    mut take: impl FnMut(&Path, X) + Send,
 ) -> Result<PsmFiles, String> {
     let mut all = HashMap::new();
     let mut runs: Vec<String> = Vec::new();
@@ -171,7 +171,7 @@ pub(crate) fn infer_from_files_with<X: Send>(
     psms: &[PathBuf],
     decoy_psms: &[PathBuf],
     pick: impl Fn(&output::PsmResultRow<'_>) -> X + Sync,
-    take: impl FnMut(&Path, X),
+    take: impl FnMut(&Path, X) + Send,
 ) -> Result<(output::Inference, Vec<String>), Box<dyn std::error::Error>> {
     if psms.len() != decoy_psms.len() {
         return Err(format!(
@@ -181,8 +181,10 @@ pub(crate) fn infer_from_files_with<X: Send>(
         )
         .into());
     }
-    let (targets, runs) = read_all_with(psms, pick, take)?;
-    let (decoys, _) = read_all(decoy_psms)?;
+    let (targets, decoys) =
+        rayon::join(|| read_all_with(psms, &pick, take), || read_all(decoy_psms));
+    let (targets, runs) = targets?;
+    let (decoys, _) = decoys?;
     log::debug!(
         target: "inference",
         "read {} target and {} decoy PSMs",

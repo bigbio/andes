@@ -38,7 +38,7 @@
 //! [`MIN_SHARED_PRECURSORS`] in every remaining run) is dropped from the shared set one at a
 //! time, fewest shared first, and left unscaled.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -450,12 +450,16 @@ fn study_rescore(
 /// Stores a run of a DIA study: its pass-1 PIN as `<stem>.pin` and its pass-2 table as
 /// `<stem>.parquet` in `<quant_dir>/dia_pass2/`, the table last (its presence marks a complete
 /// run). `rescore` is the run's Percolator backend and arguments; `None` without rescoring.
+/// `removed` holds the `(FileName, Peptide, charge)` precursors, targets and decoys, that
+/// --dia-interference took out of pass 1, stored as `<stem>.removed.tsv` for [`finalize`] (no
+/// file when empty).
 pub(crate) fn store_run(
     quant_dir: &Path,
     spectrum: &Path,
     pin: &Path,
     table: &Pass2Table,
     rescore: Option<(&PercolatorBackend, &[String])>,
+    removed: &HashSet<(String, String, u8)>,
 ) -> Result<(), String> {
     let runs: BTreeSet<u32> = table.run.iter().copied().collect();
     if runs.len() > 1 {
@@ -473,6 +477,7 @@ pub(crate) fn store_run(
         .map_err(|e| format!("copy {} to {}: {e}", pin.display(), partial.display()))?;
     std::fs::rename(&partial, &pin_out)
         .map_err(|e| format!("rename {}: {e}", partial.display()))?;
+    write_removed(&removed_path(&dir, &stem), removed)?;
     let meta: Vec<(&str, String)> = rescore
         .map(|(b, a)| (RESCORE_KEY, encode_rescore(b, a)))
         .into_iter()
@@ -490,6 +495,47 @@ pub(crate) fn store_run(
         quant_dir.display()
     );
     Ok(())
+}
+
+fn removed_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.removed.tsv"))
+}
+
+/// Writes the removed precursors of [`store_run`] to `path`, one tab-separated
+/// `FileName, Peptide, charge` per line, sorted. Removes `path` when `removed` is empty.
+fn write_removed(path: &Path, removed: &HashSet<(String, String, u8)>) -> Result<(), String> {
+    if removed.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("remove {}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    }
+    let mut v: Vec<_> = removed.iter().collect();
+    v.sort();
+    let text: String = v.iter().map(|(f, p, z)| format!("{f}\t{p}\t{z}\n")).collect();
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reads the file of [`write_removed`]; empty when it does not exist.
+fn read_removed(path: &Path) -> Result<HashSet<(String, String, u8)>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let mut x = l.split('\t');
+            let (f, p, z) = (x.next(), x.next(), x.next().and_then(|z| z.parse().ok()));
+            match (f, p, z) {
+                (Some(f), Some(p), Some(z)) => Ok((f.to_string(), p.to_string(), z)),
+                _ => Err(format!("{}: unreadable line {l:?}", path.display())),
+            }
+        })
+        .collect()
 }
 
 /// Whether `stem` is a DIA run stored in the quant directory (its pass-2 table exists).
@@ -681,7 +727,8 @@ pub(crate) fn finalize(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        crate::dia::score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed)?;
+        let removed = read_removed(&removed_path(&dir, s))?;
+        crate::dia::score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed, &removed)?;
         let has_xfer = t.feature(crate::dia::pass2::XFER_COLUMN).is_some();
         let cands = quant_candidates(&t);
         drop(t);
@@ -818,7 +865,7 @@ fn rescore_run(
     let decoys =
         output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", dpath.display()))?;
     drop(text);
-    let ((nt, nd, n01), _) = crate::dia::precursor_q(pin, &[], &mut map, &decoys)?;
+    let ((nt, nd, n01), _, _) = crate::dia::precursor_q(pin, &[], &mut map, &decoys, None)?;
     log::info!(
         target: "rescore",
         "run {s}: precursor-level q (DIA): {nt} target and {nd} decoy precursors, {n01} at \
@@ -1200,5 +1247,21 @@ mod tests {
             other => panic!("expected the native engine, got {}", other.describe()),
         }
         assert!(decode_rescore("binary").is_err());
+    }
+
+    #[test]
+    fn interference_removed_precursors_reach_finalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = removed_path(dir.path(), "run01");
+        let removed = HashSet::from([
+            ("run01.mzML".to_string(), "K.PEPT[+80]K.A".to_string(), 2u8),
+            ("run01.mzML".to_string(), "K.PEPTK.A".to_string(), 3u8),
+            ("run01.mzML".to_string(), "K.TPEPK.A".to_string(), 3u8),
+        ]);
+        write_removed(&path, &removed).unwrap();
+        assert_eq!(read_removed(&path).unwrap(), removed);
+        write_removed(&path, &HashSet::new()).unwrap();
+        assert!(!path.exists(), "a run without removals keeps no file");
+        assert!(read_removed(&path).unwrap().is_empty());
     }
 }

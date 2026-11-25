@@ -274,7 +274,14 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     let spectrum_paths = &cli.spectrum;
 
     if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
-        crate::dia::study::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+        crate::dia::study::store_run(
+            dir,
+            &spectrum_path,
+            &output_pin_path,
+            &t,
+            None,
+            &Default::default(),
+        )?;
     }
     if cli.dia {
         crate::memory::release_free_memory();

@@ -111,6 +111,7 @@ pub(super) fn rescore_pin(
             decoys: pass1_decoys,
             q_count: pass1_q,
             best: pass1_best,
+            removed: pass1_removed,
         } = pass1;
         rescore_decoy_psms = pass1_decoys;
         let mut results_pin = output_pin_path.clone();
@@ -121,6 +122,7 @@ pub(super) fn rescore_pin(
                 output_pin_path,
                 t,
                 Some((&backend, &user_args)),
+                &pass1_removed,
             )?;
             crate::memory::mark_stage("study tables stored");
             *dia_pass2 = None;
@@ -146,6 +148,7 @@ pub(super) fn rescore_pin(
                 &t,
                 seed,
                 &pass1_best,
+                &pass1_removed,
                 rescore,
                 learned,
             ) {
@@ -210,6 +213,7 @@ struct Pass1 {
     decoys: std::collections::HashMap<String, output::PercolatorPsm>,
     q_count: usize,
     best: Vec<(f64, bool)>,
+    removed: std::collections::HashSet<(String, String, u8)>,
 }
 
 /// Rescores the pass-1 PIN: Percolator, on DIA the RT refit and a second Percolator run when
@@ -239,10 +243,13 @@ fn rescore_pass1(
         output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut q_count = 0;
     let mut best = Vec::new();
+    let mut removed = std::collections::HashSet::new();
     if cli.dia {
-        let ((t, d, n), b) = crate::dia::precursor_q(pin, spectra, &mut map, &decoy_psms)?;
+        let ((t, d, n), b, r) =
+            crate::dia::precursor_q(pin, spectra, &mut map, &decoy_psms, cli.dia_interference)?;
         q_count = n;
         best = b;
+        removed = r;
         crate::memory::mark_stage("precursor q");
         log::info!(
             target: "rescore",
@@ -255,5 +262,6 @@ fn rescore_pass1(
         decoys: decoy_psms,
         q_count,
         best,
+        removed,
     })
 }

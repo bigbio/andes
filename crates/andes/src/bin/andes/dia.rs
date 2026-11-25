@@ -1,4 +1,5 @@
 pub(crate) mod blocks;
+pub(crate) mod interference;
 pub(crate) mod joint;
 pub(crate) mod llr;
 pub(crate) mod pass2;
@@ -22,6 +23,8 @@ use onnx_infer::predictors::spectral::FragmentTolerance;
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
+use crate::dia::interference::removed_keys;
+pub(crate) use crate::dia::interference::Interference;
 use crate::dia::rt::{read_pin, write_pin, NONE};
 
 pub(crate) const COLUMNS: [&str; 16] = [
@@ -1153,8 +1156,14 @@ pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
     }
 }
 
-/// Precursor counts of [`precursor_q`] and the best `(score, is decoy)` of every precursor.
-pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
+/// Precursor counts of [`precursor_q`], the best `(score, is decoy)` of every precursor, and the
+/// `(FileName, Peptide, charge)` of the precursors, of both labels, that interference removal
+/// dropped.
+pub(crate) type PrecursorQ = (
+    (usize, usize, usize),
+    Vec<(f64, bool)>,
+    std::collections::HashSet<(String, String, u8)>,
+);
 
 /// Reports precursor-level q-values for DIA: target-decoy competition over the best
 /// Percolator score of each precursor (run, peptide form, charge), with q = (D + 1) / T
@@ -1164,12 +1173,15 @@ pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
 /// decoys, target precursors at q <= 0.01) and the best `(score, is decoy)` of every precursor,
 /// for comparing the run's precursor-level target-decoy curve at other q-values. A precursor
 /// PIN (one with the `score::PRESENT_COLUMN` column) is keyed by its Peptide string and
-/// charge columns and needs no spectra.
+/// charge columns and needs no spectra. With `interference` (--dia-interference) and a PSM
+/// PIN, [`interference_removed`] drops precursors from the competition first; their target rows
+/// get q = 1.
 pub(crate) fn precursor_q(
     pin: &Path,
     spectra: &[Spectrum],
     targets: &mut HashMap<String, output::PercolatorPsm>,
     decoys: &HashMap<String, output::PercolatorPsm>,
+    interference: Option<Interference>,
 ) -> Result<PrecursorQ, String> {
     let header = {
         use std::io::BufRead;
@@ -1201,7 +1213,9 @@ pub(crate) fn precursor_q(
     };
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
-    type Parsed<'a> = Option<(bool, String, u8, &'a str, f64, &'a str)>;
+    let mut raw: Vec<(String, String, u8)> = Vec::new();
+    let mut line_of: Vec<usize> = Vec::new();
+    type Parsed<'a> = Option<(bool, String, u8, &'a str, f64, &'a str, &'a str, usize)>;
     let targets_ro: &HashMap<String, output::PercolatorPsm> = targets;
     crate::dia::blocks::read_blocks(
         pin,
@@ -1253,20 +1267,45 @@ pub(crate) fn precursor_q(
                         id,
                         score,
                         c_file.map_or("", |i| x[i]),
+                        x[c_pep],
+                        i,
                     )))
                 })
                 .collect();
             for p in parsed {
-                let Some((decoy, peptide, charge, id, score, run)) = p? else {
+                let Some((decoy, peptide, charge, id, score, run, raw_pep, i)) = p? else {
                     continue;
                 };
                 let n = keys.len() as u32;
                 let k = *keys.entry((run.to_string(), peptide, charge)).or_insert(n);
+                raw.push((run.to_string(), raw_pep.to_string(), charge));
                 rows.push((k, score, decoy, id.to_string()));
+                line_of.push(i);
             }
             Ok(())
         },
     )?;
+    let removed = match (&table, interference) {
+        (Some(t), Some(choice)) => {
+            let q0 = precursor_q_values(keys.len(), &rows);
+            removed_keys(&keys, &rows, &line_of, &q0, t, spectra, choice)
+        }
+        _ => vec![false; keys.len()],
+    };
+    for (k, _, decoy, id) in &rows {
+        if removed[*k as usize] && !*decoy {
+            if let Some(p) = targets.get_mut(id) {
+                p.q_value = 1.0;
+            }
+        }
+    }
+    let removed_precursors = rows
+        .iter()
+        .zip(raw)
+        .filter(|(r, _)| removed[r.0 as usize])
+        .map(|(_, n)| n)
+        .collect();
+    rows.retain(|r| !removed[r.0 as usize]);
     let q = precursor_q_values(keys.len(), &rows);
     let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();
     let n_decoys = q.iter().filter(|p| p.is_some_and(|p| p.1)).count();
@@ -1281,7 +1320,7 @@ pub(crate) fn precursor_q(
         }
     }
     let best = q.iter().flatten().map(|p| (p.0, p.1)).collect();
-    Ok(((n_targets, n_decoys, passing), best))
+    Ok(((n_targets, n_decoys, passing), best, removed_precursors))
 }
 
 /// Best score of each precursor and its precursor-level q: `(best score, is decoy, q)`,

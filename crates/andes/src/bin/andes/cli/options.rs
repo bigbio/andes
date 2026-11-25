@@ -395,8 +395,9 @@ pub(crate) struct SearchArgs {
     /// diaPASEF MS1 gate in mobility (experiment): 1/K0 margin around the scan's mobility slice
     ///
     /// With a value, a candidate passes the MS1 gate only when its MS1 peak lies inside the
-    /// MS2 scan's mobility slice widened by this margin (Vs/cm2) on each side.
-    #[arg(long, value_name = "K0", hide = true)]
+    /// MS2 scan's mobility slice widened by this margin (Vs/cm2) on each side; `auto` learns
+    /// the margin from the run's RT calibration anchors.
+    #[arg(long, value_name = "K0|auto", hide = true, value_parser = parse_mobility_margin)]
     pub(crate) dia_ms1_mobility_margin: Option<f64>,
 
     /// --dia --rescore: drop precursors whose fragments a stronger co-eluting precursor explains
@@ -1191,5 +1192,16 @@ impl GeometryArgs {
             max_mass_tiers: self.max_tiers.max(1),
             max_fragment_charge: self.max_fragment_charge.max(1),
         }
+    }
+}
+
+/// `--dia-ms1-mobility-margin`: a non-negative 1/K0 margin, or `auto` (stored as -1).
+fn parse_mobility_margin(v: &str) -> Result<f64, String> {
+    if v == "auto" {
+        return Ok(-1.0);
+    }
+    match v.parse::<f64>() {
+        Ok(m) if m.is_finite() && m >= 0.0 => Ok(m),
+        _ => Err(format!("expected a non-negative 1/K0 margin or `auto`, got `{v}`")),
     }
 }

@@ -10,7 +10,7 @@ JSON line per dataset to `results.jsonl` on the
 | `datasets.json` | the datasets: spectra (a `fetch_spectra.sh` set), database, extra andes flags, and `entrapment` / `quant` evaluation |
 | `run_ci.py` | runs andes + Percolator per dataset, records IDs, cost, true FDP and quant ratios |
 | `test_run_ci.py` | known-answer check of the quantification metrics |
-| `example.jsonl` | two real records (andes `0f630204`, TMT and UPS1, one laptop): the record format, and a file to preview the page with |
+| `example.jsonl` | three real records (andes `0f630204`: TMT and UPS1 on a laptop; `edaed170`: diaPASEF on a 20-CPU desktop): the record format, and a file to preview the page with |
 
 Local run (same as CI):
 
@@ -37,3 +37,9 @@ only comparable on one machine. The default hosted runner (4 vCPU, 16 GB) runs T
 after each merge (`BENCH_DATASETS`, 5 min of benchmark after the build on an 8-thread laptop, more on 4 vCPU), and Astral plus
 `proteobench-astral` (6 runs, 15.5 GB) once a week (`BENCH_WEEKLY_DATASETS`). On a self-hosted
 runner, move sets to `BENCH_DATASETS` to run them after each merge.
+
+`diapasef-lowinput` (one ProteoBench low-input diaPASEF run, 2 GB `.d`, HYE + *Arabidopsis*
+entrapment, T/E 2.163) is not in a default set: on andes `edaed170` it took 73 min wall, 15.4
+CPU-h and 15.9 GB peak RSS on 16 threads, which does not fit the hosted runner. Run it with the
+`datasets` input, or add it to `BENCH_WEEKLY_DATASETS` on a runner with 32 GB or more. Its
+flags are those of the diaPASEF section of `../dia/README.md`.

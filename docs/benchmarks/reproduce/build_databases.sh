@@ -60,6 +60,11 @@ echo "==> entrapment scaling factor (needed to compute a true FDP)"
 # if it differs. Entrapment peptides found in a sample protein are
 # counted as target, matching how run.sh counts hits (../entrap_common.py).
 python3 "$(dirname "$0")/../entrap_common.py" te "$DB/yeast_entrap.fasta"
+
+echo "==> diaPASEF entrapment database (human + yeast + E. coli targets + Arabidopsis entrapment)"
+get UP000006548 "$DB/arath.fasta" "Arabidopsis (reviewed)"
+{ cat "$DB/hye.fasta"; sed 's/^>/>ENTRAP_/' "$DB/arath.fasta"; } > "$DB/hye_arath_entrap.fasta"
+report "$DB/hye_arath_entrap.fasta"
 # ---------------------------------------------------------------- mouse databases
 # The phospho and glyco benchmarks search mouse reviewed proteins plus a peptide-level shuffled
 # entrapment of them (../build_shuffled_entrap.py: each tryptic peptide shuffled with its

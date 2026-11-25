@@ -3,7 +3,7 @@
 #
 #   ./fetch_spectra.sh <data-dir> [dataset ...]
 #
-# Datasets: astral tmt ups1 glyco-mouse phospho astral-lfq   (default: astral tmt ups1)
+# Datasets: astral tmt ups1 glyco-mouse phospho astral-lfq diapasef-lowinput   (default: astral tmt ups1)
 # Resolves real download URLs through the PRIDE API rather than hardcoding FTP paths,
 # so it keeps working when the archive layout changes. Re-running skips files already
 # present, and prints a checksum for each so you can confirm you have what we had.
@@ -50,7 +50,29 @@ json.dump(out, sys.stdout)
 PYEOF
 }
 
+# Sets that are not on PRIDE: files from the ProteoBench server, by exact name (.d.tar.gz is unpacked).
+PB=https://proteobench.cubimed.rub.de/raws
+declare -A URLS=(
+  # ProteoBench low-input diaPASEF module, run O4 (condition B), 1.98 GB; docs/benchmarks/dia/README.md
+  [diapasef-lowinput]="$PB/DIA-timstof-lowinput/10929_16-10-2025_21-24-35_20251016_IMP_RM_timsTOF_IO08_140SPD_HYEB_QC_O4_2uL_THIDSCI002_B-O4.d.tar.gz"
+)
+
 for ds in "${SETS[@]}"; do
+  if [ -n "${URLS[$ds]:-}" ]; then
+    out="$DATA_DIR/$ds"; mkdir -p "$out"; echo "==> $ds (ProteoBench server)"
+    for url in ${URLS[$ds]}; do
+      name=$(basename "$url"); d="$out/${name%.tar.gz}"
+      if [ -d "$d" ] || [ -s "$out/$name" ]; then echo "    have $name"; continue; fi
+      echo "    get  $name"
+      curl -sS --retry 3 --max-time 7200 -L -o "$out/$name.part" "$url"
+      echo "    sha256 $(shasum -a 256 "$out/$name.part" | cut -d' ' -f1)  $name"
+      case "$name" in
+        *.tar.gz) tar xzf "$out/$name.part" -C "$out" && rm "$out/$name.part" ;;
+        *) mv "$out/$name.part" "$out/$name" ;;
+      esac
+    done
+    continue
+  fi
   acc="${ACC[$ds]:?unknown dataset '$ds'}"; pat="${WANT[$ds]}"
   out="$DATA_DIR/$ds"; mkdir -p "$out"
   echo "==> $ds ($acc)"

@@ -8,7 +8,8 @@ name: Benchmarks
 # spectra, cached). The Astral run and the 6-run Astral LFQ set run once a week
 # (BENCH_WEEKLY_DATASETS). Merges that land while a benchmark runs wait, and only the newest
 # one runs next, so a burst of merges gives one benchmark, not one per merge. Merges that touch
-# only docs or the website do not run it (paths filter).
+# only docs or the website do not run it (paths filter). diapasef-lowinput (timsTOF .d) needs
+# about 16 GB RSS and 15 CPU-h, so it is in no default set: see docs/benchmarks/ci/README.md.
 #
 # Runner: repo variable BENCH_RUNNER (JSON, e.g. '["self-hosted","benchmark"]'); default
 # ubuntu-latest (4 vCPU, 16 GB). On a self-hosted runner with a persistent BENCH_DATA, move
@@ -72,8 +73,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build andes (release, native .raw)
-        run: RUSTUP_TOOLCHAIN=stable cargo build --release --locked -p andes --features thermo
+      - name: Build andes (release, native .raw and .d, as release.yml)
+        run: RUSTUP_TOOLCHAIN=stable cargo build --release --locked -p andes --features "thermo timstof"
 
       - name: Datasets to fetch
         id: sets

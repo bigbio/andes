@@ -19,6 +19,13 @@
     "database": "hye.fasta",
     "args": ["--precursor-tol", "10ppm"]
   },
+  "diapasef-lowinput": {
+    "description": "diaPASEF timsTOF, low-input HYE, one run, Arabidopsis entrapment",
+    "fetch": "diapasef-lowinput",
+    "database": "hye_arath_entrap.fasta",
+    "args": ["--dia", "--variable-mods", "Oxidation (M)", "--max-mods", "1", "--charge", "1..5", "--dia-mobility-slices", "16", "--dia-ms1-tol-ppm", "8", "--peak-filter", "100:20"],
+    "entrapment": true
+  },
   "proteobench-astral": {
     "description": "Astral LFQ + MBR, Human/Yeast/E. coli, 6 runs",
     "fetch": "astral-lfq",

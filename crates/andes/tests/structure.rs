@@ -269,7 +269,7 @@ fn write_file_lines_baseline() {
     write_entries("file_lines", &kept);
 }
 
-const MAX_FN_LINES: usize = 300;
+const MAX_FN_LINES: usize = 250;
 
 /// The name of the function a trimmed line declares, after its visibility and qualifiers.
 fn declared_fn(line: &str) -> Option<&str> {
@@ -346,7 +346,7 @@ fn function_lengths_skip_declarations_and_test_items() {
     assert!(!lens.contains_key("f") && !lens.contains_key("h"), "{lens:?}");
 }
 
-/// Functions over 300 lines that are not on `fn_lines.tsv`: new long functions, and listed
+/// Functions over 250 lines that are not on `fn_lines.tsv`: new long functions, and listed
 /// ones that were split under the budget and have grown back over it (docs/dev/structure-checks.md).
 #[test]
 fn no_new_function_over_the_budget() {

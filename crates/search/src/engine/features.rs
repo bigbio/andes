@@ -83,10 +83,10 @@ pub(super) fn predict_frag_with(
     peptide: &Peptide,
     charge: u8,
     cache: Option<&crate::fragments::predictions::FragPredCache>,
-) -> Vec<f64> {
+) -> std::sync::Arc<[f64]> {
     match cache {
         Some(c) => c.intensities(model, peptide, charge),
-        None => predict_frag_intensities(model, peptide, charge),
+        None => predict_frag_intensities(model, peptide, charge).into(),
     }
 }
 
@@ -155,7 +155,7 @@ pub(crate) fn complete_psm_features(
     if peptide.length() < 2 {
         return;
     }
-    let frag_pred: Option<Vec<f64>> = scorer
+    let frag_pred: Option<std::sync::Arc<[f64]>> = scorer
         .param()
         .frag_intensity_model
         .as_deref()
@@ -539,7 +539,7 @@ pub(crate) fn compute_psm_features_with_edge(
     );
 
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
-    let frag_pred: Option<Vec<f64>> = frag_intensity_model
+    let frag_pred: Option<std::sync::Arc<[f64]>> = frag_intensity_model
         .filter(|_| peptide.length() >= 2)
         .map(|g| predict_frag_with(g, peptide, charge, frag_cache));
     let frag_pred_slice = frag_pred.as_deref();

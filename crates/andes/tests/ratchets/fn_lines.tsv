@@ -7,7 +7,6 @@ crates/andes/src/bin/andes/search.rs::run	297
 crates/andes/src/bin/andes/train.rs::run_train	256
 crates/andes/src/bin/andes/train.rs::run_train_from_search	273
 crates/input/src/annotations.rs::add_claims	253
-crates/model-train/src/store/read.rs::read_table_row	276
 crates/model-train/src/store/write.rs::build_stat_batch	264
 crates/output/src/protein/inference.rs::infer_protein_groups	267
 crates/search/src/engine/run.rs::score_spectrum	297

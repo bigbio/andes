@@ -473,81 +473,7 @@ fn read_table_row(
         }
         "precursor_off" => {
             let charge = part_charge.value(i);
-            let prec_arr = batch
-                .column_by_name("precursor_offsets")
-                .ok_or_else(|| TrainError::Other("missing precursor_offsets".into()))?;
-            let list = prec_arr
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| TrainError::Other("precursor_offsets not ListArray".into()))?;
-            if list.is_null(i) {
-                return Ok(());
-            }
-            let sa = list.value(i);
-            let structs = sa.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
-                TrainError::Other("precursor_offsets item not StructArray".into())
-            })?;
-            let rc_col = structs
-                .column_by_name("reduced_charge")
-                .ok_or_else(|| TrainError::Other("missing reduced_charge".into()))?;
-            let off_col = structs
-                .column_by_name("offset")
-                .ok_or_else(|| TrainError::Other("missing offset".into()))?;
-            let tol_is_ppm_col = structs
-                .column_by_name("tol_is_ppm")
-                .ok_or_else(|| TrainError::Other("missing tol_is_ppm".into()))?;
-            let tol_val_col = structs
-                .column_by_name("tol_val")
-                .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
-            let freq_col = structs
-                .column_by_name("frequency")
-                .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
-            let rcs = rc_col
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| {
-                    TrainError::Other("column reduced_charge has unexpected arrow type".into())
-                })?;
-            let offs = off_col
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    TrainError::Other("column offset has unexpected arrow type".into())
-                })?;
-            let tols = tol_is_ppm_col
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| {
-                    TrainError::Other("column tol_is_ppm has unexpected arrow type".into())
-                })?;
-            let tolvs = tol_val_col
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    TrainError::Other("column tol_val has unexpected arrow type".into())
-                })?;
-            let freqs = freq_col
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    TrainError::Other("column frequency has unexpected arrow type".into())
-                })?;
-            let entries = precursor_off_map.entry(charge).or_default();
-            for j in 0..structs.len() {
-                let is_ppm = tols.value(j);
-                let tol_raw = tolvs.value(j) as f64;
-                let tolerance = if is_ppm {
-                    Tolerance::Ppm(tol_raw)
-                } else {
-                    Tolerance::Da(tol_raw)
-                };
-                entries.push(PrecursorOffsetFrequency {
-                    reduced_charge: rcs.value(j),
-                    offset: offs.value(j),
-                    tolerance,
-                    frequency: freqs.value(j),
-                });
-            }
+            read_precursor_offsets(batch, i, charge, precursor_off_map)?;
         }
         "frag_off" => {
             let charge = part_charge.value(i);
@@ -559,78 +485,7 @@ fn read_table_row(
                 seg_num: seg,
             };
 
-            let values_arr = list_col(batch, "values")?;
-            if values_arr.is_null(i) {
-                return Ok(());
-            }
-            let flat_arr = values_arr.value(i);
-            let flat = flat_arr
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| TrainError::Other("frag_off values not Float32Array".into()))?;
-            let len = flat.len();
-            if len % 4 != 0 {
-                return Err(TrainError::Other(format!(
-                    "frag_off flat length {len} not multiple of 4",
-                )));
-            }
-
-            let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
-                Some(col) => {
-                    if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
-                        if list.is_null(i) {
-                            Vec::new()
-                        } else {
-                            let item = list.value(i);
-                            if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
-                                (0..arr.len()).map(|k| arr.value(k)).collect()
-                            } else {
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        Vec::new()
-                    }
-                }
-                None => Vec::new(),
-            };
-
-            let mut frags: Vec<FragmentOffsetFrequency> = Vec::with_capacity(len / 4);
-            let mut j = 0;
-            let mut entry_idx = 0usize;
-            while j + 3 < len {
-                let is_prefix_f = flat.value(j);
-                let ion_charge = flat.value(j + 1) as i32;
-                let offset_bits_f = flat.value(j + 2);
-                let offset_bits = offset_bits_f.to_bits();
-                let frequency = flat.value(j + 3);
-                let lc: u8 = loss_classes_vec
-                    .get(entry_idx)
-                    .map(|&v| v.clamp(0, 255) as u8)
-                    .unwrap_or(0);
-                let ion_type = if is_prefix_f > 0.5 {
-                    IonType::Prefix {
-                        charge: ion_charge,
-                        offset_bits,
-                        loss_class: lc,
-                    }
-                } else if is_prefix_f < -0.5 {
-                    IonType::Noise
-                } else {
-                    IonType::Suffix {
-                        charge: ion_charge,
-                        offset_bits,
-                        loss_class: lc,
-                    }
-                };
-                frags.push(FragmentOffsetFrequency {
-                    ion_type,
-                    frequency,
-                });
-                j += 4;
-                entry_idx += 1;
-            }
-            frag_off_table.insert(part, frags);
+            read_frag_offsets(batch, i, part, frag_off_table)?;
         }
         "rank_dist" => {
             let charge = part_charge.value(i);
@@ -709,6 +564,167 @@ fn read_table_row(
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// Reads a `precursor_off` row's offsets into the entry of `charge`; a null list adds nothing.
+fn read_precursor_offsets(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+    charge: i32,
+    precursor_off_map: &mut FxHashMap<i32, Vec<PrecursorOffsetFrequency>>,
+) -> Result<(), TrainError> {
+    let prec_arr = batch
+        .column_by_name("precursor_offsets")
+        .ok_or_else(|| TrainError::Other("missing precursor_offsets".into()))?;
+    let list = prec_arr
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| TrainError::Other("precursor_offsets not ListArray".into()))?;
+    if list.is_null(i) {
+        return Ok(());
+    }
+    let sa = list.value(i);
+    let structs = sa
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| TrainError::Other("precursor_offsets item not StructArray".into()))?;
+    let rc_col = structs
+        .column_by_name("reduced_charge")
+        .ok_or_else(|| TrainError::Other("missing reduced_charge".into()))?;
+    let off_col = structs
+        .column_by_name("offset")
+        .ok_or_else(|| TrainError::Other("missing offset".into()))?;
+    let tol_is_ppm_col = structs
+        .column_by_name("tol_is_ppm")
+        .ok_or_else(|| TrainError::Other("missing tol_is_ppm".into()))?;
+    let tol_val_col = structs
+        .column_by_name("tol_val")
+        .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
+    let freq_col = structs
+        .column_by_name("frequency")
+        .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
+    let rcs = rc_col
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| {
+            TrainError::Other("column reduced_charge has unexpected arrow type".into())
+        })?;
+    let offs = off_col
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| TrainError::Other("column offset has unexpected arrow type".into()))?;
+    let tols = tol_is_ppm_col
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| TrainError::Other("column tol_is_ppm has unexpected arrow type".into()))?;
+    let tolvs = tol_val_col
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| TrainError::Other("column tol_val has unexpected arrow type".into()))?;
+    let freqs = freq_col
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| TrainError::Other("column frequency has unexpected arrow type".into()))?;
+    let entries = precursor_off_map.entry(charge).or_default();
+    for j in 0..structs.len() {
+        let is_ppm = tols.value(j);
+        let tol_raw = tolvs.value(j) as f64;
+        let tolerance = if is_ppm {
+            Tolerance::Ppm(tol_raw)
+        } else {
+            Tolerance::Da(tol_raw)
+        };
+        entries.push(PrecursorOffsetFrequency {
+            reduced_charge: rcs.value(j),
+            offset: offs.value(j),
+            tolerance,
+            frequency: freqs.value(j),
+        });
+    }
+    Ok(())
+}
+
+/// Reads a `frag_off` row (flat `is_prefix, charge, offset bits, frequency` quadruples and their
+/// loss classes) into the table of `part`; a null value list adds nothing.
+fn read_frag_offsets(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+    part: Partition,
+    frag_off_table: &mut FxHashMap<Partition, Vec<FragmentOffsetFrequency>>,
+) -> Result<(), TrainError> {
+    let values_arr = list_col(batch, "values")?;
+    if values_arr.is_null(i) {
+        return Ok(());
+    }
+    let flat_arr = values_arr.value(i);
+    let flat = flat_arr
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| TrainError::Other("frag_off values not Float32Array".into()))?;
+    let len = flat.len();
+    if len % 4 != 0 {
+        return Err(TrainError::Other(format!(
+            "frag_off flat length {len} not multiple of 4",
+        )));
+    }
+
+    let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
+        Some(col) => {
+            if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
+                if list.is_null(i) {
+                    Vec::new()
+                } else {
+                    let item = list.value(i);
+                    if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
+                        (0..arr.len()).map(|k| arr.value(k)).collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    };
+
+    let mut frags: Vec<FragmentOffsetFrequency> = Vec::with_capacity(len / 4);
+    let mut j = 0;
+    let mut entry_idx = 0usize;
+    while j + 3 < len {
+        let is_prefix_f = flat.value(j);
+        let ion_charge = flat.value(j + 1) as i32;
+        let offset_bits_f = flat.value(j + 2);
+        let offset_bits = offset_bits_f.to_bits();
+        let frequency = flat.value(j + 3);
+        let lc: u8 = loss_classes_vec
+            .get(entry_idx)
+            .map(|&v| v.clamp(0, 255) as u8)
+            .unwrap_or(0);
+        let ion_type = if is_prefix_f > 0.5 {
+            IonType::Prefix {
+                charge: ion_charge,
+                offset_bits,
+                loss_class: lc,
+            }
+        } else if is_prefix_f < -0.5 {
+            IonType::Noise
+        } else {
+            IonType::Suffix {
+                charge: ion_charge,
+                offset_bits,
+                loss_class: lc,
+            }
+        };
+        frags.push(FragmentOffsetFrequency {
+            ion_type,
+            frequency,
+        });
+        j += 4;
+        entry_idx += 1;
+    }
+    frag_off_table.insert(part, frags);
     Ok(())
 }
 

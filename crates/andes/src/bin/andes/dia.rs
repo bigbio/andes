@@ -1,3 +1,4 @@
+pub(crate) mod blocks;
 pub(crate) mod joint;
 pub(crate) mod llr;
 pub(crate) mod pass2;
@@ -79,11 +80,10 @@ pub(crate) fn rerank_pin(
     use std::io::{BufRead, BufReader, BufWriter, Write};
     let t0 = Instant::now();
     let err = |e: std::io::Error| format!("{}: {e}", pin.display());
-    let open = || -> Result<std::io::Lines<BufReader<std::fs::File>>, String> {
-        Ok(BufReader::new(std::fs::File::open(pin).map_err(err)?).lines())
+    let header = {
+        let mut lines = BufReader::new(std::fs::File::open(pin).map_err(err)?).lines();
+        lines.next().transpose().map_err(err)?.unwrap_or_default()
     };
-    let mut lines = open()?;
-    let header = lines.next().transpose().map_err(err)?.unwrap_or_default();
     let h: Vec<&str> = header.split('\t').collect();
     let at = |n: &str| h.iter().position(|c| *c == n);
     let (Some(c_scan), Some(c_raw), Some(c_ms2)) =
@@ -102,59 +102,97 @@ pub(crate) fn rerank_pin(
         .max(c_run.unwrap_or(0))
         + 1;
     let mut group_of: HashMap<String, u32> = HashMap::new();
-    let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut key = String::new();
+    let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut group = Vec::new();
     let mut raw = Vec::new();
     let mut ms2 = Vec::new();
     let mut rt_diff = Vec::new();
     let mut target = Vec::new();
     let mut run = Vec::new();
-    for l in lines {
-        let l = l.map_err(err)?;
-        if l.is_empty() {
-            continue;
-        }
-        let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
-        if x.len() < need {
-            return Err(format!("{}: short row while re-ranking", pin.display()));
-        }
-        let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
-        key.clear();
-        key.push_str(spectrum_key(x[0], x[c_scan]));
-        key.push('\t');
-        key.push_str(x[c_scan]);
-        let g = match group_of.get(&key) {
-            Some(&g) => g,
-            None => {
-                let g = group_of.len() as u32;
-                group_of.insert(key.clone(), g);
-                g
-            }
-        };
-        group.push(g);
-        raw.push(r.unwrap_or(f64::NAN));
-        ms2.push(m.unwrap_or(f64::NAN));
-        if let Some((cd, cm)) = c_rt {
-            let missing = x[cm].parse::<f64>() != Ok(0.0);
-            rt_diff.push(if missing {
-                f64::NAN
-            } else {
-                x[cd].parse::<f64>().unwrap_or(f64::NAN)
-            });
-            target.push(c_label.is_some_and(|c| x[c] == "1"));
-            let name = c_run.map_or("", |c| x[c]);
-            let id = match run_of.get(name) {
-                Some(&id) => id,
-                None => {
-                    let id = run_of.len() as u32;
-                    run_of.insert(name.to_string(), id);
-                    id
-                }
-            };
-            run.push(id);
-        }
+    struct Row<'a> {
+        spectrum: &'a str,
+        scan: &'a str,
+        raw: f64,
+        ms2: f64,
+        rt_diff: f64,
+        target: bool,
+        run: &'a str,
     }
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |_, lines| {
+            let parsed: Vec<Option<Row<'_>>> = lines
+                .par_iter()
+                .map(|l| {
+                    let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
+                    if x.len() < need {
+                        return None;
+                    }
+                    let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
+                    let (rt_diff, target, run) = match c_rt {
+                        Some((cd, cm)) => {
+                            let missing = x[cm].parse::<f64>() != Ok(0.0);
+                            (
+                                if missing {
+                                    f64::NAN
+                                } else {
+                                    x[cd].parse::<f64>().unwrap_or(f64::NAN)
+                                },
+                                c_label.is_some_and(|c| x[c] == "1"),
+                                c_run.map_or("", |c| x[c]),
+                            )
+                        }
+                        None => (f64::NAN, false, ""),
+                    };
+                    Some(Row {
+                        spectrum: spectrum_key(x[0], x[c_scan]),
+                        scan: x[c_scan],
+                        raw: r.unwrap_or(f64::NAN),
+                        ms2: m.unwrap_or(f64::NAN),
+                        rt_diff,
+                        target,
+                        run,
+                    })
+                })
+                .collect();
+            for r in parsed {
+                let Some(r) = r else {
+                    return Err(format!("{}: short row while re-ranking", pin.display()));
+                };
+                key.clear();
+                key.push_str(r.spectrum);
+                key.push('\t');
+                key.push_str(r.scan);
+                let g = match group_of.get(&key) {
+                    Some(&g) => g,
+                    None => {
+                        let g = group_of.len() as u32;
+                        group_of.insert(key.clone(), g);
+                        g
+                    }
+                };
+                group.push(g);
+                raw.push(r.raw);
+                ms2.push(r.ms2);
+                if c_rt.is_some() {
+                    rt_diff.push(r.rt_diff);
+                    target.push(r.target);
+                    let id = match run_of.get(r.run) {
+                        Some(&id) => id,
+                        None => {
+                            let id = run_of.len() as u32;
+                            run_of.insert(r.run.to_string(), id);
+                            id
+                        }
+                    };
+                    run.push(id);
+                }
+            }
+            Ok(())
+        },
+    )?;
     drop(group_of);
     let n_rows = group.len();
     let z = |v: &[f64]| -> Vec<f64> {
@@ -210,31 +248,40 @@ pub(crate) fn rerank_pin(
         let mut w = BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
         w.write_all(header.as_bytes()).map_err(io)?;
         w.write_all(b"\n").map_err(io)?;
-        let mut lines = open()?;
-        lines.next().transpose().map_err(err)?;
-        let mut row = 0usize;
-        for l in lines {
-            let l = l.map_err(err)?;
-            if l.is_empty() {
-                continue;
-            }
-            match keep_row.get(row) {
-                Some(true) => {
-                    w.write_all(l.as_bytes()).map_err(io)?;
-                    w.write_all(b"\n").map_err(io)?;
-                }
-                Some(false) => {
-                    if want_dropped {
-                        dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
-                    }
-                }
-                None => {
+        let mut rows = 0usize;
+        crate::dia::blocks::read_blocks(
+            pin,
+            |_| Ok(()),
+            |first, lines| {
+                if first + lines.len() > n_rows {
                     return Err(format!("{}: changed while re-ranking", pin.display()));
                 }
-            }
-            row += 1;
-        }
-        if row != n_rows {
+                let parts: Vec<(String, Vec<String>)> = lines
+                    .par_chunks(crate::dia::blocks::LINES_PER_TASK)
+                    .enumerate()
+                    .map(|(c, chunk)| {
+                        let mut buf = String::new();
+                        let mut gone = Vec::new();
+                        for (j, l) in chunk.iter().enumerate() {
+                            if keep_row[first + c * crate::dia::blocks::LINES_PER_TASK + j] {
+                                buf.push_str(l);
+                                buf.push('\n');
+                            } else if want_dropped {
+                                gone.push(l.split('\t').next().unwrap_or_default().to_string());
+                            }
+                        }
+                        (buf, gone)
+                    })
+                    .collect();
+                for (buf, gone) in parts {
+                    w.write_all(buf.as_bytes()).map_err(io)?;
+                    dropped.extend(gone);
+                }
+                rows = first + lines.len();
+                Ok(())
+            },
+        )?;
+        if rows != n_rows {
             return Err(format!("{}: changed while re-ranking", pin.display()));
         }
         w.flush().map_err(io)?;

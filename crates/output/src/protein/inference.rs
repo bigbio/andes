@@ -215,13 +215,86 @@ fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
     }
 }
 
+/// What the accepted target PSMs say about each target group: its PSM count, the accepted
+/// peptides, the accessions its PSMs name and the accepted peptides of each accession.
+struct GroupEvidence {
+    psms: Vec<usize>,
+    accepted_peps: BTreeSet<usize>,
+    named: Vec<BTreeSet<String>>,
+    per_accession: Vec<BTreeMap<String, BTreeSet<usize>>>,
+}
+
+/// A PSM's group, peptide, whether it is accepted, and the accessions it names there.
+type Evidence<'a> = (usize, usize, bool, Vec<&'a str>);
+
+/// [`GroupEvidence`] of `n_groups` groups: each PSM is mapped to its peptide (`peptides.0`),
+/// that peptide's group (`peptides.1`) and the accessions `names(accession, group)` keeps, in
+/// parallel passes; the counts and set unions do not depend on the order PSMs are added in.
+fn group_evidence(
+    targets: &HashMap<String, PercolatorPsm>,
+    n_groups: usize,
+    peptides: (&HashMap<&str, usize>, &HashMap<usize, usize>),
+    accepted: &(impl Fn(&str) -> bool + Sync),
+    names: &(impl Fn(&str, usize) -> bool + Sync),
+) -> GroupEvidence {
+    let (pep_index, pep_owner) = peptides;
+    let mut ev = GroupEvidence {
+        psms: vec![0usize; n_groups],
+        accepted_peps: BTreeSet::new(),
+        named: vec![BTreeSet::new(); n_groups],
+        per_accession: vec![BTreeMap::new(); n_groups],
+    };
+    let rows: Vec<(&String, &PercolatorPsm)> = targets.iter().collect();
+    for chunk in rows.chunks(PSMS_PER_PASS) {
+        let found: Vec<Option<Evidence<'_>>> = chunk
+            .par_iter()
+            .with_min_len(1024)
+            .map(|&(id, p)| {
+                let &pep = pep_index.get(bare_sequence(&p.peptide).as_str())?;
+                let &g = pep_owner.get(&pep)?;
+                let kept: Vec<&str> = p
+                    .proteins
+                    .split(';')
+                    .filter(|a| !a.is_empty() && names(a, g))
+                    .collect();
+                Some((g, pep, accepted(id), kept))
+            })
+            .collect();
+        for (g, pep, ok, kept) in found.into_iter().flatten() {
+            if ok {
+                ev.psms[g] += 1;
+                ev.accepted_peps.insert(pep);
+            }
+            for a in kept {
+                if !ev.named[g].contains(a) {
+                    ev.named[g].insert(a.to_string());
+                }
+                if ok {
+                    match ev.per_accession[g].get_mut(a) {
+                        Some(peps) => {
+                            peps.insert(pep);
+                        }
+                        None => {
+                            ev.per_accession[g].insert(a.to_string(), BTreeSet::from([pep]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ev
+}
+
+/// Target PSMs [`group_evidence`] maps in one parallel pass.
+const PSMS_PER_PASS: usize = 1 << 20;
+
 /// Infers protein groups and their q-values by picked target-decoy competition
 /// [cite:savitski2015_picked_fdr].
 pub fn infer_protein_groups(
     targets: &HashMap<String, PercolatorPsm>,
     decoys: &HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
-    accepted: impl Fn(&str) -> bool,
+    accepted: impl Fn(&str) -> bool + Sync,
 ) -> Inference {
     let proteins: HashMap<&str, &Protein> = idx
         .db
@@ -284,14 +357,15 @@ pub fn infer_protein_groups(
         || parsimony(rows(targets, false)),
         || parsimony(rows(decoys, true)),
     );
+    log::debug!(
+        target: "inference",
+        "parsimony: {} target, {} decoy groups",
+        target.groups.len(),
+        decoy.groups.len()
+    );
 
     let (q_of, decoy_q) = picked_group_q(&target, &decoy);
 
-    let mut psms = vec![0usize; target.groups.len()];
-    let mut accepted_peps: BTreeSet<usize> = BTreeSet::new();
-    let mut named: Vec<BTreeSet<String>> = vec![BTreeSet::new(); target.groups.len()];
-    let mut per_accession: Vec<BTreeMap<String, BTreeSet<usize>>> =
-        vec![BTreeMap::new(); target.groups.len()];
     let pep_index: HashMap<&str, usize> = target
         .peptides
         .iter()
@@ -304,36 +378,24 @@ pub fn infer_protein_groups(
             pep_owner.insert(p, g);
         }
     }
-    for (id, p) in targets {
-        let Some(&g) = pep_index
-            .get(bare_sequence(&p.peptide).as_str())
-            .and_then(|i| pep_owner.get(i))
-        else {
-            continue;
-        };
-        let pep = pep_index[bare_sequence(&p.peptide).as_str()];
-        let ok = accepted(id);
-        if ok {
-            psms[g] += 1;
-            accepted_peps.insert(pep);
-        }
-        for a in p
-            .proteins
-            .split(';')
-            .filter(|a| !a.is_empty() && !knockoff(a) && !idx.is_decoy_accession(a))
-        {
-            if target.groups[g].families.contains(&family_of(a)) {
-                named[g].insert(a.to_string());
-                if ok {
-                    per_accession[g]
-                        .entry(a.to_string())
-                        .or_default()
-                        .insert(pep);
-                }
-            }
-        }
-    }
+    let GroupEvidence {
+        psms,
+        accepted_peps,
+        named,
+        per_accession,
+    } = group_evidence(
+        targets,
+        target.groups.len(),
+        (&pep_index, &pep_owner),
+        &accepted,
+        &|a: &str, g: usize| {
+            !knockoff(a)
+                && !idx.is_decoy_accession(a)
+                && target.groups[g].families.contains(&family_of(a))
+        },
+    );
 
+    log::debug!(target: "inference", "PSMs counted per group");
     let lead_of = |g: usize| -> String {
         let fams = &target.groups[g].families;
         let reference = named[g].iter().find(|a| {

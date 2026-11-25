@@ -17,6 +17,11 @@ pub use statistics::{
     SpectraTally, SummaryContext,
 };
 
+pub mod report;
+pub use report::{
+    CountRow, InputFile, ParamRow, Reference, RunReport, StageRow, RUN_REPORT_SCHEMA_MAJOR,
+};
+
 pub mod qpx;
 pub use qpx::{omitted_psm_rows, write_qpx};
 

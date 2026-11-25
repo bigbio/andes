@@ -992,14 +992,18 @@ fn signed(v: f64) -> String {
     format!("{r:+.1}").replace('-', "−")
 }
 
+/// Writes the run summary, then `extra` (the run report's sections, or nothing), to `path`
+/// through a partial file.
 pub fn write_statistics_log(
     stats: &RunStatistics,
     summary: Option<&IdentificationSummary>,
+    extra: &str,
     path: &Path,
 ) -> io::Result<()> {
     crate::atomic::write_atomic(path, |path| {
         let mut f = File::create(path)?;
-        f.write_all(stats.render_with(summary).as_bytes())
+        f.write_all(stats.render_with(summary).as_bytes())?;
+        f.write_all(extra.as_bytes())
     })
 }
 

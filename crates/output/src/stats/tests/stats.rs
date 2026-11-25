@@ -15,7 +15,7 @@ fn statistics_log_is_written_through_a_partial_file() {
         unmodified_target_psms: 2,
         ptm_counts: Vec::new(),
     };
-    write_statistics_log(&stats, None, &path).unwrap();
+    write_statistics_log(&stats, None, "", &path).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), stats.render());
     assert!(!crate::atomic::partial(&path).exists());
 }

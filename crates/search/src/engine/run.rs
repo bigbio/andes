@@ -162,10 +162,13 @@ impl<'a> PreparedSearch<'a> {
                 }
             }
         }
-        for (queue, pool) in merged.iter_mut().zip(&pools) {
-            queue.trim_to_capacity(params.top_n_psms_per_spectrum);
-            recalibrate_strong_over_spectrum(queue, pool);
-        }
+        merged
+            .par_iter_mut()
+            .zip(pools.par_iter())
+            .for_each(|(queue, pool)| {
+                queue.trim_to_capacity(params.top_n_psms_per_spectrum);
+                recalibrate_strong_over_spectrum(queue, pool);
+            });
         if complete_later {
             self.complete_kept_features(spectra, &mut merged);
         }

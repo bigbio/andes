@@ -791,7 +791,7 @@ impl PartialEq for Ranked {
 impl Eq for Ranked {}
 impl PartialOrd for Ranked {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.order(other))
+        Some(self.cmp(other))
     }
 }
 impl Ord for Ranked {

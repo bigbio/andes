@@ -242,7 +242,7 @@ pub(crate) fn nominate(
                         let neutral = if is_b { prefix } else { total - prefix + H2O };
                         let mz = (neutral + f64::from(z) * PROTON) / f64::from(z);
                         let p = pred.get(site * layout.len() + k).copied().unwrap_or(0.0);
-                        ions.push((mz, p.max(0.0)));
+                        ions.push((mz, if p > 0.0 { p } else { 0.0 }));
                     }
                 }
                 ions.sort_by(|a, b| b.1.total_cmp(&a.1));

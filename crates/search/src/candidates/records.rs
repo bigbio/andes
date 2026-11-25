@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::candidates::enumerate_candidates;
+use rayon::prelude::*;
+
+use super::{candidate_has_nxst_sequon, enumerate_protein, Candidate};
+use crate::decoy::is_decoy_accession_affix;
 use crate::index::SearchIndex;
 use crate::params::SearchParams;
 
@@ -60,6 +63,13 @@ impl IndexRecord {
     }
 }
 
+/// Proteins digested per parallel block of `base_peptide_records`: each block's records join the
+/// result before the next block starts, so the records are held about once, not twice.
+const DIGEST_BLOCK_PROTEINS: usize = 1024;
+
+/// The unmodified candidates of `idx` as index records, in protein order: the order
+/// `enumerate_candidates` yields them in. The proteins of each block are digested in parallel
+/// and their records are appended in protein order.
 pub fn base_peptide_records(
     idx: &SearchIndex,
     params: &SearchParams,
@@ -70,38 +80,58 @@ pub fn base_peptide_records(
         max_label_sites: 0,
         ..params.clone()
     };
-
-    enumerate_candidates(idx, &base_params, decoy_prefix)
-        .map(|c| {
-            let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
-            let mut f: u16 = 0;
-            if c.is_decoy {
-                f |= flags::IS_DECOY;
-            }
-            if c.is_protein_n_term {
-                f |= flags::IS_PROTEIN_N_TERM;
-            }
-            if c.is_protein_c_term {
-                f |= flags::IS_PROTEIN_C_TERM;
-            }
-            debug_assert!(
-                c.protein_index <= u32::MAX as usize,
-                "protein_index overflows u32"
-            );
-            debug_assert!(
-                c.start_offset_in_protein <= u32::MAX as usize,
-                "start_offset_in_protein overflows u32"
-            );
-            IndexRecord {
-                mass_milli,
-                protein_index: c.protein_index as u32,
-                start_offset: c.start_offset_in_protein as u32,
-                length: c.peptide.residues.len() as u16,
-                flags: f,
-            }
-        })
-        .collect()
+    let suffix = idx.decoy_suffix.as_deref();
+    let require_sequon = base_params.require_nxst_sequon;
+    let mut records = Vec::new();
+    for (block_idx, block) in idx.db.proteins.chunks(DIGEST_BLOCK_PROTEINS).enumerate() {
+        let first = block_idx * DIGEST_BLOCK_PROTEINS;
+        let block_records: Vec<IndexRecord> = block
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(i, protein)| {
+                let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
+                enumerate_protein(protein, first + i, is_decoy, &base_params)
+                    .into_iter()
+                    .filter(|c| !require_sequon || candidate_has_nxst_sequon(c))
+                    .map(|c| index_record(&c))
+            })
+            .collect();
+        records.extend(block_records);
+    }
+    records
 }
+
+fn index_record(c: &Candidate) -> IndexRecord {
+    let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
+    let mut f: u16 = 0;
+    if c.is_decoy {
+        f |= flags::IS_DECOY;
+    }
+    if c.is_protein_n_term {
+        f |= flags::IS_PROTEIN_N_TERM;
+    }
+    if c.is_protein_c_term {
+        f |= flags::IS_PROTEIN_C_TERM;
+    }
+    debug_assert!(
+        c.protein_index <= u32::MAX as usize,
+        "protein_index overflows u32"
+    );
+    debug_assert!(
+        c.start_offset_in_protein <= u32::MAX as usize,
+        "start_offset_in_protein overflows u32"
+    );
+    IndexRecord {
+        mass_milli,
+        protein_index: c.protein_index as u32,
+        start_offset: c.start_offset_in_protein as u32,
+        length: c.peptide.residues.len() as u16,
+        flags: f,
+    }
+}
+
+/// Records encoded per write: bounds the encode buffer at 20 MB.
+const ENCODE_BLOCK_RECORDS: usize = 1 << 20;
 
 pub fn build_base_peptide_index<W: Write>(
     idx: &SearchIndex,
@@ -110,14 +140,20 @@ pub fn build_base_peptide_index<W: Write>(
     out: &mut W,
 ) -> io::Result<usize> {
     let mut records = base_peptide_records(idx, params, decoy_prefix);
-    records.sort_by_key(|r| r.mass_milli);
+    records.par_sort_by_key(|r| r.mass_milli);
 
     out.write_all(INDEX_MAGIC)?;
     out.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
 
     let n = records.len();
-    for rec in &records {
-        out.write_all(&rec.to_bytes())?;
+    let mut buf = vec![0u8; ENCODE_BLOCK_RECORDS.min(n) * INDEX_RECORD_SIZE];
+    for block in records.chunks(ENCODE_BLOCK_RECORDS) {
+        let bytes = &mut buf[..block.len() * INDEX_RECORD_SIZE];
+        bytes
+            .par_chunks_mut(INDEX_RECORD_SIZE)
+            .zip(block.par_iter())
+            .for_each(|(dst, rec)| dst.copy_from_slice(&rec.to_bytes()));
+        out.write_all(bytes)?;
     }
     Ok(n)
 }

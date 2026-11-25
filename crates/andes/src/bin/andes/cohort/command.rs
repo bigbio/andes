@@ -630,6 +630,36 @@ fn pin_of(table: &Path) -> PathBuf {
     ))
 }
 
+/// The Percolator models of the inter-links: the link classes each one scores and the PIN
+/// features it leaves out. The gap to the next candidate pair is always left out. When the
+/// PINs carry fragment-intensity features (`--predict ms2`), `InterAmbiguous` gets a model of
+/// its own without them: a peptide's fragment intensities confirm the peptide but not which of
+/// its near-identical proteins it came from, which is what the class is uncertain about.
+fn inter_models(
+    tables: &[PathBuf],
+) -> Result<Vec<(Vec<xl::rollup::LinkClass>, Vec<&'static str>)>, Box<dyn Error>> {
+    use std::io::BufRead;
+    use xl::rollup::LinkClass::{Inter, InterAmbiguous};
+    let gap = crate::xl::fdr::GAP_FEATURES.to_vec();
+    let mut header = String::new();
+    if let Some(pin) = tables.first().map(|t| pin_of(t)).filter(|p| p.exists()) {
+        std::io::BufReader::new(
+            std::fs::File::open(&pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
+        )
+        .read_line(&mut header)?;
+    }
+    let has_ms2 = header
+        .trim_end()
+        .split('\t')
+        .any(|c| crate::xl::ms2::FEATURES.contains(&c));
+    if !has_ms2 {
+        return Ok(vec![(vec![Inter, InterAmbiguous], gap)]);
+    }
+    let mut without = gap.clone();
+    without.extend(crate::xl::ms2::FEATURES);
+    Ok(vec![(vec![Inter], gap), (vec![InterAmbiguous], without)])
+}
+
 /// Replace the pair score of the CSMs of `classes` with the score of one Percolator model
 /// trained on all CSMs of `tables` (their sibling PINs pooled, the `dropped` features left
 /// out), so that their q-values use the evidence of the whole group. Does nothing, with a
@@ -855,16 +885,9 @@ fn xl_fdr_tables(
     match database {
         Some(db) => {
             flag_ambiguous(&mut csms, db)?;
-            rescore(
-                tables,
-                &mut csms,
-                &[
-                    xl::rollup::LinkClass::Inter,
-                    xl::rollup::LinkClass::InterAmbiguous,
-                ],
-                &crate::xl::fdr::GAP_FEATURES,
-                "inter-links",
-            )?;
+            for (classes, dropped) in inter_models(tables)? {
+                rescore(tables, &mut csms, &classes, &dropped, "inter-links")?;
+            }
         }
         None => log::warn!(
             target: "cohort",

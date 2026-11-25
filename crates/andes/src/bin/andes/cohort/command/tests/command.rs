@@ -344,3 +344,37 @@ fn each_project_share_is_counted_at_the_pooled_cuts() {
     assert_eq!(rows.len(), 6);
     assert_eq!(project_of("PXD1.run.with.dots", &Projects::new()), "PXD1");
 }
+
+#[test]
+fn ambiguous_inter_links_are_rescored_without_the_fragment_intensity_features() {
+    let t = tempfile::tempdir().unwrap();
+    let table = t.path().join("A.r1.xl.tsv");
+    let pin = pin_of(&table);
+    let mut head = vec!["SpecId", "Label", "ScanNr", "pair_score"];
+    head.extend(crate::xl::fdr::GAP_FEATURES);
+    std::fs::write(&pin, format!("{}\tPeptide\tProteins\n", head.join("\t"))).unwrap();
+    assert_eq!(
+        inter_models(&[table.clone()]).unwrap(),
+        vec![(
+            vec![
+                xl::rollup::LinkClass::Inter,
+                xl::rollup::LinkClass::InterAmbiguous
+            ],
+            crate::xl::fdr::GAP_FEATURES.to_vec()
+        )]
+    );
+    head.extend(crate::xl::ms2::FEATURES);
+    std::fs::write(&pin, format!("{}\tPeptide\tProteins\n", head.join("\t"))).unwrap();
+    let mut without = crate::xl::fdr::GAP_FEATURES.to_vec();
+    without.extend(crate::xl::ms2::FEATURES);
+    assert_eq!(
+        inter_models(&[table]).unwrap(),
+        vec![
+            (
+                vec![xl::rollup::LinkClass::Inter],
+                crate::xl::fdr::GAP_FEATURES.to_vec()
+            ),
+            (vec![xl::rollup::LinkClass::InterAmbiguous], without),
+        ]
+    );
+}

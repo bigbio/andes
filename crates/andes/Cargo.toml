@@ -35,9 +35,9 @@ parquet = "60"
 # `--output-pin`.
 tempfile = "3.10"
 
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 # `malloc_trim` after the protein inference of `quant finalize` and between the stages of a
-# `--dia` search.
+# `--dia` search (Linux with glibc), and `getrusage` for the run report's peak memory.
 libc = "0.2"
 
 [features]

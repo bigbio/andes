@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use model::stats::{median_mut, Even};
 
@@ -63,7 +64,7 @@ struct Source {
 /// per cleavage site and ion of `ions`, site-major.
 pub(crate) struct PredictedMs2 {
     pub(crate) ions: Vec<onnx_infer::predictors::spectral::Ion>,
-    pair: HashMap<(u32, u8), u32>,
+    pair: FxHashMap<(u32, u8), u32>,
     values: Vec<Vec<f32>>,
     /// The andes-rt source's raw (uncalibrated) prediction of every peptidoform of the PIN
     /// table, by form id (NaN where it has none); empty without that source.
@@ -406,7 +407,7 @@ impl Predictors {
                     ));
                     run_cals.push(cal.clone());
                     if let Some(c) = cal {
-                        let fold_of: HashMap<usize, usize> = anchor_pts
+                        let fold_of: FxHashMap<usize, usize> = anchor_pts
                             .iter()
                             .map(|&(i, _, _)| (i, rt_fold(&table.rows[i])))
                             .collect();
@@ -538,24 +539,30 @@ impl Predictors {
     ) -> Result<(Vec<Vec<f64>>, String), String> {
         let pred = src.pred.as_ref();
         let forms = &table.forms;
-        let mut fz_ix: HashMap<(u32, u8), u32> = HashMap::new();
+        let located = |r: &PinRow| r.form != NONE && r.spec != NONE && r.charge != 0;
+        let no_peaks = table
+            .rows
+            .par_iter()
+            .filter(|r| located(r) && spectra[r.spec as usize].peaks.is_empty())
+            .count();
+        let wanted: Vec<bool> = table
+            .rows
+            .par_iter()
+            .map(|r| {
+                located(r)
+                    && !spectra[r.spec as usize].peaks.is_empty()
+                    && pred.supports_ms2(&forms[r.form as usize].0, r.charge)
+            })
+            .collect();
+        let mut fz_ix: FxHashMap<(u32, u8), u32> = FxHashMap::default();
         let mut fz: Vec<(u32, u8)> = Vec::new();
-        let mut no_peaks = 0usize;
-        for r in &table.rows {
-            if r.form == NONE || r.spec == NONE || r.charge == 0 {
-                continue;
-            }
-            if spectra[r.spec as usize].peaks.is_empty() {
-                no_peaks += 1;
-                continue;
-            }
-            if pred.supports_ms2(&forms[r.form as usize].0, r.charge) {
-                fz_ix.entry((r.form, r.charge)).or_insert_with(|| {
-                    fz.push((r.form, r.charge));
-                    (fz.len() - 1) as u32
-                });
-            }
+        for (r, _) in table.rows.iter().zip(&wanted).filter(|(_, &w)| w) {
+            fz_ix.entry((r.form, r.charge)).or_insert_with(|| {
+                fz.push((r.form, r.charge));
+                (fz.len() - 1) as u32
+            });
         }
+        drop(wanted);
         let mut row_start = vec![0u32; fz.len() + 1];
         let fz_of_row = prediction_of_rows(&table.rows, spectra, &fz_ix);
         let fz_ix = keep.is_some().then_some(fz_ix);
@@ -684,9 +691,9 @@ const ANDES_RT_PREFIX: &str = "andesrt";
 fn prediction_of_rows(
     rows: &[PinRow],
     spectra: &[Spectrum],
-    fz_ix: &HashMap<(u32, u8), u32>,
+    fz_ix: &FxHashMap<(u32, u8), u32>,
 ) -> Vec<u32> {
-    rows.iter()
+    rows.par_iter()
         .map(|r| {
             if r.spec == NONE || spectra[r.spec as usize].peaks.is_empty() {
                 return NONE;
@@ -710,8 +717,9 @@ pub(crate) struct PinTable {
     pub(super) peptide_col: usize,
 }
 
-pub(super) fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
-    let mut m: HashMap<String, u32> = HashMap::with_capacity(spectra.len());
+pub(super) fn spectrum_bases(spectra: &[Spectrum]) -> FxHashMap<String, u32> {
+    let mut m: FxHashMap<String, u32> =
+        FxHashMap::with_capacity_and_hasher(spectra.len(), Default::default());
     for (i, s) in spectra.iter().enumerate() {
         let scan = s.scan.unwrap_or(0);
         let base = if s.title.is_empty() {
@@ -725,7 +733,7 @@ pub(super) fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
 }
 
 pub(super) fn locate(
-    bases: &HashMap<String, u32>,
+    bases: &FxHashMap<String, u32>,
     spectra: &[Spectrum],
     spec_id: &str,
     scan: i32,
@@ -823,7 +831,7 @@ pub(crate) fn anchor_rows(
     n_runs: usize,
     run_of: &dyn Fn(u32) -> usize,
 ) -> Vec<Vec<usize>> {
-    let mut best: HashMap<u32, usize> = HashMap::new();
+    let mut best: FxHashMap<u32, usize> = FxHashMap::default();
     for (i, r) in rows.iter().enumerate() {
         if r.spec == NONE {
             continue;
@@ -1124,7 +1132,7 @@ mod tests {
             score: 0.0,
         };
         let rows = [row(0, 7), row(NONE, 7), row(1, 7), row(0, 8)];
-        let fz_ix = HashMap::from([((7u32, 2u8), 0u32)]);
+        let fz_ix = FxHashMap::from_iter([((7u32, 2u8), 0u32)]);
         assert_eq!(
             prediction_of_rows(&rows, &spectra, &fz_ix),
             [0, NONE, NONE, NONE]

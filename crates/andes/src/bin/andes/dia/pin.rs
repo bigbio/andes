@@ -2,12 +2,12 @@
 //! label and score. Lines are parsed in parallel blocks; peptidoforms are numbered in the order
 //! they first appear.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use model::Spectrum;
 use onnx_infer::predictors::form::{parse_peptide, Form, Mass};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::dia::rt::{locate, row_charge, spectrum_bases, PinRow, PinTable, NONE};
 
@@ -19,8 +19,8 @@ pub(crate) fn read_pin(
     let layout: std::cell::OnceCell<PinLayout> = std::cell::OnceCell::new();
     let bases = spectrum_bases(spectra);
     let mut forms: Vec<(Form, Mass)> = Vec::new();
-    let mut form_ix: HashMap<Form, u32> = HashMap::new();
-    let mut by_peptide: HashMap<String, u32> = HashMap::new();
+    let mut form_ix: FxHashMap<Form, u32> = FxHashMap::default();
+    let mut by_peptide: FxHashMap<String, u32> = FxHashMap::default();
     let mut rows = Vec::new();
     let mut unlocated = 0usize;
     crate::dia::blocks::read_blocks(
@@ -42,10 +42,14 @@ pub(crate) fn read_pin(
             for r in parsed {
                 block.push(r?);
             }
+            let known: Vec<bool> = block
+                .par_iter()
+                .map(|r| by_peptide.contains_key(r.peptide))
+                .collect();
             let mut fresh: Vec<&str> = Vec::new();
-            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            for r in &block {
-                if !by_peptide.contains_key(r.peptide) && seen.insert(r.peptide) {
+            let mut seen: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+            for (r, _) in block.iter().zip(&known).filter(|(_, &k)| !k) {
+                if seen.insert(r.peptide) {
                     fresh.push(r.peptide);
                 }
             }
@@ -60,13 +64,17 @@ pub(crate) fn read_pin(
                 });
                 by_peptide.insert((*p).to_string(), f);
             }
-            rows.reserve(block.len());
-            for r in block {
-                unlocated += usize::from(r.row.spec == NONE);
-                let mut row = r.row;
-                row.form = by_peptide.get(r.peptide).copied().unwrap_or(NONE);
-                rows.push(row);
-            }
+            unlocated += block.iter().filter(|r| r.row.spec == NONE).count();
+            let by_peptide = &by_peptide;
+            let located: Vec<PinRow> = block
+                .into_par_iter()
+                .map(|r| {
+                    let mut row = r.row;
+                    row.form = by_peptide.get(r.peptide).copied().unwrap_or(NONE);
+                    row
+                })
+                .collect();
+            rows.extend(located);
             Ok(())
         },
     )?;
@@ -161,7 +169,7 @@ impl PinLayout {
         pin: &Path,
         row: usize,
         line: &'a str,
-        bases: &HashMap<String, u32>,
+        bases: &FxHashMap<String, u32>,
         spectra: &[Spectrum],
     ) -> Result<ParsedRow<'a>, String> {
         let x: Vec<&str> = line.split('\t').collect();

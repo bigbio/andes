@@ -753,6 +753,27 @@ fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool
         .any(|&p| fam_b.contains(&protein_family(prepared, p)))
 }
 
+/// Whether some mapping of the two peptides puts both link sites in one protein (decoy marks
+/// ignored) at the same or the next residue. Two peptides linked there overlap or abut, which
+/// one chain cannot hold unless its sequence repeats, so the pair is classed with the
+/// homotypic links and its error estimated as theirs.
+fn link_sites_adjacent(
+    prepared: &PreparedSearch<'_>,
+    a: &XlPeptide,
+    site_a: &LinkSite,
+    b: &XlPeptide,
+    site_b: &LinkSite,
+) -> bool {
+    a.occurrences_at(site_a).iter().any(|&(pa, start_a)| {
+        let family = protein_family(prepared, pa);
+        let ra = start_a as i64 + site_a.pos as i64;
+        b.occurrences_at(site_b).iter().any(|&(pb, start_b)| {
+            protein_family(prepared, pb) == family
+                && (ra - (start_b as i64 + site_b.pos as i64)).abs() <= 1
+        })
+    })
+}
+
 fn precursor_window_da(params: &crate::params::SearchParams, mass: f64) -> f64 {
     let t = &params.precursor_tolerance;
     t.left.as_da(mass).max(t.right.as_da(mass))
@@ -1315,7 +1336,8 @@ fn search_spectrum_at(
             iso: c.pair.iso,
             class: PairClass::of(pa.is_decoy, pb.is_decoy),
             intra: is_intra(prepared, pa, pb),
-            homotypic: pa.bare() == pb.bare(),
+            homotypic: pa.bare() == pb.bare()
+                || link_sites_adjacent(prepared, pa, &alpha.site, pb, &beta.site),
             precursor_err_ppm: (precursor_mass - theo) / theo * 1e6,
             b_stub_ions: c.pair.b_stub_ions,
             n_mass_pairs: pairs.len() + open_rows.len(),

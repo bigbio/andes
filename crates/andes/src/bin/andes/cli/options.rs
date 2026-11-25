@@ -456,7 +456,8 @@ pub(crate) struct SearchArgs {
     /// (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does
     /// not change them) and the q-values, from the
     /// target-target, target-decoy and decoy-decoy counts split by intra-protein, homotypic
-    /// (one peptide sequence on both sides) and inter-protein links and pooled over the runs,
+    /// (one peptide sequence on both sides, or two peptides linked at the same or the next
+    /// residue of one protein) and inter-protein links and pooled over the runs,
     /// of the matches (<base>.xl.tsv), residue pairs
     /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
     /// doublet summary of every spectrum (<base>.xl.doublets.tsv).

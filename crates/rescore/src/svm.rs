@@ -774,6 +774,13 @@ fn each_row(m: usize, sc: Option<&Screen<'_>>, mut f: impl FnMut(usize)) {
     }
 }
 
+/// A line-search breakpoint: the step at which a row's loss changes, the row, and the sign of
+/// the change.
+type Breakpoint = (f64, usize, f64);
+
+/// One chunk of rows' line-search slope terms and breakpoints, in row order.
+type RowTerms = (Vec<(f64, f64)>, Vec<Breakpoint>);
+
 #[allow(clippy::too_many_arguments)]
 fn line_search(
     t: &Train,
@@ -795,7 +802,7 @@ fn line_search(
     let mut l = lambda * omega_l;
     let mut r = lambda * omega_r;
     deltas.clear();
-    let visit = |i: usize, terms: &mut Vec<(f64, f64)>, found: &mut Vec<(f64, usize, f64)>| {
+    let visit = |i: usize, terms: &mut Vec<(f64, f64)>, found: &mut Vec<Breakpoint>| {
         let y = t.y(i);
         let diff = y * (o_bar[i] - o[i]);
         if y * o[i] < 1.0 {
@@ -810,7 +817,7 @@ fn line_search(
     };
     let n = sc.map_or(t.len(), |sc| sc.live.len());
     let row = |k: usize| sc.map_or(k, |sc| sc.live[k] as usize);
-    let parts: Vec<(Vec<(f64, f64)>, Vec<(f64, usize, f64)>)> = (0..n.div_ceil(CHUNK))
+    let parts: Vec<RowTerms> = (0..n.div_ceil(CHUNK))
         .into_par_iter()
         .map(|c| {
             let (mut terms, mut found) = (Vec::new(), Vec::new());

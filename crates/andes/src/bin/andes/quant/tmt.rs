@@ -254,42 +254,82 @@ pub(crate) struct Pooled {
 }
 
 /// The pooled target PSMs at q <= `max_q` and, when given, PEP <= `max_pep`, keyed by (run,
-/// SpecId); the run is the SpecId's `<run>/` prefix. Returns them with the number of target
-/// PSMs read.
-pub(crate) fn pooled_targets(
-    paths: &[PathBuf],
-    max_q: f64,
-    max_pep: Option<f64>,
-) -> Result<(HashMap<u128, Pooled>, usize), String> {
-    let mut map = HashMap::new();
-    let mut read = 0usize;
-    for p in paths {
-        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
-        let file = std::fs::File::open(p).map_err(|e| err(&e))?;
-        let mut reader =
-            output::PsmResultReader::new(std::io::BufReader::with_capacity(1 << 20, file))
-                .map_err(|e| err(&e))?;
-        while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
-            read += 1;
-            if row.q_value > max_q || max_pep.is_some_and(|c| row.pep > c) {
-                continue;
-            }
-            let key = psm_key(output::spec_id_run(row.psm_id), row.psm_id);
-            let v = Pooled {
+/// SpecId), collected while the pooled results are read for the study's inference; the run is
+/// the SpecId's `<run>/` prefix.
+#[derive(Default)]
+pub(crate) struct PooledTargets {
+    map: HashMap<u128, Pooled>,
+    read: usize,
+    repeated: Option<(PathBuf, u128)>,
+}
+
+impl PooledTargets {
+    /// The key and pooled values of a target row at the thresholds.
+    pub(crate) fn pick(
+        row: &output::PsmResultRow<'_>,
+        max_q: f64,
+        max_pep: Option<f64>,
+    ) -> Option<(u128, Pooled)> {
+        if row.q_value > max_q || max_pep.is_some_and(|c| row.pep > c) {
+            return None;
+        }
+        let key = psm_key(output::spec_id_run(row.psm_id), row.psm_id);
+        Some((
+            key,
+            Pooled {
                 q: row.q_value,
                 pep: row.pep,
                 score: row.score,
                 joined: false,
-            };
-            if map.insert(key, v).is_some() {
+            },
+        ))
+    }
+
+    /// Adds a target row of `path`, in file order.
+    pub(crate) fn take(&mut self, path: &Path, row: Option<(u128, Pooled)>) {
+        self.read += 1;
+        let Some((key, v)) = row else { return };
+        if self.repeated.is_none() && self.map.insert(key, v).is_some() {
+            self.repeated = Some((path.to_path_buf(), key));
+        }
+    }
+
+    /// The pooled PSMs with the number of target PSMs read; an error names the first PSMId
+    /// seen twice.
+    pub(crate) fn finish(self) -> Result<(HashMap<u128, Pooled>, usize), String> {
+        let Some((path, key)) = self.repeated else {
+            return Ok((self.map, self.read));
+        };
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+        let file = std::fs::File::open(&path).map_err(|e| err(&e))?;
+        let mut reader =
+            output::PsmResultReader::new(std::io::BufReader::new(file)).map_err(|e| err(&e))?;
+        while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
+            if psm_key(output::spec_id_run(row.psm_id), row.psm_id) == key {
                 return Err(err(&format!(
                     "duplicate PSMId `{}` in the pooled results",
                     row.psm_id
                 )));
             }
         }
+        Err(err(&"a repeated PSMId is no longer in the file"))
     }
-    Ok((map, read))
+}
+
+/// [`PooledTargets`] of the result files `paths`.
+#[cfg(test)]
+pub(crate) fn pooled_targets(
+    paths: &[PathBuf],
+    max_q: f64,
+    max_pep: Option<f64>,
+) -> Result<(HashMap<u128, Pooled>, usize), String> {
+    let mut pooled = PooledTargets::default();
+    crate::inference::read_all_with(
+        paths,
+        |r| PooledTargets::pick(r, max_q, max_pep),
+        |p, x| pooled.take(p, x),
+    )?;
+    pooled.finish()
 }
 
 /// The SDRF columns of one run: the samples of the plex channels in kit order.
@@ -562,14 +602,21 @@ pub(crate) fn finalize(
              samples"
         );
     }
-    let (inf, _) =
-        crate::inference::infer_from_files(database, &a.proteins, &a.psms, &a.decoy_psms)
-            .map_err(|e| e.to_string())?;
+    let mut pooled_rows = PooledTargets::default();
+    let (inf, _) = crate::inference::infer_from_files_with(
+        database,
+        &a.proteins,
+        &a.psms,
+        &a.decoy_psms,
+        |r| PooledTargets::pick(r, psm_fdr, a.pep),
+        |p, x| pooled_rows.take(p, x),
+    )
+    .map_err(|e| e.to_string())?;
     let groups = ProteinGroups {
         inf: &inf,
         max_q: a.proteins.protein_fdr,
     };
-    let (mut pooled, read) = pooled_targets(&a.psms, psm_fdr, a.pep)?;
+    let (mut pooled, read) = pooled_rows.finish()?;
     let pooled_at_q = pooled.len();
     log::info!(
         target: "tmt",

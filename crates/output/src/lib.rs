@@ -53,7 +53,7 @@ pub use percolator::{
     apply_per_run_q, decoy_results_path, parse_psm_results, pep_is_degenerate,
     percolator_args_with_threads, resolve_backend, run_percolator, run_percolator_pooled,
     run_percolator_with_decoys, score_all_rows, PercolatorBackend, PercolatorError, PercolatorPsm,
-    PsmResultReader, PsmResultRow, RowScores, DEFAULT_PERCOLATOR_IMAGE,
+    PsmResultReader, PsmResultRow, RowScores, read_psm_results, DEFAULT_PERCOLATOR_IMAGE,
 };
 pub use rescore::{run as run_native_percolator, MemLimit, Sizing};
 pub(crate) mod rows;

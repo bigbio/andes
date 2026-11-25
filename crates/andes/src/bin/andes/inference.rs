@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rustc_hash::FxHashSet;
 use search::SearchIndex;
 
 use crate::cli::{DatabaseArgs, InferenceArgs, ProteinArgs};
@@ -33,32 +34,39 @@ fn run_name(path: &Path) -> String {
 type PsmFiles = (HashMap<String, output::PercolatorPsm>, Vec<String>);
 
 fn read_all(paths: &[PathBuf]) -> Result<PsmFiles, String> {
+    read_all_with(paths, |_| (), |_, ()| {})
+}
+
+/// A result row as [`read_all_with`] parses it, in parallel.
+struct ParsedRow<X> {
+    run: Option<String>,
+    id: u128,
+    psm: output::PercolatorPsm,
+    extra: X,
+}
+
+/// [`read_all`], and `take` gets what `pick` makes of every row, in file order (rows are parsed
+/// in parallel blocks; ids, runs and keys are assigned in file order as a serial read assigns
+/// them).
+pub(crate) fn read_all_with<X: Send>(
+    paths: &[PathBuf],
+    pick: impl Fn(&output::PsmResultRow<'_>) -> X + Sync,
+    mut take: impl FnMut(&Path, X),
+) -> Result<PsmFiles, String> {
     let mut all = HashMap::new();
     let mut runs: Vec<String> = Vec::new();
     let mut known_runs: HashSet<String> = HashSet::new();
     for p in paths {
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
         let file = std::fs::File::open(p).map_err(|e| err(&e))?;
-        let mut reader =
-            output::PsmResultReader::new(std::io::BufReader::with_capacity(1 << 20, file))
-                .map_err(|e| err(&e))?;
-        let mut seen: HashSet<u128> = HashSet::new();
+        let mut seen: FxHashSet<u128> = FxHashSet::default();
         let mut named_runs = false;
-        while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
-            if let Some(run) = row.run.filter(|r| !r.is_empty()) {
-                named_runs = true;
-                if !known_runs.contains(run) {
-                    known_runs.insert(run.to_string());
-                    runs.push(run.to_string());
-                }
-            }
-            if !seen.insert(id_hash(row.psm_id)) {
-                return Err(err(&format!(
-                    "Percolator result has duplicate PSMId `{}` (join key must be unique)",
-                    row.psm_id
-                )));
-            }
-            let psm = output::PercolatorPsm {
+        let mut repeated: Option<u128> = None;
+        let parse = |row: output::PsmResultRow<'_>| ParsedRow {
+            run: row.run.filter(|r| !r.is_empty()).map(str::to_string),
+            id: id_hash(row.psm_id),
+            extra: pick(&row),
+            psm: output::PercolatorPsm {
                 pooled_q_value: None,
                 psm_id: String::new(),
                 q_value: row.q_value,
@@ -66,9 +74,35 @@ fn read_all(paths: &[PathBuf]) -> Result<PsmFiles, String> {
                 score: row.score,
                 peptide: row.peptide.to_string(),
                 proteins: row.proteins(),
-            };
-            all.insert(all.len().to_string(), psm);
+            },
+        };
+        let read = output::read_psm_results(file, parse, |block| {
+            for r in block {
+                if let Some(run) = r.run {
+                    named_runs = true;
+                    if !known_runs.contains(&run) {
+                        known_runs.insert(run.clone());
+                        runs.push(run);
+                    }
+                }
+                if !seen.insert(r.id) {
+                    repeated = Some(r.id);
+                    return Err(output::PercolatorError::DuplicatePsmId {
+                        psm_id: String::new(),
+                    });
+                }
+                take(p, r.extra);
+                all.insert(all.len().to_string(), r.psm);
+            }
+            Ok(())
+        });
+        if let Some(id) = repeated {
+            return Err(err(&format!(
+                "Percolator result has duplicate PSMId `{}` (join key must be unique)",
+                repeated_id(p, id)?
+            )));
         }
+        read.map_err(|e| err(&e))?;
         if !named_runs {
             let run = run_name(p);
             if known_runs.insert(run.clone()) {
@@ -78,6 +112,20 @@ fn read_all(paths: &[PathBuf]) -> Result<PsmFiles, String> {
     }
     all.shrink_to_fit();
     Ok((all, runs))
+}
+
+/// The PSMId of `path` whose [`id_hash`] is `id`.
+fn repeated_id(path: &Path, id: u128) -> Result<String, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = std::fs::File::open(path).map_err(|e| err(&e))?;
+    let mut reader =
+        output::PsmResultReader::new(std::io::BufReader::new(file)).map_err(|e| err(&e))?;
+    while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
+        if id_hash(row.psm_id) == id {
+            return Ok(row.psm_id.to_string());
+        }
+    }
+    Err(err(&"a repeated PSMId is no longer in the file"))
 }
 
 fn id_hash(id: &str) -> u128 {
@@ -112,6 +160,19 @@ pub(crate) fn infer_from_files(
     psms: &[PathBuf],
     decoy_psms: &[PathBuf],
 ) -> Result<(output::Inference, Vec<String>), Box<dyn std::error::Error>> {
+    infer_from_files_with(database, a, psms, decoy_psms, |_| (), |_, ()| {})
+}
+
+/// [`infer_from_files`], and `take` gets what `pick` makes of every target row while the
+/// target files are read (see [`read_all_with`]).
+pub(crate) fn infer_from_files_with<X: Send>(
+    database: &Path,
+    a: &ProteinArgs,
+    psms: &[PathBuf],
+    decoy_psms: &[PathBuf],
+    pick: impl Fn(&output::PsmResultRow<'_>) -> X + Sync,
+    take: impl FnMut(&Path, X),
+) -> Result<(output::Inference, Vec<String>), Box<dyn std::error::Error>> {
     if psms.len() != decoy_psms.len() {
         return Err(format!(
             "--psms has {} files and --decoy-psms {}: give the decoy results of each target file",
@@ -120,7 +181,7 @@ pub(crate) fn infer_from_files(
         )
         .into());
     }
-    let (targets, runs) = read_all(psms)?;
+    let (targets, runs) = read_all_with(psms, pick, take)?;
     let (decoys, _) = read_all(decoy_psms)?;
     log::debug!(
         target: "inference",

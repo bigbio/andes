@@ -122,6 +122,12 @@ pub(crate) fn infer_from_files(
     }
     let (targets, runs) = read_all(psms)?;
     let (decoys, _) = read_all(decoy_psms)?;
+    log::debug!(
+        target: "inference",
+        "read {} target and {} decoy PSMs",
+        targets.len(),
+        decoys.len()
+    );
     Ok((infer_from_maps(database, a, targets, &decoys)?, runs))
 }
 
@@ -149,15 +155,19 @@ pub(crate) fn infer_from_maps(
         .db;
     let mut idx = SearchIndex::from_target_db(&db, &a.db.decoy_prefix);
     idx.decoy_suffix = a.db.decoy_suffix.clone();
+    log::debug!(target: "inference", "database and index loaded");
 
     let proteoform_fdr = a.proteoform_fdr();
     if idx.has_alternative_entries {
         output::share_isobaric_references(&mut targets, &idx, a.psm_fdr.max(proteoform_fdr));
+        log::debug!(target: "inference", "isobaric references shared");
     }
     output::apply_class_fdr(&mut targets, decoys, &idx);
+    log::debug!(target: "inference", "class FDR applied");
     let mut knockoffs =
         output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
+    log::debug!(target: "inference", "knockoff FDR applied");
     if !restricted.is_empty() {
         knockoffs.extend(
             output::site_claims(
@@ -172,7 +182,9 @@ pub(crate) fn infer_from_maps(
                 .knockoff_rows,
         );
     }
+    log::debug!(target: "inference", "site claims done");
     let cutoffs = output::Cutoffs::new(&targets, &idx, a.psm_fdr, proteoform_fdr);
+    log::debug!(target: "inference", "class cutoffs computed");
     Ok(output::infer_protein_groups(
         &targets,
         decoys,

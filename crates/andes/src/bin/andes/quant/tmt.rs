@@ -596,8 +596,11 @@ pub(crate) fn finalize(
     let mut runs: Vec<String> = Vec::new();
     let mut no_mz = 0usize;
     let mut feature_id = 0i64;
+    let mut spent = [std::time::Duration::ZERO; 4];
     for path in tables {
+        let tic = std::time::Instant::now();
         let table = read_run_table(path)?;
+        spent[0] += tic.elapsed();
         match &writer {
             None => {
                 let meta = study_meta(a, &table, psm_fdr, tables.len(), design.as_ref());
@@ -638,7 +641,9 @@ pub(crate) fn finalize(
             }
             let d = run_design(design.as_ref(), &run, layout.plex)?;
             let before = counts.clone();
+            let tic = std::time::Instant::now();
             let rows = study_rows(rows, &mut pooled, &groups, &mut tally, &mut counts)?;
+            spent[1] += tic.elapsed();
             if rows.is_empty() && counts.run_rows > before.run_rows {
                 log::warn!(
                     "run {run}: none of its {} PSMs is in the pooled results at q <= {psm_fdr}; \
@@ -660,7 +665,10 @@ pub(crate) fn finalize(
                     d.fraction.as_deref().unwrap_or("none")
                 ))
             );
+            let tic = std::time::Instant::now();
             w.push_run(&rows, &d)?;
+            spent[2] += tic.elapsed();
+            let tic = std::time::Instant::now();
             if let Some((fw, fpath)) = features.as_mut() {
                 let mut recs = Vec::new();
                 let unit = d.plex.map_or_else(|| run.clone(), |p| format!("plex {p}"));
@@ -680,9 +688,18 @@ pub(crate) fn finalize(
                 fw.push(recs)
                     .map_err(|e| format!("write {}: {e}", fpath.display()))?;
             }
+            spent[3] += tic.elapsed();
             runs.push(run);
         }
     }
+    log::debug!(
+        target: "tmt",
+        "run loop: read {:.1} s, join {:.1} s, study table {:.1} s, features {:.1} s",
+        spent[0].as_secs_f64(),
+        spent[1].as_secs_f64(),
+        spent[2].as_secs_f64(),
+        spent[3].as_secs_f64()
+    );
     let (w, _, _) =
         writer.ok_or_else(|| format!("{}: no TMT run tables", a.quant_dir.display()))?;
     let written = w.rows();

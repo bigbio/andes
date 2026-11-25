@@ -429,7 +429,6 @@ impl ChunkFragmentIndex {
             vote_peaks,
             &complement_masses,
         );
-        sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
         match (
             spec.rt_seconds
                 .filter(|t| params.dia && t.is_finite() && !self.form_rt_min.is_empty()),
@@ -437,9 +436,17 @@ impl ChunkFragmentIndex {
         ) {
             (Some(t), Some(rt)) => {
                 let scan_rt_min = t / SECS_PER_MIN;
-                select_top_k_by(&mut sel, top_k, |id, v| self.rt_key(id, v, scan_rt_min, rt));
+                select_top_k_kept_by(
+                    &mut sel,
+                    top_k,
+                    |id| keep(self.form_mass[id as usize]),
+                    |id, v| self.rt_key(id, v, scan_rt_min, rt),
+                );
             }
-            _ => select_top_k(&mut sel, top_k),
+            _ => {
+                sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
+                select_top_k(&mut sel, top_k)
+            }
         }
         sel.into_iter()
             .filter(|&(id, _, _)| {
@@ -762,9 +769,107 @@ pub(crate) fn select_top_k_by(
     sel.extend(keyed.into_iter().map(|(_, e)| e));
 }
 
+/// A form ranked by the vote cut's order: higher key, then higher vote intensity, then lower id.
+#[derive(Clone, Copy)]
+struct Ranked(f64, (u32, u16, f32));
+
+impl Ranked {
+    fn order(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .total_cmp(&other.0)
+            .then_with(|| self.1 .2.total_cmp(&other.1 .2))
+            .then_with(|| other.1 .0.cmp(&self.1 .0))
+    }
+}
+
+impl PartialEq for Ranked {
+    fn eq(&self, other: &Self) -> bool {
+        self.order(other).is_eq()
+    }
+}
+impl Eq for Ranked {}
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.order(other))
+    }
+}
+impl Ord for Ranked {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order(other)
+    }
+}
+
+/// The result of `sel.retain(keep)` followed by [`select_top_k_by`]`(sel, top_k, key)`, for a
+/// `key(form, votes)` that is never above `votes`: forms are visited by descending votes and
+/// the visit stops once no later form can enter the top `top_k`, so `keep` and `key` run only
+/// for the forms that could.
+pub(crate) fn select_top_k_kept_by(
+    sel: &mut Vec<(u32, u16, f32)>,
+    top_k: usize,
+    keep: impl Fn(u32) -> bool,
+    key: impl Fn(u32, u16) -> f64,
+) {
+    if top_k == 0 {
+        sel.clear();
+        return;
+    }
+    sel.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best: std::collections::BinaryHeap<std::cmp::Reverse<Ranked>> =
+        std::collections::BinaryHeap::with_capacity(top_k + 1);
+    for &e in sel.iter() {
+        if best.len() == top_k {
+            let worst = best.peek().expect("full heap").0 .0;
+            if f64::from(e.1) < worst {
+                break;
+            }
+        }
+        if !keep(e.0) {
+            continue;
+        }
+        let r = Ranked(key(e.0, e.1), e);
+        if best.len() < top_k {
+            best.push(std::cmp::Reverse(r));
+        } else if r > best.peek().expect("full heap").0 {
+            best.pop();
+            best.push(std::cmp::Reverse(r));
+        }
+    }
+    let mut kept: Vec<Ranked> = best.into_iter().map(|r| r.0).collect();
+    kept.sort_unstable_by(|a, b| b.cmp(a));
+    sel.clear();
+    sel.extend(kept.into_iter().map(|r| r.1));
+}
+
 #[cfg(test)]
 mod select_top_k_tests {
-    use super::{select_top_k, select_top_k_by};
+    use super::{select_top_k, select_top_k_by, select_top_k_kept_by};
+
+    #[test]
+    fn the_bounded_cut_equals_filter_then_keyed_cut() {
+        let mut x = 12345u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..200 {
+            let n = (next() % 300) as usize;
+            let base: Vec<(u32, u16, f32)> = (0..n)
+                .map(|i| (i as u32 * 7 % 1009, (next() % 12) as u16 + 3, (next() % 50) as f32))
+                .collect();
+            let pen = |id: u32| -((id % 13) as f64) * 0.75;
+            let keep = |id: u32| id % 5 != 0;
+            for k in [0usize, 1, 5, 40, 100, 400] {
+                let mut a = base.clone();
+                a.retain(|e| keep(e.0));
+                select_top_k_by(&mut a, k, |id, v| f64::from(v) + pen(id));
+                let mut b = base.clone();
+                select_top_k_kept_by(&mut b, k, keep, |id, v| f64::from(v) + pen(id));
+                assert_eq!(a, b, "round {round} top {k}");
+            }
+        }
+    }
 
     #[test]
     fn a_form_at_its_predicted_rt_beats_one_with_one_more_vote_far_off_it() {

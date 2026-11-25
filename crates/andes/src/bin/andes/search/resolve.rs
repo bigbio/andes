@@ -172,33 +172,7 @@ pub(super) fn resolve_search_params(
             "N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    let mono_active =
-        cli.precursor_mono == PrecursorMonoFlag::Auto && (cli.glyco || cli.open_search) && has_ms1;
-    if cli.precursor_mono == PrecursorMonoFlag::Auto
-        && (cli.glyco || cli.open_search)
-        && !mono_active
-    {
-        log::warn!(target: "search",
-            "--precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
-             Bruker .d); \
-             {} has none — precursors are left as recorded.",
-            spectrum_path.display()
-        );
-    }
-    let mono_params = MonoParams::default();
-    if mono_active {
-        log::info!(
-            target: "precursor-mono",
-            "auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
-             {} ppm, back-off {})",
-            mono_params.max_shift,
-            mono_params.min_fit,
-            mono_params.min_gain,
-            mono_params.min_snr,
-            mono_params.tol_ppm,
-            mono_params.backoff
-        );
-    }
+    let (mono_active, mono_params) = resolve_mono(cli, has_ms1, &spectrum_path);
     params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
@@ -209,23 +183,7 @@ pub(super) fn resolve_search_params(
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
-    let peak_filter = match cli.peak_filter.as_deref() {
-        None => None,
-        Some(spec) => {
-            let (w, k) = spec.split_once(':').ok_or_else(|| {
-                format!("--peak-filter expects WINDOW_DA:PEAKS (e.g. 100:20), got `{spec}`")
-            })?;
-            let w: f64 = w
-                .trim()
-                .parse()
-                .map_err(|_| format!("--peak-filter window `{w}` is not a number"))?;
-            let k: usize = k
-                .trim()
-                .parse()
-                .map_err(|_| format!("--peak-filter count `{k}` is not an integer"))?;
-            Some((w, k))
-        }
-    };
+    let peak_filter = parse_peak_filter(cli.peak_filter.as_deref())?;
     let peak_filter = isobaric_peak_filter(peak_filter, acquisition.high_res);
     if acquisition.high_res
         && cli.peak_filter.is_none()
@@ -309,6 +267,94 @@ pub(super) fn resolve_search_params(
             }
         }
     };
+    set_candidate_retrieval(cli, param, scorer, standalone, &mut params)?;
+
+    warn_glyco_flags(cli, decoy_strategy, spectrum_paths);
+    if params.chimeric && cli.refine {
+        log::warn!(target: "search",
+            "--refine + --chimeric do not fully stack in this release — chimeric \
+             already explains many of the spectra refinement would otherwise rescue, so \
+             refinement adds much less on top of chimeric than it does alone. See \
+             docs/benchmarks/README.md for the measured combination."
+        );
+    }
+    if params.score_mode == search::ScoreMode::Strong {
+        log::info!(target: "search", "score mode: strong (ranking + PIN RawScore use StrongScore)");
+    }
+
+    Ok(ResolvedSearch {
+        params,
+        chimeric_active,
+        mono_active,
+        mono_params,
+        restricted_site_masses,
+        fixed_terminal_mods,
+    })
+}
+
+/// `--precursor-mono auto` with `--glyco` or `--open-search`: on when the input has MS1. Logs
+/// the settings when on and warns when MS1 is missing.
+fn resolve_mono(cli: &Cli, has_ms1: bool, spectrum_path: &std::path::Path) -> (bool, MonoParams) {
+    let mono_active =
+        cli.precursor_mono == PrecursorMonoFlag::Auto && (cli.glyco || cli.open_search) && has_ms1;
+    if cli.precursor_mono == PrecursorMonoFlag::Auto
+        && (cli.glyco || cli.open_search)
+        && !mono_active
+    {
+        log::warn!(target: "search",
+            "--precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
+             Bruker .d); \
+             {} has none — precursors are left as recorded.",
+            spectrum_path.display()
+        );
+    }
+    let mono_params = MonoParams::default();
+    if mono_active {
+        log::info!(
+            target: "precursor-mono",
+            "auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
+             {} ppm, back-off {})",
+            mono_params.max_shift,
+            mono_params.min_fit,
+            mono_params.min_gain,
+            mono_params.min_snr,
+            mono_params.tol_ppm,
+            mono_params.backoff
+        );
+    }
+    (mono_active, mono_params)
+}
+
+/// `--peak-filter WINDOW_DA:PEAKS`, parsed.
+fn parse_peak_filter(spec: Option<&str>) -> Result<Option<(f64, usize)>, String> {
+    Ok(match spec {
+        None => None,
+        Some(spec) => {
+            let (w, k) = spec.split_once(':').ok_or_else(|| {
+                format!("--peak-filter expects WINDOW_DA:PEAKS (e.g. 100:20), got `{spec}`")
+            })?;
+            let w: f64 = w
+                .trim()
+                .parse()
+                .map_err(|_| format!("--peak-filter window `{w}` is not a number"))?;
+            let k: usize = k
+                .trim()
+                .parse()
+                .map_err(|_| format!("--peak-filter count `{k}` is not an integer"))?;
+            Some((w, k))
+        }
+    })
+}
+
+/// The candidate retrieval of the run: the fragment-ion index (with its top-k and the
+/// `--open-search` window) or per-spectrum enumeration, and why.
+fn set_candidate_retrieval(
+    cli: &Cli,
+    param: &Param,
+    scorer: &RankScorer,
+    standalone: bool,
+    params: &mut SearchParams,
+) -> Result<(), Box<dyn std::error::Error>> {
     let retrieval_excluded: Option<&'static str> = if cli.glyco {
         Some("--glyco looks candidates up by backbone mass")
     } else if cli.xl.is_some() {
@@ -338,7 +384,7 @@ pub(super) fn resolve_search_params(
     } else {
         0
     };
-    apply_open_search(cli, choice.use_index, retrieval_excluded, &mut params)?;
+    apply_open_search(cli, choice.use_index, retrieval_excluded, params)?;
     if let Some(refusal) = choice.refused_because {
         log::warn!(target: "search", "the fragment-ion index cannot be used here ({refusal}); using enumeration.");
     }
@@ -355,28 +401,7 @@ pub(super) fn resolve_search_params(
             log::info!(target: "candidate-retrieval", "per-spectrum enumeration ({reason})");
         }
     }
-
-    warn_glyco_flags(cli, decoy_strategy, spectrum_paths);
-    if params.chimeric && cli.refine {
-        log::warn!(target: "search",
-            "--refine + --chimeric do not fully stack in this release — chimeric \
-             already explains many of the spectra refinement would otherwise rescue, so \
-             refinement adds much less on top of chimeric than it does alone. See \
-             docs/benchmarks/README.md for the measured combination."
-        );
-    }
-    if params.score_mode == search::ScoreMode::Strong {
-        log::info!(target: "search", "score mode: strong (ranking + PIN RawScore use StrongScore)");
-    }
-
-    Ok(ResolvedSearch {
-        params,
-        chimeric_active,
-        mono_active,
-        mono_params,
-        restricted_site_masses,
-        fixed_terminal_mods,
-    })
+    Ok(())
 }
 
 /// `--open-search`: the wide precursor window, its fragment-index shortlist and the settings it

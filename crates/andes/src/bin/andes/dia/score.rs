@@ -422,32 +422,17 @@ pub(crate) struct PrecursorPin {
     pub(crate) learned: bool,
 }
 
-/// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
-/// per pass-2 precursor with the learned score (left out when its first round is degenerate),
-/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
-pub(crate) fn write_precursor_pin(
-    pin: &Path,
-    out_pin: &Path,
-    t: &Pass2Table,
-    extra: &[(String, Vec<f32>)],
-    seed: u64,
-) -> Result<PrecursorPin, String> {
-    let t0 = std::time::Instant::now();
-    let own: HashMap<&str, u32> = t
-        .spec_id
-        .iter()
-        .zip(&t.run)
-        .map(|(s, &r)| (s.as_str(), r))
-        .collect();
-    let p1 = read_pass1(pin, &own)?;
-    drop(own);
-    log::info!(
-        target: "dia",
-        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
-        pin.display(),
-        t0.elapsed().as_secs_f64()
-    );
-    let p1_of = p1.of_rows(t);
+/// The learned-score inputs of the precursor rows and their out-of-fold score: the feature
+/// names, the row-major features (`names.len()` per row) and the score's training. It reads
+/// only the pass-2 table, so it can be computed while pass 1 is still being rescored.
+pub(crate) struct Learned {
+    names: Vec<String>,
+    x: Vec<f32>,
+    learned: LearnedScore,
+}
+
+/// [`Learned`] of the pass-2 table `t` with the `extra` columns in front.
+pub(crate) fn learn(t: &Pass2Table, extra: &[(String, Vec<f32>)], seed: u64) -> Learned {
     let n = t.len();
     let mut names: Vec<String> = extra.iter().map(|(n, _)| n.clone()).collect();
     names.extend(t.features.iter().map(|(n, _)| n.clone()));
@@ -474,6 +459,54 @@ pub(crate) fn write_precursor_pin(
         .map(|i| fold_key(&t.seq[i], &t.proteins[i], &prefix))
         .collect();
     let learned = learned_score(&x, &names, &target, &key, seed);
+    Learned { names, x, learned }
+}
+
+/// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
+/// per pass-2 precursor with the learned score (left out when its first round is degenerate),
+/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
+pub(crate) fn write_precursor_pin(
+    pin: &Path,
+    out_pin: &Path,
+    t: &Pass2Table,
+    extra: &[(String, Vec<f32>)],
+    seed: u64,
+) -> Result<PrecursorPin, String> {
+    write_precursor_pin_with(pin, out_pin, t, extra, seed, None)
+}
+
+/// [`write_precursor_pin`] with the [`Learned`] score of `t` and `extra` already computed
+/// (`learned`, from [`learn`] with the same `seed`), or computed here when `None`.
+pub(crate) fn write_precursor_pin_with(
+    pin: &Path,
+    out_pin: &Path,
+    t: &Pass2Table,
+    extra: &[(String, Vec<f32>)],
+    seed: u64,
+    learned: Option<Learned>,
+) -> Result<PrecursorPin, String> {
+    let t0 = std::time::Instant::now();
+    let own: HashMap<&str, u32> = t
+        .spec_id
+        .iter()
+        .zip(&t.run)
+        .map(|(s, &r)| (s.as_str(), r))
+        .collect();
+    let p1 = read_pass1(pin, &own)?;
+    drop(own);
+    log::info!(
+        target: "dia",
+        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
+        pin.display(),
+        t0.elapsed().as_secs_f64()
+    );
+    let p1_of = p1.of_rows(t);
+    let n = t.len();
+    let Learned { names, x, learned } = match learned {
+        Some(l) => l,
+        None => learn(t, extra, seed),
+    };
+    let nf = names.len();
     let gb = learned.score.as_deref();
     let t_write = std::time::Instant::now();
 
@@ -647,13 +680,16 @@ fn pass1_preferred(pass1: &[(f64, bool)], precursor: &[(f64, bool)]) -> Option<S
 ///   `(score, is decoy)` of every pass-1 precursor) by more than the decoy noise at q 0.005
 ///   and 0.01 (`pass1_preferred`).
 ///
-/// Any error while writing or rescoring also keeps pass 1.
+/// Any error while writing or rescoring also keeps pass 1. `learned` is the [`Learned`] score
+/// of `t` when it was computed beforehand ([`learn`] with no extra columns and the same `seed`);
+/// `None` computes it here.
 pub(crate) fn rescore_precursors(
     pin: &Path,
     t: &Pass2Table,
     seed: u64,
     pass1: &[(f64, bool)],
     rescore: impl FnOnce(&Path) -> Result<Rescored, String>,
+    learned: Option<Learned>,
 ) -> Result<PrecursorRescore, String> {
     let pass1_q = tdc_counts(pass1, COMPARE_Q).0;
     let n_dec = t.decoy.iter().filter(|&&d| d).count();
@@ -666,7 +702,7 @@ pub(crate) fn rescore_precursors(
     }
     let replaced = pin_ids(pin)?;
     let out = precursor_pin_path(pin);
-    let ids = write_precursor_pin(pin, &out, t, &[], seed)?;
+    let ids = write_precursor_pin_with(pin, &out, t, &[], seed, learned)?;
     let rescored = rescore(&out)?;
     let mut scores: Vec<f64> = rescored.targets.values().filter_map(|p| p.score).collect();
     scores.sort_by(f64::total_cmp);
@@ -1000,14 +1036,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = pass1_pin(dir.path());
         let never = |_: &Path| -> Result<Rescored, String> { panic!("no rescoring expected") };
-        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never).is_err());
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never, None).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never, None).is_err());
         assert!(!precursor_pin_path(&pin).exists());
         let before = std::fs::read_to_string(&pin).unwrap();
         let fewer = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored_with(&[0.0, 1.0, 2.0], &[0.5]))
         };
-        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer)
+        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer, None)
             .err()
             .unwrap();
         assert!(why.contains("fewer than pass 1"), "{why}");
@@ -1015,7 +1051,7 @@ mod tests {
         let head = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
         assert!(!head.starts_with("SpecId\tLabel\tScanNr\tFileName\tdia_gb_score"));
         let failing = |_: &Path| -> Result<Rescored, String> { Err("Percolator failed".into()) };
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing, None).is_err());
     }
 
     #[test]
@@ -1027,7 +1063,7 @@ mod tests {
             assert_eq!(p, precursor_pin_path(&pin));
             Ok(rescored(&scores))
         };
-        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more).unwrap();
+        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more, None).unwrap();
         assert_eq!(r.n_q, 150);
         assert_eq!(r.ids.targets.len(), 4);
         assert!(!r.ids.learned, "8 rows are too few to train the learned score");
@@ -1035,7 +1071,7 @@ mod tests {
         let degenerate = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored(&[1.0; 4]))
         };
-        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate).err().unwrap();
+        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate, None).err().unwrap();
         assert!(why.contains("degenerate"), "{why}");
     }
 

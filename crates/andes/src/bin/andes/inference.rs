@@ -181,10 +181,8 @@ pub(crate) fn infer_from_files_with<X: Send>(
         )
         .into());
     }
-    let (targets, decoys) =
-        rayon::join(|| read_all_with(psms, &pick, take), || read_all(decoy_psms));
-    let (targets, runs) = targets?;
-    let (decoys, _) = decoys?;
+    let (targets, runs) = read_all_with(psms, pick, take)?;
+    let (decoys, _) = read_all(decoy_psms)?;
     log::debug!(
         target: "inference",
         "read {} target and {} decoy PSMs",

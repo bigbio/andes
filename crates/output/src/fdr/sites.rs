@@ -190,17 +190,16 @@ pub fn site_claims(
     }
 
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
-    type Key = (u64, u8, PriorTier);
-    let mut by_key: HashMap<Key, Vec<(f64, String, Part)>> = HashMap::new();
+    let mut by_key: HashMap<ClaimKey, Vec<Scored>> = HashMap::new();
     let mut knockoff_rows = HashSet::new();
     for (id, psm) in targets.iter() {
         let (residues, mods) = peptide_mods(&psm.peptide);
         if mods.is_empty() {
             continue;
         }
-        type RealPlacement = (Key, (usize, u32, u64), Option<usize>, usize);
+        type RealPlacement = (ClaimKey, (usize, u32, u64), Option<usize>, usize);
         let mut real: Vec<RealPlacement> = Vec::new();
-        let mut knock: Vec<(Key, usize, bool, usize)> = Vec::new();
+        let mut knock: Vec<(ClaimKey, usize, bool, usize)> = Vec::new();
         for acc in psm.proteins.split(';') {
             let Some(&i) = by_acc.get(acc) else {
                 continue;
@@ -270,25 +269,7 @@ pub fn site_claims(
         }
     }
 
-    let tiers: std::collections::BTreeSet<PriorTier> = by_key.keys().map(|k| k.2).collect();
-    let mut strata: HashMap<String, Vec<(f64, String, Part)>> = HashMap::new();
-    for ((mass_bits, residue, tier), parts) in by_key {
-        let tested = parts
-            .iter()
-            .filter(|(_, id, p)| {
-                matches!(p, Part::Claim { tested: true, .. }) && targets[id].q_value <= fdr
-            })
-            .count();
-        let base = format!("{:+.4}@{}", f64::from_bits(mass_bits), residue as char);
-        let name = if tiers.len() < 2 {
-            base
-        } else if tested >= MIN_STRATUM_TESTED {
-            format!("{base}/{}", tier.name())
-        } else {
-            format!("{base}/pooled")
-        };
-        strata.entry(name).or_default().extend(parts);
-    }
+    let strata = strata(by_key, targets, fdr);
 
     let mut best: BTreeMap<SiteKey, SiteBest> = BTreeMap::new();
     let mut counts = Vec::new();
@@ -300,44 +281,7 @@ pub fn site_claims(
             knockoff_weighted: 0.0,
             accepted: 0,
         };
-        let (mut seen_claim, mut seen_tested) = (HashSet::new(), HashSet::new());
-        for (_, id, part) in &parts {
-            if targets[id].q_value <= fdr {
-                match part {
-                    Part::Knockoff { weight, .. } => count.knockoff_weighted += weight,
-                    Part::Claim { tested, .. } => {
-                        count.claims += seen_claim.insert(id.as_str()) as usize;
-                        count.tested += (*tested && seen_tested.insert(id.as_str())) as usize;
-                    }
-                }
-            }
-        }
-        parts.sort_by(|a, b| {
-            b.0.total_cmp(&a.0).then(
-                matches!(b.2, Part::Knockoff { .. }).cmp(&matches!(a.2, Part::Knockoff { .. })),
-            )
-        });
-        let offset =
-            crate::fdr::knockoff::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
-                Part::Claim { k, .. } | Part::Knockoff { k, .. } => k,
-            }));
-        let mut fdp = Vec::with_capacity(parts.len());
-        let (mut w, mut t) = (0.0f64, 0usize);
-        let mut counted = HashSet::new();
-        for (_, id, part) in &parts {
-            if targets[id].q_value <= fdr {
-                match part {
-                    Part::Knockoff { weight, .. } => w += weight,
-                    Part::Claim { tested, .. } => {
-                        t += (*tested && counted.insert(id.as_str())) as usize
-                    }
-                }
-            }
-            fdp.push(((offset + w) / t.max(1) as f64).min(1.0));
-        }
-        for i in (0..fdp.len().saturating_sub(1)).rev() {
-            fdp[i] = fdp[i].min(fdp[i + 1]);
-        }
+        let fdp = stratum_fdp(&mut parts, targets, fdr, &mut count);
         for ((_, id, part), q) in parts.iter().zip(fdp) {
             let Part::Claim { site, tested, .. } = part else {
                 continue;
@@ -374,8 +318,108 @@ pub fn site_claims(
         }
     }
     let identity = posteriors.map(|post| site_posteriors(targets, &proteins, &by_acc, post));
-    let rows = best
-        .into_iter()
+    let rows = site_rows(best, claim_fdr, &proteins, &identity, &same);
+    SiteOutcome {
+        rows,
+        counts,
+        knockoff_rows,
+    }
+}
+
+/// A PSM's claim or knockoff: its rank score, its id and the site it supports.
+type Scored = (f64, String, Part);
+
+/// Claims are pooled by canonical mass, residue and prior tier.
+type ClaimKey = (u64, u8, PriorTier);
+
+/// The claims and knockoffs of each stratum, named `<mass>@<residue>`; with several prior
+/// tiers, a key's tier joins the name when it has `MIN_STRATUM_TESTED` tested claims at `fdr`,
+/// and its parts go to `<mass>@<residue>/pooled` otherwise.
+fn strata(
+    by_key: HashMap<ClaimKey, Vec<Scored>>,
+    targets: &HashMap<String, PercolatorPsm>,
+    fdr: f64,
+) -> HashMap<String, Vec<Scored>> {
+    let tiers: std::collections::BTreeSet<PriorTier> = by_key.keys().map(|k| k.2).collect();
+    let mut strata: HashMap<String, Vec<Scored>> = HashMap::new();
+    for ((mass_bits, residue, tier), parts) in by_key {
+        let tested = parts
+            .iter()
+            .filter(|(_, id, p)| {
+                matches!(p, Part::Claim { tested: true, .. }) && targets[id].q_value <= fdr
+            })
+            .count();
+        let base = format!("{:+.4}@{}", f64::from_bits(mass_bits), residue as char);
+        let name = if tiers.len() < 2 {
+            base
+        } else if tested >= MIN_STRATUM_TESTED {
+            format!("{base}/{}", tier.name())
+        } else {
+            format!("{base}/pooled")
+        };
+        strata.entry(name).or_default().extend(parts);
+    }
+    strata
+}
+
+/// Sorts a stratum's parts by rank (knockoffs first on ties), fills its claim and knockoff
+/// counts at `fdr`, and returns the knockoff FDP estimate at each part, made monotone.
+fn stratum_fdp(
+    parts: &mut [Scored],
+    targets: &HashMap<String, PercolatorPsm>,
+    fdr: f64,
+    count: &mut SiteCount,
+) -> Vec<f64> {
+    let (mut seen_claim, mut seen_tested) = (HashSet::new(), HashSet::new());
+    for (_, id, part) in parts.iter() {
+        if targets[id].q_value <= fdr {
+            match part {
+                Part::Knockoff { weight, .. } => count.knockoff_weighted += weight,
+                Part::Claim { tested, .. } => {
+                    count.claims += seen_claim.insert(id.as_str()) as usize;
+                    count.tested += (*tested && seen_tested.insert(id.as_str())) as usize;
+                }
+            }
+        }
+    }
+    parts.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then(matches!(b.2, Part::Knockoff { .. }).cmp(&matches!(a.2, Part::Knockoff { .. })))
+    });
+    let offset =
+        crate::fdr::knockoff::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
+            Part::Claim { k, .. } | Part::Knockoff { k, .. } => k,
+        }));
+    let mut fdp = Vec::with_capacity(parts.len());
+    let (mut w, mut t) = (0.0f64, 0usize);
+    let mut counted = HashSet::new();
+    for (_, id, part) in parts.iter() {
+        if targets[id].q_value <= fdr {
+            match part {
+                Part::Knockoff { weight, .. } => w += weight,
+                Part::Claim { tested, .. } => {
+                    t += (*tested && counted.insert(id.as_str())) as usize
+                }
+            }
+        }
+        fdp.push(((offset + w) / t.max(1) as f64).min(1.0));
+    }
+    for i in (0..fdp.len().saturating_sub(1)).rev() {
+        fdp[i] = fdp[i].min(fdp[i + 1]);
+    }
+    fdp
+}
+
+/// The accepted sites (best site q at most `claim_fdr`) as output rows, with their identity
+/// posteriors when given.
+fn site_rows(
+    best: BTreeMap<SiteKey, SiteBest>,
+    claim_fdr: f64,
+    proteins: &[&Protein],
+    identity: &Option<HashMap<(usize, u32), SitePosterior>>,
+    same: &dyn Fn(f64, f64) -> bool,
+) -> Vec<SiteRow> {
+    best.into_iter()
         .filter(|(_, (q, ..))| *q <= claim_fdr)
         .map(|((i, pos, bits), (q, psm, n, tier))| {
             let p = proteins[i];
@@ -383,7 +427,7 @@ pub fn site_claims(
                 .as_ref()
                 .and_then(|m| m.get(&(i, pos)))
                 .map_or((None, None, String::new(), 0.0), |s| {
-                    s.describe(f64::from_bits(bits), &same)
+                    s.describe(f64::from_bits(bits), same)
                 });
             SiteRow {
                 family: p.origin().map_or_else(
@@ -404,12 +448,7 @@ pub fn site_claims(
                 identity_spectra: spectra,
             }
         })
-        .collect();
-    SiteOutcome {
-        rows,
-        counts,
-        knockoff_rows,
-    }
+        .collect()
 }
 
 #[derive(Debug, Default)]

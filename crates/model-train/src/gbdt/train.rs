@@ -294,7 +294,7 @@ pub fn train_gbdt_from(
         .copied()
         .filter(|&r| ds.y[r] == 1)
         .collect();
-    let mut train_neg: Vec<usize> = train_rows
+    let train_neg: Vec<usize> = train_rows
         .iter()
         .copied()
         .filter(|&r| ds.y[r] == 0)
@@ -310,16 +310,7 @@ pub fn train_gbdt_from(
     }
 
     let n_neg_keep = (p.neg_pos_ratio * n_pos_train as f32).ceil() as usize;
-    let mut rng = seed;
-    if train_neg.len() > n_neg_keep {
-        shuffle_indices(&mut train_neg, &mut rng);
-        train_neg.truncate(n_neg_keep);
-        train_neg.sort_unstable();
-    }
-
-    let mut active_train: Vec<usize> = train_pos;
-    active_train.extend_from_slice(&train_neg);
-    active_train.sort_unstable();
+    let active_train = active_rows(train_pos, train_neg, n_neg_keep, seed);
 
     let n_active = active_train.len();
     if n_active < MIN_TRAIN_ROWS {
@@ -338,27 +329,7 @@ pub fn train_gbdt_from(
     let val_groups: Vec<u32> = val_rows.iter().map(|&r| ds.groups[r]).collect();
 
     let pair_groups: Vec<(Vec<usize>, Vec<usize>)> = if p.pairwise {
-        let mut pos_map: std::collections::HashMap<u32, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut neg_map: std::collections::HashMap<u32, Vec<usize>> =
-            std::collections::HashMap::new();
-        for i in 0..n_active {
-            let g = ds.groups[active_train[i]];
-            if train_y[i] == 1 {
-                pos_map.entry(g).or_default().push(i);
-            } else {
-                neg_map.entry(g).or_default().push(i);
-            }
-        }
-        let mut gs: Vec<u32> = pos_map
-            .keys()
-            .filter(|k| neg_map.contains_key(k))
-            .copied()
-            .collect();
-        gs.sort_unstable();
-        gs.into_iter()
-            .map(|g| (pos_map[&g].clone(), neg_map[&g].clone()))
-            .collect()
+        rank_pair_groups(&ds.groups, &active_train, &train_y)
     } else {
         Vec::new()
     };
@@ -405,34 +376,14 @@ pub fn train_gbdt_from(
     let mut hess = vec![0.0f32; n_active];
 
     for _round in 0..p.n_rounds {
-        if p.pairwise {
-            grad.fill(0.0);
-            hess.fill(0.0);
-            for (pos, neg) in &pair_groups {
-                for &i in pos {
-                    for &j in neg {
-                        let rho = sigmoid(-(raw_train[i] - raw_train[j]));
-                        grad[i] -= rho;
-                        grad[j] += rho;
-                        let h = rho * (1.0 - rho);
-                        hess[i] += h;
-                        hess[j] += h;
-                    }
-                }
-            }
-            for h in hess.iter_mut() {
-                *h = h.max(1e-6);
-            }
-        } else {
-            grad.par_iter_mut()
-                .zip(hess.par_iter_mut())
-                .zip(raw_train.par_iter().zip(train_y.par_iter()))
-                .for_each(|((g, h), (&raw, &y))| {
-                    let pi = sigmoid(raw);
-                    *g = pi - y as f32;
-                    *h = (pi * (1.0 - pi)).max(1e-6);
-                });
-        }
+        fill_gradients(
+            p.pairwise,
+            &pair_groups,
+            &raw_train,
+            &train_y,
+            &mut grad,
+            &mut hess,
+        );
 
         let (mut tree, leaf_of) =
             fit_tree_cols(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
@@ -514,7 +465,108 @@ pub fn train_gbdt_from(
         );
     }
 
-    let mut cal_pairs: Vec<(f32, f32)> = raw_val_final
+    let (iso_x, iso_y) = isotonic_calibration(&raw_val_final, &val_y);
+
+    Ok(GbdtPeakModel {
+        iso_x,
+        iso_y,
+        ..gbdt_model(&ds.feature_names, true, trees)
+    })
+}
+
+/// The training rows: every positive row, and at most `n_neg_keep` negative rows drawn with
+/// `seed`, in row order.
+fn active_rows(
+    train_pos: Vec<usize>,
+    mut train_neg: Vec<usize>,
+    n_neg_keep: usize,
+    seed: u64,
+) -> Vec<usize> {
+    let mut rng = seed;
+    if train_neg.len() > n_neg_keep {
+        shuffle_indices(&mut train_neg, &mut rng);
+        train_neg.truncate(n_neg_keep);
+        train_neg.sort_unstable();
+    }
+
+    let mut active_train: Vec<usize> = train_pos;
+    active_train.extend_from_slice(&train_neg);
+    active_train.sort_unstable();
+    active_train
+}
+
+/// For each training group (in group order) that holds both labels, the positions in
+/// `active_train` of its positive and its negative rows: the RankNet pairs.
+fn rank_pair_groups(
+    groups: &[u32],
+    active_train: &[usize],
+    train_y: &[u8],
+) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut pos_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    let mut neg_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    let n_active = active_train.len();
+    for i in 0..n_active {
+        let g = groups[active_train[i]];
+        if train_y[i] == 1 {
+            pos_map.entry(g).or_default().push(i);
+        } else {
+            neg_map.entry(g).or_default().push(i);
+        }
+    }
+    let mut gs: Vec<u32> = pos_map
+        .keys()
+        .filter(|k| neg_map.contains_key(k))
+        .copied()
+        .collect();
+    gs.sort_unstable();
+    gs.into_iter()
+        .map(|g| (pos_map[&g].clone(), neg_map[&g].clone()))
+        .collect()
+}
+
+/// The gradient and hessian of each training row at the margins `raw_train`: RankNet pair
+/// losses over `pair_groups` when `pairwise`, the log loss otherwise.
+fn fill_gradients(
+    pairwise: bool,
+    pair_groups: &[(Vec<usize>, Vec<usize>)],
+    raw_train: &[f32],
+    train_y: &[u8],
+    grad: &mut [f32],
+    hess: &mut [f32],
+) {
+    if pairwise {
+        grad.fill(0.0);
+        hess.fill(0.0);
+        for (pos, neg) in pair_groups {
+            for &i in pos {
+                for &j in neg {
+                    let rho = sigmoid(-(raw_train[i] - raw_train[j]));
+                    grad[i] -= rho;
+                    grad[j] += rho;
+                    let h = rho * (1.0 - rho);
+                    hess[i] += h;
+                    hess[j] += h;
+                }
+            }
+        }
+        for h in hess.iter_mut() {
+            *h = h.max(1e-6);
+        }
+    } else {
+        grad.par_iter_mut()
+            .zip(hess.par_iter_mut())
+            .zip(raw_train.par_iter().zip(train_y.par_iter()))
+            .for_each(|((g, h), (&raw, &y))| {
+                let pi = sigmoid(raw);
+                *g = pi - y as f32;
+                *h = (pi * (1.0 - pi)).max(1e-6);
+            });
+    }
+}
+
+/// The isotonic (PAVA) map from the sigmoid of the validation margins to the label rate.
+fn isotonic_calibration(raw_val: &[f32], val_y: &[u8]) -> (Vec<f32>, Vec<f32>) {
+    let mut cal_pairs: Vec<(f32, f32)> = raw_val
         .iter()
         .zip(val_y.iter())
         .map(|(&r, &y)| (sigmoid(r), y as f32))
@@ -523,13 +575,7 @@ pub fn train_gbdt_from(
 
     let sorted_p: Vec<f32> = cal_pairs.iter().map(|&(p, _)| p).collect();
     let sorted_y: Vec<f32> = cal_pairs.iter().map(|&(_, y)| y).collect();
-    let (iso_x, iso_y) = pava(&sorted_p, &sorted_y);
-
-    Ok(GbdtPeakModel {
-        iso_x,
-        iso_y,
-        ..gbdt_model(&ds.feature_names, true, trees)
-    })
+    pava(&sorted_p, &sorted_y)
 }
 
 pub struct RegressionDataset {

@@ -1560,7 +1560,7 @@ of the CSMs the pooled 1 % and 5 % cuts accept, per link class (`project`, `link
 passes it, and `andes cohort xl-fdr --plan plan.json` reads it; without `--plan` it is the part
 of the run name before the first `.`, which is right for the default run name
 `{project}.{stem}` and a project name without a `.`. `decoy_fdr` is the decoy estimate of the
-share's false target-target CSMs, (TD - DD) / TT, and (TD + DD) / TT for homotypic links.
+share's false target-target CSMs, max(TD - DD, DD) / TT, and (TD + DD) / TT for homotypic links.
 
 ---
 
@@ -1837,7 +1837,9 @@ When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, 
 a link on one of them costs 12 against a link on K, as xiSEARCH penalises these side reactions.
 q-values are computed per link
 class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
-`max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer
+`max(max(TD - DD, DD) + 1, 2) / TT`. TT with one wrong peptide number about TD - 2 DD and TT
+with two wrong peptides about DD, so the estimate never falls below DD when TD happens to be
+small; `homotypic` (the same peptide sequence on both sides, a homodimer
 or one peptide paired with itself) takes `max(DD + TD + 1, 2) / TT`, because a random homotypic
 match pairs a peptide with itself and is TT or DD with equal odds but never TD. The ground-truth
 benchmark for these choices (eleven runs, four datasets) is in `docs/benchmarks/xl/`.

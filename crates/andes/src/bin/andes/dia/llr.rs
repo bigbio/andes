@@ -443,26 +443,7 @@ pub(crate) fn add_to_pin(
                 a
             },
         );
-    let cals: Vec<Calib> = errs
-        .into_iter()
-        .enumerate()
-        .map(|(run, mut e)| {
-            if e.len() < CALIB_MIN_IONS {
-                return first[run];
-            }
-            e.sort_by(f32::total_cmp);
-            let med = f64::from(e[e.len() / 2]);
-            let mut dev: Vec<f32> = e.iter().map(|&x| (f64::from(x) - med).abs() as f32).collect();
-            dev.sort_by(f32::total_cmp);
-            let sigma = MAD_TO_SD * f64::from(dev[dev.len() / 2]);
-            log::info!(
-                target: "dia",
-                "run {run}: fragment shift {med:.2} ppm, spread {sigma:.2} ppm from {} ions",
-                e.len()
-            );
-            Calib { shift_ppm: med, tol: tol0 }
-        })
-        .collect();
+    let cals = fragment_calibrations(errs, &first, tol0);
 
     let counts: Vec<Counts> = (0..spectra.len())
         .into_par_iter()
@@ -528,38 +509,8 @@ pub(crate) fn add_to_pin(
                     let r = &table.rows[i];
                     let t = &tables[run * 2 + fold(r.form)];
                     let b = ms1_bin(i, run);
-                    let tv: Vec<(f64, f64)> = ions.iter().map(|o| t.terms(o, b)).collect();
-                    let llr: f64 = ions
-                        .iter()
-                        .zip(&tv)
-                        .map(|(o, (pos, neg))| if o.present() { *pos } else { *neg })
-                        .sum();
-                    let top: Vec<&IonObs> = ions
-                        .iter()
-                        .filter(|o| o.rank <= CALIB_RANK && o.pred > 0.0)
-                        .collect();
-                    let frac = if top.is_empty() {
-                        0.0
-                    } else {
-                        top.iter().filter(|o| o.any()).count() as f64 / top.len() as f64
-                    };
-                    let hit: Vec<f64> = top
-                        .iter()
-                        .filter(|o| o.present())
-                        .map(|o| f64::from(o.ppm) - cals[run].shift_ppm)
-                        .collect();
-                    let rms = if hit.is_empty() {
-                        TOL_FLOOR_PPM
-                    } else {
-                        (hit.iter().map(|x| x * x).sum::<f64>() / hit.len() as f64).sqrt()
-                    };
-                    let k = ions.iter().filter(|o| o.any()).count();
-                    let m = ions.iter().filter(|o| o.any() && o.apex_here()).count();
-                    let apex = binom_tail_nlog(k, m, t.pi0);
-                    outs.push(RowOut {
-                        row: i as u32,
-                        vals: [llr, apex, llr, llr, 0.0, frac, rms],
-                    });
+                    let (out, tv) = row_out(i, ions, t, b, cals[run].shift_ppm);
+                    outs.push(out);
                     terms.push(tv);
                 }
                 explain_greedy(&rows, &terms, &mut outs);
@@ -579,20 +530,7 @@ pub(crate) fn add_to_pin(
     write_pin(pin, &table, &cols, &values)?;
     let shift_ppm: Vec<f64> = cals.iter().map(|c| c.shift_ppm).collect();
     let llr = values.swap_remove(0);
-    let report: Vec<String> = tables
-        .iter()
-        .enumerate()
-        .map(|(k, t)| {
-            format!(
-                "run {} fold {}: q(rank 1, mid MS1) {:.3}, q(rank 21+) {:.3}, pi0 {:.3}",
-                k / 2,
-                k % 2,
-                t.q[0][2],
-                t.q[10][2],
-                t.pi0
-            )
-        })
-        .collect();
+    let report = table_report(&tables);
     log::info!(
         target: "dia",
         "pool scores: {} columns on {n} PIN rows; {} [{:.2}s]",
@@ -605,6 +543,105 @@ pub(crate) fn add_to_pin(
         llr,
         shift_ppm,
     })
+}
+
+/// Each run's fragment calibration: the median ppm error of the anchor rows' top ions as the
+/// shift (logged with its robust spread); a run with fewer than `CALIB_MIN_IONS` keeps `first`.
+fn fragment_calibrations(
+    errs: Vec<Vec<f32>>,
+    first: &[Calib],
+    tol0: FragmentTolerance,
+) -> Vec<Calib> {
+    errs.into_iter()
+        .enumerate()
+        .map(|(run, mut e)| {
+            if e.len() < CALIB_MIN_IONS {
+                return first[run];
+            }
+            e.sort_by(f32::total_cmp);
+            let med = f64::from(e[e.len() / 2]);
+            let mut dev: Vec<f32> = e
+                .iter()
+                .map(|&x| (f64::from(x) - med).abs() as f32)
+                .collect();
+            dev.sort_by(f32::total_cmp);
+            let sigma = MAD_TO_SD * f64::from(dev[dev.len() / 2]);
+            log::info!(
+                target: "dia",
+                "run {run}: fragment shift {med:.2} ppm, spread {sigma:.2} ppm from {} ions",
+                e.len()
+            );
+            Calib {
+                shift_ppm: med,
+                tol: tol0,
+            }
+        })
+        .collect()
+}
+
+/// One PIN row's columns from its ions: the LLR under `t`, the apex test, the fraction of
+/// top-ranked ions seen and their RMS mass error after the run's `shift_ppm`; with the per-ion
+/// LLR terms the explain passes read.
+fn row_out(
+    i: usize,
+    ions: &[IonObs],
+    t: &Tables,
+    b: usize,
+    shift_ppm: f64,
+) -> (RowOut, Vec<(f64, f64)>) {
+    let tv: Vec<(f64, f64)> = ions.iter().map(|o| t.terms(o, b)).collect();
+    let llr: f64 = ions
+        .iter()
+        .zip(&tv)
+        .map(|(o, (pos, neg))| if o.present() { *pos } else { *neg })
+        .sum();
+    let top: Vec<&IonObs> = ions
+        .iter()
+        .filter(|o| o.rank <= CALIB_RANK && o.pred > 0.0)
+        .collect();
+    let frac = if top.is_empty() {
+        0.0
+    } else {
+        top.iter().filter(|o| o.any()).count() as f64 / top.len() as f64
+    };
+    let hit: Vec<f64> = top
+        .iter()
+        .filter(|o| o.present())
+        .map(|o| f64::from(o.ppm) - shift_ppm)
+        .collect();
+    let rms = if hit.is_empty() {
+        TOL_FLOOR_PPM
+    } else {
+        (hit.iter().map(|x| x * x).sum::<f64>() / hit.len() as f64).sqrt()
+    };
+    let k = ions.iter().filter(|o| o.any()).count();
+    let m = ions.iter().filter(|o| o.any() && o.apex_here()).count();
+    let apex = binom_tail_nlog(k, m, t.pi0);
+    (
+        RowOut {
+            row: i as u32,
+            vals: [llr, apex, llr, llr, 0.0, frac, rms],
+        },
+        tv,
+    )
+}
+
+/// One line per (run, fold) table: rank-1 and rank-21+ detection rates and pi0.
+fn table_report(tables: &[Tables]) -> Vec<String> {
+    tables
+        .iter()
+        .enumerate()
+        .map(|(k, t)| {
+            format!(
+                "run {} fold {}: q(rank 1, mid MS1) {:.3}, q(rank 21+) {:.3}, pi0 {:.3}",
+                k / 2,
+                k % 2,
+                t.q[0][2],
+                t.q[10][2],
+                t.pi0
+            )
+        })
+        .collect()
 }
 
 /// Each PIN row's MS1 intensity (the highest peak within the MS1 tolerance of its monoisotopic

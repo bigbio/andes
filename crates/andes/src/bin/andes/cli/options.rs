@@ -764,6 +764,13 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "N", hide_short_help = true, help_heading = H_RUNTIME)]
     pub(crate) gbdt_max_trees: Option<usize>,
 
+    /// Search scoring without the fragment-intensity and rich-ion GBDT ensembles
+    ///
+    /// Experimental speed switch: the search's intensity features (IntensitySignal,
+    /// FragPred*, RichIonLLR) become 0 and the strong score ranks without them.
+    #[arg(long, hide = true)]
+    pub(crate) no_search_gbdt: bool,
+
     /// Process only the first N spectra (0: all); a benchmarking cap.
     #[arg(long, hide = true, default_value = "0")]
     pub(crate) max_spectra: usize,

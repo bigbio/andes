@@ -113,6 +113,11 @@ pub(crate) fn resolve_scoring_model(
             }
         }
     }
+    if cli.no_search_gbdt {
+        param.frag_intensity_model = None;
+        param.rich_ion_model = None;
+        log::info!(target: "search", "--no-search-gbdt: search scoring without the fragment-intensity and rich-ion ensembles");
+    }
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,

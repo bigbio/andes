@@ -778,6 +778,10 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true)]
     pub(crate) no_search_gbdt: bool,
 
+    /// Search scoring without the rich-ion GBDT ensemble (experiment): RichIonLLR becomes 0
+    #[arg(long, hide = true)]
+    pub(crate) no_search_rich_ion: bool,
+
     /// Process only the first N spectra (0: all); a benchmarking cap.
     #[arg(long, hide = true, default_value = "0")]
     pub(crate) max_spectra: usize,

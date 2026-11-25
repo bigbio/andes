@@ -1079,32 +1079,41 @@ pub(crate) fn refine_rt(
             skipped.push(files[r].to_string());
             continue;
         }
-        for k in 0..3u64 {
-            let train: Vec<usize> = anchors
-                .iter()
-                .copied()
-                .filter(|&i| fold(i) % 3 != k)
-                .collect();
-            let ds = RegressionDataset {
-                x: train.iter().flat_map(|&i| row_x(i)).collect(),
-                y: train.iter().map(|&i| (obs[i] - pred[i]) as f32).collect(),
-                groups: train.iter().map(|&i| table.rows[i].form).collect(),
-                n_features: nf,
-                feature_names: names.clone(),
-            };
-            let params = TrainParams {
-                n_rounds: 200,
-                max_depth: 3,
-                min_hessian: 20.0,
-                ..TrainParams::default()
-            };
-            let model = train_gbdt_regression(&ds, &params, 42).ok();
-            for &i in rows.iter().filter(|&&i| fold(i) % 3 == k) {
-                let shift = model
+        let models: Vec<_> = (0..3u64)
+            .into_par_iter()
+            .map(|k| {
+                let train: Vec<usize> = anchors
+                    .iter()
+                    .copied()
+                    .filter(|&i| fold(i) % 3 != k)
+                    .collect();
+                let ds = RegressionDataset {
+                    x: train.iter().flat_map(|&i| row_x(i)).collect(),
+                    y: train.iter().map(|&i| (obs[i] - pred[i]) as f32).collect(),
+                    groups: train.iter().map(|&i| table.rows[i].form).collect(),
+                    n_features: nf,
+                    feature_names: names.clone(),
+                };
+                let params = TrainParams {
+                    n_rounds: 200,
+                    max_depth: 3,
+                    min_hessian: 20.0,
+                    ..TrainParams::default()
+                };
+                train_gbdt_regression(&ds, &params, 42).ok()
+            })
+            .collect();
+        let errs: Vec<f64> = rows
+            .par_iter()
+            .map(|&i| {
+                let shift = models[(fold(i) % 3) as usize]
                     .as_ref()
                     .map_or(0.0, |m| m.predict_value(&row_x(i)) as f64);
-                err[i] = (obs[i] - pred[i] - shift).abs();
-            }
+                (obs[i] - pred[i] - shift).abs()
+            })
+            .collect();
+        for (&i, e) in rows.iter().zip(errs) {
+            err[i] = e;
         }
         let mut a: Vec<f64> = anchors.iter().map(|&i| err[i]).collect();
         let mut b: Vec<f64> = anchors.iter().map(|&i| (obs[i] - pred[i]).abs()).collect();
@@ -1127,7 +1136,7 @@ pub(crate) fn refine_rt(
         return Ok(false);
     }
     let mut fin: Vec<f64> = err.iter().copied().filter(|e| e.is_finite()).collect();
-    fin.sort_by(f64::total_cmp);
+    fin.par_sort_unstable_by(f64::total_cmp);
     let med = fin[fin.len() / 2];
     for e in &mut err {
         if !e.is_finite() {

@@ -1,4 +1,7 @@
 pub(crate) mod enzyme;
+mod results;
+
+pub use results::read_psm_results;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -502,7 +505,7 @@ pub fn run_percolator_with_decoys(
     }
     let out = result_paths(pin);
     let decoys = match std::fs::File::open(&out.decoy) {
-        Ok(f) => decoy_ids(std::io::BufReader::new(f))?,
+        Ok(f) => decoy_ids(f)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
         Err(e) => return Err(e.into()),
     };
@@ -1004,24 +1007,7 @@ fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
 }
 
 pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
-    let mut reader = PsmResultReader::new(text.as_bytes())?;
-    let mut map = HashMap::new();
-    while let Some(row) = reader.next_row()? {
-        let psm_id = row.psm_id.to_string();
-        let psm = PercolatorPsm {
-            pooled_q_value: row.pooled_q,
-            psm_id: psm_id.clone(),
-            q_value: row.q_value,
-            pep: row.pep,
-            score: row.score,
-            peptide: row.peptide.to_string(),
-            proteins: row.proteins(),
-        };
-        if map.insert(psm_id.clone(), psm).is_some() {
-            return Err(PercolatorError::DuplicatePsmId { psm_id });
-        }
-    }
-    Ok(map)
+    results::parse_text(text)
 }
 
 #[derive(Debug)]
@@ -1120,16 +1106,21 @@ impl ResultColumns {
     }
 }
 
-fn decoy_ids<R: std::io::BufRead>(reader: R) -> Result<HashSet<String>, PercolatorError> {
-    let mut rows = PsmResultReader::new(reader)?;
+fn decoy_ids(file: std::fs::File) -> Result<HashSet<String>, PercolatorError> {
     let mut ids = HashSet::new();
-    while let Some(row) = rows.next_row()? {
-        if !ids.insert(row.psm_id.to_string()) {
-            return Err(PercolatorError::DuplicatePsmId {
-                psm_id: row.psm_id.to_string(),
-            });
-        }
-    }
+    read_psm_results(
+        file,
+        |row| row.psm_id.to_string(),
+        |block| {
+            for psm_id in block {
+                if ids.contains(&psm_id) {
+                    return Err(PercolatorError::DuplicatePsmId { psm_id });
+                }
+                ids.insert(psm_id);
+            }
+            Ok(())
+        },
+    )?;
     Ok(ids)
 }
 

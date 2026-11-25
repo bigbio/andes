@@ -52,37 +52,40 @@ impl GroupTally {
         )
     }
 
+    /// Counts a row whose peptide is at `at` among the study's groups.
+    pub(crate) fn count(&mut self, at: &GroupAt<'_>) {
+        match *at {
+            GroupAt::Group { group, unique } => {
+                let c = self.counts.entry(group.id).or_default();
+                c.total += 1;
+                c.unique += unique as usize;
+            }
+            GroupAt::NoGroup => self.no_group += 1,
+            GroupAt::AboveCut => self.above_cut += 1,
+        }
+    }
+
     pub(crate) fn assign(
         &mut self,
         pg: &ProteinGroups<'_>,
         sequence: &str,
     ) -> Option<(Vec<ProteinPosition>, FeatureGroup)> {
-        match pg.inf.group_at(sequence, pg.max_q) {
-            GroupAt::Group { group, unique } => {
-                let c = self.counts.entry(group.id).or_default();
-                c.total += 1;
-                c.unique += unique as usize;
-                Some((
-                    group
-                        .accessions
-                        .iter()
-                        .map(|a| (a.clone(), None, None, None, None))
-                        .collect(),
-                    FeatureGroup {
-                        anchor: group.lead.clone(),
-                        unique,
-                        global_q: group.q_value,
-                    },
-                ))
-            }
-            GroupAt::NoGroup => {
-                self.no_group += 1;
-                None
-            }
-            GroupAt::AboveCut => {
-                self.above_cut += 1;
-                None
-            }
+        let at = pg.inf.group_at(sequence, pg.max_q);
+        self.count(&at);
+        match at {
+            GroupAt::Group { group, unique } => Some((
+                group
+                    .accessions
+                    .iter()
+                    .map(|a| (a.clone(), None, None, None, None))
+                    .collect(),
+                FeatureGroup {
+                    anchor: group.lead.clone(),
+                    unique,
+                    global_q: group.q_value,
+                },
+            )),
+            GroupAt::NoGroup | GroupAt::AboveCut => None,
         }
     }
 

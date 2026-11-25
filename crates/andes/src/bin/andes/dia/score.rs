@@ -6,7 +6,7 @@
 //! and no row is scored by a model that saw it.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use model_train::gbdt::train::{train_gbdt_from, Dataset, TrainParams, MIN_VAL_AUC};
@@ -283,63 +283,101 @@ impl Pass1 {
 /// Reads the pass-1 PIN. `own` maps the SpecId of every pass-2 row to its run.
 fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let f = std::fs::File::open(pin).map_err(|e| err(&e))?;
-    let mut lines = BufReader::new(f).lines();
-    let header = lines.next().ok_or_else(|| err(&"empty PIN"))?.map_err(|e| err(&e))?;
-    let h: Vec<&str> = header.split('\t').collect();
-    let c_pep = h.iter().position(|c| *c == "Peptide").ok_or_else(|| err(&"no Peptide"))?;
-    let c_file = h.iter().position(|c| *c == "FileName");
-    let charge: Vec<(usize, u8)> = h
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
-        .collect();
-    let numeric: Vec<usize> = (0..c_pep)
-        .filter(|&i| !PASS1_SKIP.contains(&h[i]) && !h[i].starts_with("charge"))
-        .collect();
-    let c_llr = numeric.iter().position(|&i| h[i] == "dia_llr");
-    let names: Vec<String> = numeric.iter().map(|&i| format!("p1_{}", h[i])).collect();
+    struct Layout {
+        c_pep: usize,
+        c_file: Option<usize>,
+        charge: Vec<(usize, u8)>,
+        numeric: Vec<usize>,
+        c_llr: Option<usize>,
+        names: Vec<String>,
+    }
+    let layout: std::cell::OnceCell<Layout> = std::cell::OnceCell::new();
     let mut rows: HashMap<(String, String, u8), Vec<f32>> = HashMap::new();
     let mut run_file: HashMap<u32, String> = HashMap::new();
-    for line in lines {
-        let line = line.map_err(|e| err(&e))?;
-        if line.is_empty() {
-            continue;
-        }
-        let x: Vec<&str> = line.split('\t').collect();
-        if x.len() <= c_pep {
-            return Err(err(&"short PIN row"));
-        }
-        let file = c_file.map_or("", |c| x[c]);
-        if let Some(&run) = own.get(x[0]) {
-            match run_file.get(&run) {
-                Some(f) if f != file => {
-                    return Err(err(&format!(
-                        "the nominees of pass-2 run {run} come from PIN files {f:?} and {file:?}"
-                    )))
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let c_pep = h
+                .iter()
+                .position(|c| *c == "Peptide")
+                .ok_or_else(|| err(&"no Peptide"))?;
+            let numeric: Vec<usize> = (0..c_pep)
+                .filter(|&i| !PASS1_SKIP.contains(&h[i]) && !h[i].starts_with("charge"))
+                .collect();
+            let _ = layout.set(Layout {
+                c_pep,
+                c_file: h.iter().position(|c| *c == "FileName"),
+                charge: h
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
+                    .collect(),
+                c_llr: numeric.iter().position(|&i| h[i] == "dia_llr"),
+                names: numeric.iter().map(|&i| format!("p1_{}", h[i])).collect(),
+                numeric,
+            });
+            Ok(())
+        },
+        |_, lines| {
+            let Some(l) = layout.get() else {
+                return Err(err(&"empty PIN"));
+            };
+            type Parsed<'a> = (&'a str, &'a str, &'a str, u8, Vec<f32>);
+            let parsed: Vec<Option<Parsed<'_>>> = lines
+                .par_iter()
+                .map(|line| {
+                    let x: Vec<&str> = line.split('\t').collect();
+                    if x.len() <= l.c_pep {
+                        return None;
+                    }
+                    let file = l.c_file.map_or("", |c| x[c]);
+                    let z = l
+                        .charge
+                        .iter()
+                        .find(|(i, _)| x[*i] == "1")
+                        .map_or(0, |c| c.1);
+                    let v: Vec<f32> = l
+                        .numeric
+                        .iter()
+                        .map(|&i| x[i].trim().parse::<f32>().unwrap_or(f32::NAN))
+                        .map(|v| if v.is_finite() { v } else { 0.0 })
+                        .collect();
+                    Some((x[0], file, x[l.c_pep], z, v))
+                })
+                .collect();
+            let llr = |v: &[f32]| l.c_llr.map_or(MISSING_DIA_LLR, |k| v[k]);
+            for p in parsed {
+                let Some((id, file, pep, z, v)) = p else {
+                    return Err(err(&"short PIN row"));
+                };
+                if let Some(&run) = own.get(id) {
+                    match run_file.get(&run) {
+                        Some(f) if f != file => {
+                            return Err(err(&format!(
+                                "the nominees of pass-2 run {run} come from PIN files {f:?} and \
+                                 {file:?}"
+                            )))
+                        }
+                        Some(_) => {}
+                        None => {
+                            run_file.insert(run, file.to_string());
+                        }
+                    }
                 }
-                Some(_) => {}
-                None => {
-                    run_file.insert(run, file.to_string());
+                let k = (file.to_string(), pep.to_string(), z);
+                match rows.get_mut(&k) {
+                    Some(old) if llr(old) >= llr(&v) => {}
+                    Some(old) => *old = v,
+                    None => {
+                        rows.insert(k, v);
+                    }
                 }
             }
-        }
-        let z = charge.iter().find(|(i, _)| x[*i] == "1").map_or(0, |c| c.1);
-        let v: Vec<f32> = numeric
-            .iter()
-            .map(|&i| x[i].trim().parse::<f32>().unwrap_or(f32::NAN))
-            .map(|v| if v.is_finite() { v } else { 0.0 })
-            .collect();
-        let llr = |v: &[f32]| c_llr.map_or(MISSING_DIA_LLR, |k| v[k]);
-        let k = (file.to_string(), x[c_pep].to_string(), z);
-        match rows.get_mut(&k) {
-            Some(old) if llr(old) >= llr(&v) => {}
-            Some(old) => *old = v,
-            None => {
-                rows.insert(k, v);
-            }
-        }
-    }
+            Ok(())
+        },
+    )?;
+    let names = layout.into_inner().map(|l| l.names).unwrap_or_default();
     Ok(Pass1 {
         names,
         rows,
@@ -358,15 +396,19 @@ pub(crate) fn percolator_seed(args: &[String]) -> u64 {
 
 /// SpecIds of every row of a PIN.
 pub(crate) fn pin_ids(pin: &Path) -> Result<std::collections::HashSet<String>, String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let f = std::fs::File::open(pin).map_err(|e| err(&e))?;
     let mut ids = std::collections::HashSet::new();
-    for line in BufReader::new(f).lines().skip(1) {
-        let line = line.map_err(|e| err(&e))?;
-        if let Some(id) = line.split('\t').next().filter(|s| !s.is_empty()) {
-            ids.insert(id.to_string());
-        }
-    }
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |_, lines| {
+            let block: Vec<&str> = lines
+                .par_iter()
+                .filter_map(|l| l.split('\t').next().filter(|s| !s.is_empty()))
+                .collect();
+            ids.extend(block.into_iter().map(str::to_string));
+            Ok(())
+        },
+    )?;
     Ok(ids)
 }
 
@@ -380,32 +422,17 @@ pub(crate) struct PrecursorPin {
     pub(crate) learned: bool,
 }
 
-/// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
-/// per pass-2 precursor with the learned score (left out when its first round is degenerate),
-/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
-pub(crate) fn write_precursor_pin(
-    pin: &Path,
-    out_pin: &Path,
-    t: &Pass2Table,
-    extra: &[(String, Vec<f32>)],
-    seed: u64,
-) -> Result<PrecursorPin, String> {
-    let t0 = std::time::Instant::now();
-    let own: HashMap<&str, u32> = t
-        .spec_id
-        .iter()
-        .zip(&t.run)
-        .map(|(s, &r)| (s.as_str(), r))
-        .collect();
-    let p1 = read_pass1(pin, &own)?;
-    drop(own);
-    log::info!(
-        target: "dia",
-        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
-        pin.display(),
-        t0.elapsed().as_secs_f64()
-    );
-    let p1_of = p1.of_rows(t);
+/// The learned-score inputs of the precursor rows and their out-of-fold score: the feature
+/// names, the row-major features (`names.len()` per row) and the score's training. It reads
+/// only the pass-2 table, so it can be computed while pass 1 is still being rescored.
+pub(crate) struct Learned {
+    names: Vec<String>,
+    x: Vec<f32>,
+    learned: LearnedScore,
+}
+
+/// [`Learned`] of the pass-2 table `t` with the `extra` columns in front.
+pub(crate) fn learn(t: &Pass2Table, extra: &[(String, Vec<f32>)], seed: u64) -> Learned {
     let n = t.len();
     let mut names: Vec<String> = extra.iter().map(|(n, _)| n.clone()).collect();
     names.extend(t.features.iter().map(|(n, _)| n.clone()));
@@ -432,6 +459,54 @@ pub(crate) fn write_precursor_pin(
         .map(|i| fold_key(&t.seq[i], &t.proteins[i], &prefix))
         .collect();
     let learned = learned_score(&x, &names, &target, &key, seed);
+    Learned { names, x, learned }
+}
+
+/// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
+/// per pass-2 precursor with the learned score (left out when its first round is degenerate),
+/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
+pub(crate) fn write_precursor_pin(
+    pin: &Path,
+    out_pin: &Path,
+    t: &Pass2Table,
+    extra: &[(String, Vec<f32>)],
+    seed: u64,
+) -> Result<PrecursorPin, String> {
+    write_precursor_pin_with(pin, out_pin, t, extra, seed, None)
+}
+
+/// [`write_precursor_pin`] with the [`Learned`] score of `t` and `extra` already computed
+/// (`learned`, from [`learn`] with the same `seed`), or computed here when `None`.
+pub(crate) fn write_precursor_pin_with(
+    pin: &Path,
+    out_pin: &Path,
+    t: &Pass2Table,
+    extra: &[(String, Vec<f32>)],
+    seed: u64,
+    learned: Option<Learned>,
+) -> Result<PrecursorPin, String> {
+    let t0 = std::time::Instant::now();
+    let own: HashMap<&str, u32> = t
+        .spec_id
+        .iter()
+        .zip(&t.run)
+        .map(|(s, &r)| (s.as_str(), r))
+        .collect();
+    let p1 = read_pass1(pin, &own)?;
+    drop(own);
+    log::info!(
+        target: "dia",
+        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
+        pin.display(),
+        t0.elapsed().as_secs_f64()
+    );
+    let p1_of = p1.of_rows(t);
+    let n = t.len();
+    let Learned { names, x, learned } = match learned {
+        Some(l) => l,
+        None => learn(t, extra, seed),
+    };
+    let nf = names.len();
     let gb = learned.score.as_deref();
     let t_write = std::time::Instant::now();
 
@@ -458,36 +533,48 @@ pub(crate) fn write_precursor_pin(
         degenerate_folds: learned.degenerate_folds,
         learned: gb.is_some(),
     };
-    let mut line = String::new();
+    let order: Vec<usize> = (0..n).collect();
+    for batch in order.chunks(64 * crate::dia::blocks::LINES_PER_TASK) {
+        let chunks: Vec<String> = batch
+            .par_chunks(crate::dia::blocks::LINES_PER_TASK)
+            .map(|rows| {
+                use std::fmt::Write as _;
+                let mut line = String::new();
+                for &i in rows {
+                    let p = p1_of[i];
+                    let _ = write!(
+                        line,
+                        "{}\t{}\t{}\t{}",
+                        t.spec_id[i],
+                        if t.decoy[i] { -1 } else { 1 },
+                        i + 1,
+                        p1.run_file.get(&t.run[i]).map_or("", String::as_str),
+                    );
+                    if let Some(gb) = gb {
+                        let _ = write!(line, "\t{:.5}", gb[i]);
+                    }
+                    for v in &x[i * nf..(i + 1) * nf] {
+                        let _ = write!(line, "\t{v}");
+                    }
+                    for v in p.unwrap_or(&zeros) {
+                        let _ = write!(line, "\t{v}");
+                    }
+                    let _ = writeln!(
+                        line,
+                        "\t{}\t{}\t{}",
+                        u8::from(p.is_some()),
+                        t.peptide[i],
+                        t.proteins[i].replace(';', "\t")
+                    );
+                }
+                line
+            })
+            .collect();
+        for c in &chunks {
+            out.write_all(c.as_bytes()).map_err(|e| err(&e))?;
+        }
+    }
     for i in 0..n {
-        use std::fmt::Write as _;
-        line.clear();
-        let p = p1_of[i];
-        let _ = write!(
-            line,
-            "{}\t{}\t{}\t{}",
-            t.spec_id[i],
-            if t.decoy[i] { -1 } else { 1 },
-            i + 1,
-            p1.run_file.get(&t.run[i]).map_or("", String::as_str),
-        );
-        if let Some(gb) = gb {
-            let _ = write!(line, "\t{:.5}", gb[i]);
-        }
-        for v in &x[i * nf..(i + 1) * nf] {
-            let _ = write!(line, "\t{v}");
-        }
-        for v in p.unwrap_or(&zeros) {
-            let _ = write!(line, "\t{v}");
-        }
-        let _ = write!(
-            line,
-            "\t{}\t{}\t{}",
-            u8::from(p.is_some()),
-            t.peptide[i],
-            t.proteins[i].replace(';', "\t")
-        );
-        writeln!(out, "{line}").map_err(|e| err(&e))?;
         if t.decoy[i] {
             ids.decoys.push(t.spec_id[i].clone());
         } else {
@@ -593,13 +680,16 @@ fn pass1_preferred(pass1: &[(f64, bool)], precursor: &[(f64, bool)]) -> Option<S
 ///   `(score, is decoy)` of every pass-1 precursor) by more than the decoy noise at q 0.005
 ///   and 0.01 (`pass1_preferred`).
 ///
-/// Any error while writing or rescoring also keeps pass 1.
+/// Any error while writing or rescoring also keeps pass 1. `learned` is the [`Learned`] score
+/// of `t` when it was computed beforehand ([`learn`] with no extra columns and the same `seed`);
+/// `None` computes it here.
 pub(crate) fn rescore_precursors(
     pin: &Path,
     t: &Pass2Table,
     seed: u64,
     pass1: &[(f64, bool)],
     rescore: impl FnOnce(&Path) -> Result<Rescored, String>,
+    learned: Option<Learned>,
 ) -> Result<PrecursorRescore, String> {
     let pass1_q = tdc_counts(pass1, COMPARE_Q).0;
     let n_dec = t.decoy.iter().filter(|&&d| d).count();
@@ -612,7 +702,7 @@ pub(crate) fn rescore_precursors(
     }
     let replaced = pin_ids(pin)?;
     let out = precursor_pin_path(pin);
-    let ids = write_precursor_pin(pin, &out, t, &[], seed)?;
+    let ids = write_precursor_pin_with(pin, &out, t, &[], seed, learned)?;
     let rescored = rescore(&out)?;
     let mut scores: Vec<f64> = rescored.targets.values().filter_map(|p| p.score).collect();
     scores.sort_by(f64::total_cmp);
@@ -946,14 +1036,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = pass1_pin(dir.path());
         let never = |_: &Path| -> Result<Rescored, String> { panic!("no rescoring expected") };
-        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never).is_err());
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never, None).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never, None).is_err());
         assert!(!precursor_pin_path(&pin).exists());
         let before = std::fs::read_to_string(&pin).unwrap();
         let fewer = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored_with(&[0.0, 1.0, 2.0], &[0.5]))
         };
-        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer)
+        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer, None)
             .err()
             .unwrap();
         assert!(why.contains("fewer than pass 1"), "{why}");
@@ -961,7 +1051,7 @@ mod tests {
         let head = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
         assert!(!head.starts_with("SpecId\tLabel\tScanNr\tFileName\tdia_gb_score"));
         let failing = |_: &Path| -> Result<Rescored, String> { Err("Percolator failed".into()) };
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing, None).is_err());
     }
 
     #[test]
@@ -973,7 +1063,7 @@ mod tests {
             assert_eq!(p, precursor_pin_path(&pin));
             Ok(rescored(&scores))
         };
-        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more).unwrap();
+        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more, None).unwrap();
         assert_eq!(r.n_q, 150);
         assert_eq!(r.ids.targets.len(), 4);
         assert!(!r.ids.learned, "8 rows are too few to train the learned score");
@@ -981,7 +1071,7 @@ mod tests {
         let degenerate = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored(&[1.0; 4]))
         };
-        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate).err().unwrap();
+        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate, None).err().unwrap();
         assert!(why.contains("degenerate"), "{why}");
     }
 

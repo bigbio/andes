@@ -1,6 +1,8 @@
+pub(crate) mod blocks;
 pub(crate) mod joint;
 pub(crate) mod llr;
 pub(crate) mod pass2;
+pub(crate) mod pin;
 pub(crate) mod rt;
 pub(crate) mod score;
 pub(crate) mod study;
@@ -79,11 +81,10 @@ pub(crate) fn rerank_pin(
     use std::io::{BufRead, BufReader, BufWriter, Write};
     let t0 = Instant::now();
     let err = |e: std::io::Error| format!("{}: {e}", pin.display());
-    let open = || -> Result<std::io::Lines<BufReader<std::fs::File>>, String> {
-        Ok(BufReader::new(std::fs::File::open(pin).map_err(err)?).lines())
+    let header = {
+        let mut lines = BufReader::new(std::fs::File::open(pin).map_err(err)?).lines();
+        lines.next().transpose().map_err(err)?.unwrap_or_default()
     };
-    let mut lines = open()?;
-    let header = lines.next().transpose().map_err(err)?.unwrap_or_default();
     let h: Vec<&str> = header.split('\t').collect();
     let at = |n: &str| h.iter().position(|c| *c == n);
     let (Some(c_scan), Some(c_raw), Some(c_ms2)) =
@@ -102,59 +103,97 @@ pub(crate) fn rerank_pin(
         .max(c_run.unwrap_or(0))
         + 1;
     let mut group_of: HashMap<String, u32> = HashMap::new();
-    let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut key = String::new();
+    let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut group = Vec::new();
     let mut raw = Vec::new();
     let mut ms2 = Vec::new();
     let mut rt_diff = Vec::new();
     let mut target = Vec::new();
     let mut run = Vec::new();
-    for l in lines {
-        let l = l.map_err(err)?;
-        if l.is_empty() {
-            continue;
-        }
-        let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
-        if x.len() < need {
-            return Err(format!("{}: short row while re-ranking", pin.display()));
-        }
-        let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
-        key.clear();
-        key.push_str(spectrum_key(x[0], x[c_scan]));
-        key.push('\t');
-        key.push_str(x[c_scan]);
-        let g = match group_of.get(&key) {
-            Some(&g) => g,
-            None => {
-                let g = group_of.len() as u32;
-                group_of.insert(key.clone(), g);
-                g
-            }
-        };
-        group.push(g);
-        raw.push(r.unwrap_or(f64::NAN));
-        ms2.push(m.unwrap_or(f64::NAN));
-        if let Some((cd, cm)) = c_rt {
-            let missing = x[cm].parse::<f64>() != Ok(0.0);
-            rt_diff.push(if missing {
-                f64::NAN
-            } else {
-                x[cd].parse::<f64>().unwrap_or(f64::NAN)
-            });
-            target.push(c_label.is_some_and(|c| x[c] == "1"));
-            let name = c_run.map_or("", |c| x[c]);
-            let id = match run_of.get(name) {
-                Some(&id) => id,
-                None => {
-                    let id = run_of.len() as u32;
-                    run_of.insert(name.to_string(), id);
-                    id
-                }
-            };
-            run.push(id);
-        }
+    struct Row<'a> {
+        spectrum: &'a str,
+        scan: &'a str,
+        raw: f64,
+        ms2: f64,
+        rt_diff: f64,
+        target: bool,
+        run: &'a str,
     }
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |_, lines| {
+            let parsed: Vec<Option<Row<'_>>> = lines
+                .par_iter()
+                .map(|l| {
+                    let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
+                    if x.len() < need {
+                        return None;
+                    }
+                    let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
+                    let (rt_diff, target, run) = match c_rt {
+                        Some((cd, cm)) => {
+                            let missing = x[cm].parse::<f64>() != Ok(0.0);
+                            (
+                                if missing {
+                                    f64::NAN
+                                } else {
+                                    x[cd].parse::<f64>().unwrap_or(f64::NAN)
+                                },
+                                c_label.is_some_and(|c| x[c] == "1"),
+                                c_run.map_or("", |c| x[c]),
+                            )
+                        }
+                        None => (f64::NAN, false, ""),
+                    };
+                    Some(Row {
+                        spectrum: spectrum_key(x[0], x[c_scan]),
+                        scan: x[c_scan],
+                        raw: r.unwrap_or(f64::NAN),
+                        ms2: m.unwrap_or(f64::NAN),
+                        rt_diff,
+                        target,
+                        run,
+                    })
+                })
+                .collect();
+            for r in parsed {
+                let Some(r) = r else {
+                    return Err(format!("{}: short row while re-ranking", pin.display()));
+                };
+                key.clear();
+                key.push_str(r.spectrum);
+                key.push('\t');
+                key.push_str(r.scan);
+                let g = match group_of.get(&key) {
+                    Some(&g) => g,
+                    None => {
+                        let g = group_of.len() as u32;
+                        group_of.insert(key.clone(), g);
+                        g
+                    }
+                };
+                group.push(g);
+                raw.push(r.raw);
+                ms2.push(r.ms2);
+                if c_rt.is_some() {
+                    rt_diff.push(r.rt_diff);
+                    target.push(r.target);
+                    let id = match run_of.get(r.run) {
+                        Some(&id) => id,
+                        None => {
+                            let id = run_of.len() as u32;
+                            run_of.insert(r.run.to_string(), id);
+                            id
+                        }
+                    };
+                    run.push(id);
+                }
+            }
+            Ok(())
+        },
+    )?;
     drop(group_of);
     let n_rows = group.len();
     let z = |v: &[f64]| -> Vec<f64> {
@@ -210,31 +249,40 @@ pub(crate) fn rerank_pin(
         let mut w = BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
         w.write_all(header.as_bytes()).map_err(io)?;
         w.write_all(b"\n").map_err(io)?;
-        let mut lines = open()?;
-        lines.next().transpose().map_err(err)?;
-        let mut row = 0usize;
-        for l in lines {
-            let l = l.map_err(err)?;
-            if l.is_empty() {
-                continue;
-            }
-            match keep_row.get(row) {
-                Some(true) => {
-                    w.write_all(l.as_bytes()).map_err(io)?;
-                    w.write_all(b"\n").map_err(io)?;
-                }
-                Some(false) => {
-                    if want_dropped {
-                        dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
-                    }
-                }
-                None => {
+        let mut rows = 0usize;
+        crate::dia::blocks::read_blocks(
+            pin,
+            |_| Ok(()),
+            |first, lines| {
+                if first + lines.len() > n_rows {
                     return Err(format!("{}: changed while re-ranking", pin.display()));
                 }
-            }
-            row += 1;
-        }
-        if row != n_rows {
+                let parts: Vec<(String, Vec<String>)> = lines
+                    .par_chunks(crate::dia::blocks::LINES_PER_TASK)
+                    .enumerate()
+                    .map(|(c, chunk)| {
+                        let mut buf = String::new();
+                        let mut gone = Vec::new();
+                        for (j, l) in chunk.iter().enumerate() {
+                            if keep_row[first + c * crate::dia::blocks::LINES_PER_TASK + j] {
+                                buf.push_str(l);
+                                buf.push('\n');
+                            } else if want_dropped {
+                                gone.push(l.split('\t').next().unwrap_or_default().to_string());
+                            }
+                        }
+                        (buf, gone)
+                    })
+                    .collect();
+                for (buf, gone) in parts {
+                    w.write_all(buf.as_bytes()).map_err(io)?;
+                    dropped.extend(gone);
+                }
+                rows = first + lines.len();
+                Ok(())
+            },
+        )?;
+        if rows != n_rows {
             return Err(format!("{}: changed while re-ranking", pin.display()));
         }
         w.flush().map_err(io)?;
@@ -515,6 +563,7 @@ fn angle(p: &[f64], o: &[f64]) -> f64 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn evidence(
     pred: &[f32],
     ions: &[(bool, u8)],
@@ -524,6 +573,21 @@ pub(crate) fn evidence(
     center: usize,
     tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
+    let (frags, traces) = fragment_evidence(pred, ions, mass, charge, scans, tol);
+    evidence_of(&frags, &traces, scans.len(), center)
+}
+
+/// The predicted fragments of a row (`(m/z, predicted intensity)`, in the order of
+/// [`onnx_infer::predictors::spectral::ms2_features_with`]) and their [`fragment_traces`] over
+/// `scans`.
+pub(crate) fn fragment_evidence(
+    pred: &[f32],
+    ions: &[(bool, u8)],
+    mass: &Mass,
+    charge: u8,
+    scans: &[&[(f64, f32)]],
+    tol: FragmentTolerance,
+) -> (Vec<(f64, f64)>, Vec<f64>) {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
     let mut frags: Vec<(f64, f64)> = Vec::new();
@@ -539,33 +603,34 @@ pub(crate) fn evidence(
             frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
         }
     }
-    let trace = |mz: f64| -> Vec<f64> {
-        let w = tol.window(mz);
-        scans
-            .iter()
-            .map(|s| {
-                let lo = s.partition_point(|p| p.0 < mz - w);
-                s[lo..]
-                    .iter()
-                    .take_while(|p| p.0 <= mz + w)
-                    .fold(0.0, |m, p| f64::max(m, p.1 as f64))
-            })
-            .collect()
-    };
-    let traces: Vec<Vec<f64>> = frags.iter().map(|f| trace(f.0)).collect();
+    let traces = fragment_traces(&frags, scans, tol);
+    (frags, traces)
+}
+
+/// The `EVIDENCE_COLUMNS` of a row from its [`fragment_evidence`]: `ns` scans per fragment
+/// trace, the row's own scan at `center`.
+pub(crate) fn evidence_of(
+    frags: &[(f64, f64)],
+    traces: &[f64],
+    ns: usize,
+    center: usize,
+) -> [f64; EVIDENCE_COLUMNS.len()] {
+    let trace = |k: usize| &traces[k * ns..(k + 1) * ns];
     let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
     let lo = center.saturating_sub(1);
-    let hi = (center + 2).min(scans.len());
+    let hi = (center + 2).min(ns);
     let apex = (lo..hi)
         .max_by(|&x, &y| {
-            let at = |s: usize| traces.iter().zip(&p).map(|(t, w)| t[s] * w).sum::<f64>();
+            let at = |s: usize| (0..frags.len()).map(|k| trace(k)[s] * p[k]).sum::<f64>();
             at(x)
                 .total_cmp(&at(y))
                 .then(y.abs_diff(center).cmp(&x.abs_diff(center)))
         })
         .unwrap_or(center);
-    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(scans.len()));
-    let sum3: Vec<f64> = traces.iter().map(|t| t[a..b].iter().sum()).collect();
+    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(ns));
+    let sum3: Vec<f64> = (0..frags.len())
+        .map(|k| trace(k)[a..b].iter().sum())
+        .collect();
     let sp: f64 = p.iter().sum();
     let sum3_angle = angle(&p, &sum3);
     let sum3_explained = if sp > 0.0 {
@@ -585,16 +650,18 @@ pub(crate) fn evidence(
     let norm: Vec<Vec<f64>> = top
         .iter()
         .map(|&k| {
-            let m = traces[k].iter().cloned().fold(0.0, f64::max);
-            traces[k]
+            let m = trace(k).iter().cloned().fold(0.0, f64::max);
+            trace(k)
                 .iter()
                 .map(|v| if m > 0.0 { v / m } else { 0.0 })
                 .collect()
         })
         .collect();
-    let profile: Vec<f64> = (0..scans.len())
+    let mut v: Vec<f64> = Vec::with_capacity(norm.len());
+    let profile: Vec<f64> = (0..ns)
         .map(|s| {
-            let mut v: Vec<f64> = norm.iter().map(|t| t[s]).collect();
+            v.clear();
+            v.extend(norm.iter().map(|t| t[s]));
             v.sort_by(f64::total_cmp);
             match v.len() {
                 0 => 0.0,
@@ -606,15 +673,15 @@ pub(crate) fn evidence(
     let pn = profile.len().max(1) as f64;
     let pm = profile.iter().sum::<f64>() / pn;
     let pvar: f64 = profile.iter().map(|v| (v - pm) * (v - pm)).sum();
-    let corrs: Vec<f64> = top.iter().map(|&k| pearson(&traces[k], &profile)).collect();
+    let corrs: Vec<f64> = top.iter().map(|&k| pearson(trace(k), &profile)).collect();
     let pf_corr = corrs.iter().sum::<f64>() / corrs.len().max(1) as f64;
     let pf_clean =
         corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64 / top.len().max(1) as f64;
     let proj: Vec<f64> = top
         .iter()
         .map(|&k| {
-            let tm = traces[k].iter().sum::<f64>() / pn;
-            let cov: f64 = traces[k]
+            let tm = trace(k).iter().sum::<f64>() / pn;
+            let cov: f64 = trace(k)
                 .iter()
                 .zip(&profile)
                 .map(|(x, y)| (x - tm) * (y - pm))
@@ -634,6 +701,44 @@ pub(crate) fn evidence(
         pf_clean,
         angle(&ptop, &proj),
     ]
+}
+
+/// The highest peak intensity within `tol` of each fragment's m/z in each scan, fragment-major
+/// (`frags.len()` rows of `scans.len()` values; 0 without a peak). Each scan's peaks are walked
+/// once, in the fragments' m/z order, instead of a binary search per fragment; a window whose
+/// lower edge falls below the previous one is searched afresh, so every fragment sees the peaks
+/// a binary search would give it.
+fn fragment_traces(
+    frags: &[(f64, f64)],
+    scans: &[&[(f64, f32)]],
+    tol: FragmentTolerance,
+) -> Vec<f64> {
+    let ns = scans.len();
+    let mut order: Vec<usize> = (0..frags.len()).collect();
+    order.sort_by(|&a, &b| frags[a].0.total_cmp(&frags[b].0));
+    let mut out = vec![0.0f64; frags.len() * ns];
+    for (s, peaks) in scans.iter().enumerate() {
+        let mut lo = 0usize;
+        let mut prev = f64::NEG_INFINITY;
+        for &k in &order {
+            let mz = frags[k].0;
+            let w = tol.window(mz);
+            let edge = mz - w;
+            if edge >= prev {
+                while lo < peaks.len() && peaks[lo].0 < edge {
+                    lo += 1;
+                }
+            } else {
+                lo = peaks.partition_point(|p| p.0 < edge);
+            }
+            prev = edge;
+            out[k * ns + s] = peaks[lo..]
+                .iter()
+                .take_while(|p| p.0 <= mz + w)
+                .fold(0.0, |m, p| f64::max(m, p.1 as f64));
+        }
+    }
+    out
 }
 
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {
@@ -847,34 +952,58 @@ const RT_MIN_ANCHORS: usize = 300;
 pub(crate) fn refine_rt(
     pin: &Path,
     spectra: &[Spectrum],
-    accepted: &dyn Fn(&str) -> bool,
+    accepted: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<bool, String> {
     use model_train::gbdt::train::{train_gbdt_regression, RegressionDataset, TrainParams};
 
     let t0 = Instant::now();
     let table = read_pin(pin, spectra, &[RT_REFINED.to_string()])?;
-    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = text.lines().filter(|l| !l.is_empty());
-    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
-    let at = |n: &str| h.iter().position(|c| *c == n);
-    let (Some(c_id), Some(c_file), Some(c_pred)) =
-        (at("SpecId"), at("FileName"), at("andesrt_predicted_rt"))
-    else {
-        return Ok(false);
-    };
-    let mut files: Vec<&str> = Vec::new();
+    let cols: std::cell::OnceCell<Option<(usize, usize, usize)>> = std::cell::OnceCell::new();
+    let mut files: Vec<String> = Vec::new();
     let mut run = Vec::with_capacity(table.rows.len());
     let mut anchor = Vec::with_capacity(table.rows.len());
     let mut pred = Vec::with_capacity(table.rows.len());
-    for line in lines {
-        let x: Vec<&str> = line.split('\t').collect();
-        let f = x[c_file];
-        run.push(files.iter().position(|g| *g == f).unwrap_or_else(|| {
-            files.push(f);
-            files.len() - 1
-        }));
-        anchor.push(accepted(x[c_id]));
-        pred.push(x[c_pred].parse::<f64>().unwrap_or(f64::NAN));
+    crate::dia::blocks::read_blocks(
+        pin,
+        |header| {
+            let h: Vec<&str> = header.split('\t').collect();
+            let at = |n: &str| h.iter().position(|c| *c == n);
+            let _ = cols.set(
+                match (at("SpecId"), at("FileName"), at("andesrt_predicted_rt")) {
+                    (Some(a), Some(b), Some(c)) => Some((a, b, c)),
+                    _ => None,
+                },
+            );
+            Ok(())
+        },
+        |_, lines| {
+            let Some(&Some((c_id, c_file, c_pred))) = cols.get() else {
+                return Ok(());
+            };
+            let parsed: Vec<(&str, bool, f64)> = lines
+                .par_iter()
+                .map(|line| {
+                    let x: Vec<&str> = line.split('\t').collect();
+                    (
+                        x[c_file],
+                        accepted(x[c_id]),
+                        x[c_pred].parse::<f64>().unwrap_or(f64::NAN),
+                    )
+                })
+                .collect();
+            for (f, a, p) in parsed {
+                run.push(files.iter().position(|g| g == f).unwrap_or_else(|| {
+                    files.push(f.to_string());
+                    files.len() - 1
+                }));
+                anchor.push(a);
+                pred.push(p);
+            }
+            Ok(())
+        },
+    )?;
+    if !matches!(cols.get(), Some(Some(_))) {
+        return Ok(false);
     }
     if run.len() != table.rows.len() {
         return Err(format!("{}: rows changed while refining RT", pin.display()));
@@ -1042,9 +1171,17 @@ pub(crate) fn precursor_q(
     targets: &mut HashMap<String, output::PercolatorPsm>,
     decoys: &HashMap<String, output::PercolatorPsm>,
 ) -> Result<PrecursorQ, String> {
-    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = text.lines().filter(|l| !l.is_empty());
-    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    let header = {
+        use std::io::BufRead;
+        let f = std::fs::File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+        std::io::BufReader::new(f)
+            .lines()
+            .find(|l| !matches!(l, Ok(l) if l.is_empty()))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", pin.display()))?
+            .unwrap_or_default()
+    };
+    let h: Vec<&str> = header.split('\t').collect();
     let at = |n: &str| {
         h.iter()
             .position(|c| *c == n)
@@ -1064,43 +1201,72 @@ pub(crate) fn precursor_q(
     };
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
-    for (i, line) in lines.enumerate() {
-        let x: Vec<&str> = line.split('\t').collect();
-        if x.len() <= c_pep.max(c_label).max(c_id) {
-            return Err(format!("{}: short PIN row {}", pin.display(), i + 2));
-        }
-        let (decoy, peptide, charge) = match &table {
-            Some(t) => {
-                let r = t
-                    .rows
-                    .get(i)
-                    .ok_or_else(|| format!("{}: row {} not read", pin.display(), i + 2))?;
-                let peptide = if r.form == NONE {
-                    x[c_pep].to_string()
-                } else {
-                    format!("#{}", r.form)
+    type Parsed<'a> = Option<(bool, String, u8, &'a str, f64, &'a str)>;
+    let targets_ro: &HashMap<String, output::PercolatorPsm> = targets;
+    crate::dia::blocks::read_blocks(
+        pin,
+        |_| Ok(()),
+        |first, lines| {
+            let parsed: Vec<Result<Parsed<'_>, String>> = lines
+                .par_iter()
+                .enumerate()
+                .map(|(j, line)| {
+                    let i = first + j;
+                    let x: Vec<&str> = line.split('\t').collect();
+                    if x.len() <= c_pep.max(c_label).max(c_id) {
+                        return Err(format!("{}: short PIN row {}", pin.display(), i + 2));
+                    }
+                    let (decoy, peptide, charge) = match &table {
+                        Some(t) => {
+                            let r = t.rows.get(i).ok_or_else(|| {
+                                format!("{}: row {} not read", pin.display(), i + 2)
+                            })?;
+                            let peptide = if r.form == NONE {
+                                x[c_pep].to_string()
+                            } else {
+                                format!("#{}", r.form)
+                            };
+                            (r.decoy, peptide, r.charge)
+                        }
+                        None => (
+                            x[c_label].trim() == "-1",
+                            x[c_pep].to_string(),
+                            charge_cols
+                                .iter()
+                                .find(|(c, _)| x.get(*c) == Some(&"1"))
+                                .map_or(0, |c| c.1),
+                        ),
+                    };
+                    let id = x[c_id];
+                    let psm = if decoy {
+                        decoys.get(id)
+                    } else {
+                        targets_ro.get(id)
+                    };
+                    let Some(score) = psm.and_then(|p| p.score) else {
+                        return Ok(None);
+                    };
+                    Ok(Some((
+                        decoy,
+                        peptide,
+                        charge,
+                        id,
+                        score,
+                        c_file.map_or("", |i| x[i]),
+                    )))
+                })
+                .collect();
+            for p in parsed {
+                let Some((decoy, peptide, charge, id, score, run)) = p? else {
+                    continue;
                 };
-                (r.decoy, peptide, r.charge)
+                let n = keys.len() as u32;
+                let k = *keys.entry((run.to_string(), peptide, charge)).or_insert(n);
+                rows.push((k, score, decoy, id.to_string()));
             }
-            None => (
-                x[c_label].trim() == "-1",
-                x[c_pep].to_string(),
-                charge_cols
-                    .iter()
-                    .find(|(c, _)| x.get(*c) == Some(&"1"))
-                    .map_or(0, |c| c.1),
-            ),
-        };
-        let id = x[c_id];
-        let psm = if decoy { decoys.get(id) } else { targets.get(id) };
-        let Some(score) = psm.and_then(|p| p.score) else {
-            continue;
-        };
-        let run = c_file.map_or("", |i| x[i]).to_string();
-        let n = keys.len() as u32;
-        let k = *keys.entry((run, peptide, charge)).or_insert(n);
-        rows.push((k, score, decoy, id.to_string()));
-    }
+            Ok(())
+        },
+    )?;
     let q = precursor_q_values(keys.len(), &rows);
     let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();
     let n_decoys = q.iter().filter(|p| p.is_some_and(|p| p.1)).count();

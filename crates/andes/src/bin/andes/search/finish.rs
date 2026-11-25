@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use model::Spectrum;
+use rayon::prelude::*;
 use search::TopNQueue;
 
 use super::outputs::{release_at_exit, write_proteoform_table, write_search_tsv, PsmTables};
@@ -617,7 +618,7 @@ pub(super) fn write_pin_and_rescore(
         && cli.output_tsv.is_none())
     .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
     if fact_rows.is_some() {
-        queues = Vec::new();
+        std::mem::take(&mut queues).into_par_iter().for_each(drop);
         crate::memory::release_free_memory();
     }
     log::info!(

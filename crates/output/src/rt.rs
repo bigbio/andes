@@ -1,4 +1,5 @@
 use model::spectrum::Spectrum;
+use rayon::prelude::*;
 use scoring_crate::rt::{calibrate, RtIndexModel};
 use search::candidates::Candidate;
 use search::psm::TopNQueue;
@@ -31,29 +32,28 @@ pub fn populate_rt_features(
 ) {
     let model = RtIndexModel::seed();
 
-    let mut anchors: Vec<(f64, f64)> = Vec::new();
-    for (spec_idx, queue) in queues.iter().enumerate() {
-        if queue.is_empty() {
-            continue;
-        }
-        let obs_rt_min = match spectra[spec_idx].rt_seconds {
-            Some(s) => s / SECONDS_PER_MINUTE,
-            None => continue,
-        };
-        let sorted = queue.clone().into_rank_sorted_vec();
-        for (rank, psm) in iter_ranked_by_rank_score(&sorted) {
-            if rank != 1 {
-                break;
+    let anchors: Vec<(f64, f64)> = queues
+        .par_iter()
+        .enumerate()
+        .filter_map(|(spec_idx, queue)| {
+            if queue.is_empty() {
+                return None;
             }
-            let cand = &candidates[psm.primary_candidate_idx() as usize];
-            if cand.is_decoy {
-                continue;
+            let obs_rt_min = spectra[spec_idx].rt_seconds? / SECONDS_PER_MINUTE;
+            let sorted = queue.clone().into_rank_sorted_vec();
+            for (rank, psm) in iter_ranked_by_rank_score(&sorted) {
+                if rank != 1 {
+                    break;
+                }
+                let cand = &candidates[psm.primary_candidate_idx() as usize];
+                if cand.is_decoy {
+                    continue;
+                }
+                return Some((model.predict_peptide(&cand.peptide), obs_rt_min));
             }
-            let index = model.predict_peptide(&cand.peptide);
-            anchors.push((index, obs_rt_min));
-            break;
-        }
-    }
+            None
+        })
+        .collect();
 
     let (slope, intercept) = match calibrate(&anchors) {
         Some(si) => si,
@@ -76,33 +76,36 @@ pub fn populate_rt_features(
     }
     let span = max_rt - min_rt;
 
-    for (spec_idx, queue) in queues.iter_mut().enumerate() {
-        if queue.is_empty() {
-            continue;
-        }
-        let obs_rt_min = spectra[spec_idx]
-            .rt_seconds
-            .filter(|s| s.is_finite())
-            .map(|s| s / SECONDS_PER_MINUTE);
-        queue.fill_post_topn(|psm| {
-            let obs = match obs_rt_min {
-                Some(o) => o,
-                None => return,
-            };
-            let cand = &candidates[psm.primary_candidate_idx() as usize];
-            let index = model.predict_peptide(&cand.peptide);
-            let pred = slope * index + intercept;
-            let delta = obs - pred;
-            if !pred.is_finite() || !delta.is_finite() {
+    queues
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(spec_idx, queue)| {
+            if queue.is_empty() {
                 return;
             }
-            let norm = if span > 0.0 { delta / span } else { 0.0 };
-            psm.features.predicted_rt_min = pred as f32;
-            psm.features.delta_rt = delta as f32;
-            psm.features.abs_delta_rt = delta.abs() as f32;
-            psm.features.delta_rt_norm = norm as f32;
+            let obs_rt_min = spectra[spec_idx]
+                .rt_seconds
+                .filter(|s| s.is_finite())
+                .map(|s| s / SECONDS_PER_MINUTE);
+            queue.fill_post_topn(|psm| {
+                let obs = match obs_rt_min {
+                    Some(o) => o,
+                    None => return,
+                };
+                let cand = &candidates[psm.primary_candidate_idx() as usize];
+                let index = model.predict_peptide(&cand.peptide);
+                let pred = slope * index + intercept;
+                let delta = obs - pred;
+                if !pred.is_finite() || !delta.is_finite() {
+                    return;
+                }
+                let norm = if span > 0.0 { delta / span } else { 0.0 };
+                psm.features.predicted_rt_min = pred as f32;
+                psm.features.delta_rt = delta as f32;
+                psm.features.abs_delta_rt = delta.abs() as f32;
+                psm.features.delta_rt_norm = norm as f32;
+            });
         });
-    }
 }
 
 #[cfg(test)]

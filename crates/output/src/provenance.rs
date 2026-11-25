@@ -1,4 +1,5 @@
 use model::EntryKind;
+use rayon::prelude::*;
 use search::candidates::Candidate;
 use search::mimics::{fits_better, isotope_gap_da, mod_shift_da};
 use search::psm::{PsmMatch, TopNQueue};
@@ -9,9 +10,9 @@ pub fn populate_provenance_features(
     candidates: &[Candidate],
     idx: &SearchIndex,
 ) {
-    for queue in queues.iter_mut() {
-        queue.update_in_place(|psm| set_features(psm, candidates, idx));
-    }
+    queues
+        .par_iter_mut()
+        .for_each(|queue| queue.update_in_place(|psm| set_features(psm, candidates, idx)));
 }
 
 fn set_features(psm: &mut PsmMatch, candidates: &[Candidate], idx: &SearchIndex) {

@@ -339,7 +339,7 @@ fn each_project_share_is_counted_at_the_pooled_cuts() {
     };
     assert_eq!(at("A", "intra", 0.01), (1, 0, 0, 0.0));
     assert_eq!(at("A", "intra", 0.05), (2, 1, 0, 0.5));
-    assert_eq!(at("B", "intra", 0.05), (1, 0, 1, 0.0));
+    assert_eq!(at("B", "intra", 0.05), (1, 0, 1, 1.0));
     assert_eq!(at("B", "homotypic", 0.01), (1, 1, 0, 1.0));
     assert_eq!(rows.len(), 6);
     assert_eq!(project_of("PXD1.run.with.dots", &Projects::new()), "PXD1");

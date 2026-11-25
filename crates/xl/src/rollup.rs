@@ -169,12 +169,15 @@ mod tests {
             items.push(dd);
         }
         items.extend((0..300).map(|i| item(&format!("i{i}"), 1000.0 - i as f64, TT, true)));
-        items.extend((0..5).map(|k| item(&format!("id{k}"), 900.0 - k as f64, DD, true)));
+        items.extend((0..4).map(|k| {
+            let class = if k < 2 { TD } else { DD };
+            item(&format!("id{k}"), 900.0 - k as f64, class, true)
+        }));
         let g = group_by(&items, |_, it| it.key.clone());
         let q = split_q_values(&g, |_| true);
         let q_of = |k: &str| q[g.iter().position(|g| g.key == k).unwrap()].unwrap();
         assert!((q_of("h299") - 6.0 / 300.0).abs() < 1e-12);
-        assert!((q_of("i299") - 2.0 / 300.0).abs() < 1e-12);
+        assert!((q_of("i299") - 3.0 / 300.0).abs() < 1e-12);
         assert_eq!(LinkClass::of(true, true).name(), "homotypic");
         assert!(LinkClass::Homotypic.is_intra() && !LinkClass::Inter.is_intra());
     }

@@ -14,9 +14,9 @@ use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof::ms1::{
     centroid_frame, centroid_profile, fit_calibration, match_precursors, offset_curve,
-    sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid, MzCalibration,
-    OffsetCurve, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS,
-    WIDE_WINDOW_PPM,
+    read_tdf_mz_model, sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid,
+    MzCalibration, OffsetCurve, TdfMzModel, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
+    REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::timstof::ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
@@ -101,6 +101,7 @@ struct DecodedMs1 {
 struct TdfTables {
     temperatures: HashMap<usize, [f64; 2]>,
     precursor_peaks: HashMap<usize, Vec<f64>>,
+    mz_model: Option<TdfMzModel>,
 }
 
 fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
@@ -122,11 +123,13 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
             temperatures.insert(id as usize, [t1.unwrap_or(0.0), t2.unwrap_or(0.0)]);
         }
     }
+    let mz_model = read_tdf_mz_model(&conn);
     let mut precursor_peaks: HashMap<usize, Vec<f64>> = HashMap::new();
     if !has_table(&conn, "Precursors")? {
         return Ok(TdfTables {
             temperatures,
             precursor_peaks,
+            mz_model,
         });
     }
     let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
@@ -147,6 +150,7 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
     Ok(TdfTables {
         temperatures,
         precursor_peaks,
+        mz_model,
     })
 }
 
@@ -233,7 +237,16 @@ impl Ms1Frames {
         let intercept = conv.convert(0.0).sqrt();
         let slope = conv.convert(1.0).sqrt() - intercept;
         let scale = conv.invert(metadata.upper_mz).max(1.0);
-        let base = MzCalibration::linear(intercept, slope, scale);
+        let base = match tables.mz_model {
+            Some(model) => MzCalibration::tdf(model, scale),
+            None => {
+                log::warn!(
+                    "no usable MzCalibration row in analysis.tdf; m/z starts from the \
+                     acquisition-range model, which can be tens of ppm off"
+                );
+                MzCalibration::linear(intercept, slope, scale)
+            }
+        };
         let mut ms1 = Self {
             frames,
             positions,
@@ -259,6 +272,10 @@ impl Ms1Frames {
                 );
                 ms1.calibration = fit.calibration;
             }
+            None if base.is_tdf() => log::info!(
+                "m/z from the instrument calibration in analysis.tdf (MzCalibration, \
+                 temperature corrected per frame)"
+            ),
             None => log::warn!(
                 "too few precursor peaks matched their MS1 frame for an m/z \
                  calibration; MS1 m/z uses the acquisition-range model"

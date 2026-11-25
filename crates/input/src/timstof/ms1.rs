@@ -351,12 +351,78 @@ pub(crate) fn conditions(f: FrameConditions, intensity: f64) -> Conditions {
     [f.t[0], f.t[1], intensity.max(1.0).ln(), h, h * h]
 }
 
+/// The instrument's own TOF to m/z model, a ModelType 1 row of the MzCalibration table.
+/// The flight time of a TOF index is `delay + timebase * tof` ns, and with the temperature
+/// factor `cf = 1 - 1e-6 * (dC1 (T1 - T1cal) + dC2 (T2 - T2cal))` of the frame,
+/// `t = C0 + 1e6 / sqrt(C1 cf) * sqrt(mz + C4) + C2 / cf * mz`. This agrees with the
+/// Bruker SDK to 0.02 ppm, the rounding of the stored coefficients.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TdfMzModel {
+    pub timebase: f64,
+    pub delay: f64,
+    pub t_cal: [f64; 2],
+    pub dc: [f64; 2],
+    pub c0: f64,
+    pub c1: f64,
+    pub c2: f64,
+    pub c4: f64,
+}
+
+impl TdfMzModel {
+    pub fn mz(&self, tof: f64, t: [f64; 2]) -> f64 {
+        let drift = self.dc[0] * (t[0] - self.t_cal[0]) + self.dc[1] * (t[1] - self.t_cal[1]);
+        let cf = 1.0 - 1e-6 * drift;
+        let a = self.c2 / cf;
+        let b = 1e6 / (self.c1 * cf).sqrt();
+        // a u^2 + b u = y with u = sqrt(mz + C4); this root is stable for either sign of a.
+        let y = self.delay + self.timebase * tof - self.c0 + a * self.c4;
+        let u = 2.0 * y / (b + (b * b + 4.0 * a * y).sqrt());
+        u * u - self.c4
+    }
+}
+
+/// The ModelType 1 row most frames use, or `None` when the table is missing, another model
+/// is in use, or a coefficient this model does not know (C3) is set.
+pub(crate) fn read_tdf_mz_model(conn: &rusqlite::Connection) -> Option<TdfMzModel> {
+    let sql = "SELECT ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, C1, \
+               C2, C3, C4 FROM MzCalibration WHERE Id = (SELECT MzCalibration FROM Frames \
+               GROUP BY MzCalibration ORDER BY COUNT(*) DESC LIMIT 1)";
+    let row = conn
+        .query_row(sql, [], |r| {
+            let mut v = [0.0f64; 11];
+            for (k, x) in v.iter_mut().enumerate() {
+                *x = r.get::<_, Option<f64>>(k + 1)?.unwrap_or(f64::NAN);
+            }
+            Ok((r.get::<_, Option<i64>>(0)?, v))
+        })
+        .ok()?;
+    let (kind, [timebase, delay, t1, t2, dc1, dc2, c0, c1, c2, c3, c4]) = row;
+    let usable = kind == Some(1)
+        && c3 == 0.0
+        && timebase > 0.0
+        && c1 > 0.0
+        && [delay, t1, t2, dc1, dc2, c0, c2, c4]
+            .iter()
+            .all(|x| x.is_finite());
+    usable.then_some(TdfMzModel {
+        timebase,
+        delay,
+        t_cal: [t1, t2],
+        dc: [dc1, dc2],
+        c0,
+        c1,
+        c2,
+        c4,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MzCalibration {
     scale: f64,
     poly: [f64; 4],
     cond: [f64; 5],
     c_ref: Conditions,
+    tdf: Option<TdfMzModel>,
 }
 
 impl MzCalibration {
@@ -366,10 +432,25 @@ impl MzCalibration {
             poly: [intercept, slope * scale, 0.0, 0.0],
             cond: [0.0; 5],
             c_ref: [0.0; 5],
+            tdf: None,
         }
     }
 
+    pub fn tdf(model: TdfMzModel, scale: f64) -> Self {
+        Self {
+            tdf: Some(model),
+            ..Self::linear(0.0, 0.0, scale)
+        }
+    }
+
+    pub fn is_tdf(&self) -> bool {
+        self.tdf.is_some()
+    }
+
     pub fn mz(&self, tof: f64, c: Conditions) -> f64 {
+        if let Some(model) = &self.tdf {
+            return model.mz(tof, [c[0], c[1]]);
+        }
         let x = tof / self.scale;
         let p = &self.poly;
         let terms: f64 = (0..5).map(|k| self.cond[k] * (c[k] - self.c_ref[k])).sum();
@@ -623,6 +704,7 @@ pub(crate) fn fit_calibration(
             poly: [coef[0], coef[1], coef[2], coef[3]],
             cond: temp,
             c_ref: t_ref,
+            tdf: None,
         };
         let ppm: Vec<f64> = points
             .iter()
@@ -991,5 +1073,118 @@ mod tests {
             assert!((curve.at(m) - truth(m)).abs() < 3.0, "{m}: {}", curve.at(m));
         }
         assert_eq!(OffsetCurve::constant(4.0).at(123.0), 4.0);
+    }
+
+    /// A model, the frame T1 and T2, and TOF index -> m/z pairs of the Bruker SDK.
+    type SdkCase = (TdfMzModel, [f64; 2], [(f64, f64); 4]);
+
+    /// SDK cases for frame 101 of PXD028735 Condition A Alpha 01 (C2 > 0) and of a 21 min
+    /// HeLa run (C2 < 0).
+    fn sdk_cases() -> [SdkCase; 2] {
+        let pxd = TdfMzModel {
+            timebase: 0.2,
+            delay: 25279.6,
+            t_cal: [25.803492210895893, 26.16594468081322],
+            dc: [13.4, 0.0],
+            c0: 317.79692276420536,
+            c1: 152422.6786479605,
+            c2: 0.00044948185059656226,
+            c4: -0.021456006606015886,
+        };
+        let hela = TdfMzModel {
+            timebase: 0.19999999999999998,
+            delay: 25581.8,
+            t_cal: [25.304233, 22.467882],
+            dc: [21.0, 0.0],
+            c0: 308.058693,
+            c1: 156618.35376,
+            c2: -0.003637,
+            c4: 0.045331,
+        };
+        [
+            (
+                pxd,
+                [25.759546401430235, 25.415852921226346],
+                [
+                    (20000.5, 127.87192146547858),
+                    (100000.0, 308.1518988296756),
+                    (250000.0, 856.5176411319167),
+                    (380000.0, 1553.688785182179),
+                ],
+            ),
+            (
+                hela,
+                [25.327912672795613, 22.637715307372783],
+                [
+                    (20000.5, 134.1743960310776),
+                    (100000.0, 320.99353264624693),
+                    (250000.0, 887.4512495268721),
+                    (380000.0, 1606.4751195124252),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_tdf_model_reproduces_the_bruker_sdk() {
+        for (model, t, pairs) in sdk_cases() {
+            let cal = MzCalibration::tdf(model, 400_000.0);
+            for (tof, sdk) in pairs {
+                let ppm = (cal.mz(tof, [t[0], t[1], 0.0, 0.0, 0.0]) - sdk) / sdk * 1e6;
+                assert!(ppm.abs() < 0.05, "tof {tof}: {ppm} ppm");
+            }
+        }
+    }
+
+    #[test]
+    fn the_tdf_model_drops_the_temperature_term_only_at_a_cost() {
+        let (model, t, pairs) = sdk_cases()[0];
+        let (tof, sdk) = pairs[2];
+        let cold = model.mz(tof, model.t_cal);
+        let ppm = (cold - sdk) / sdk * 1e6;
+        assert!((ppm - -0.59).abs() < 0.05, "{ppm}");
+        assert!(((model.mz(tof, t) - sdk) / sdk * 1e6).abs() < 0.05);
+    }
+
+    fn calibration_db(rows: &[&str], frames: &[i64]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE MzCalibration (Id INTEGER, ModelType INTEGER, DigitizerTimebase REAL, \
+               DigitizerDelay REAL, T1 REAL, T2 REAL, dC1 REAL, dC2 REAL, C0 REAL, C1 REAL, \
+               C2 REAL, C3 REAL, C4 REAL);
+             CREATE TABLE Frames (Id INTEGER, MzCalibration INTEGER);",
+        )
+        .unwrap();
+        for r in rows {
+            conn.execute(&format!("INSERT INTO MzCalibration VALUES ({r})"), [])
+                .unwrap();
+        }
+        for (id, c) in frames.iter().enumerate() {
+            conn.execute("INSERT INTO Frames VALUES (?1, ?2)", [id as i64 + 1, *c])
+                .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn the_tdf_model_comes_from_the_row_most_frames_use() {
+        let rows = [
+            "1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, -0.02",
+            "2, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 320.5, 151916.0, 0.0021, 0, -0.08",
+        ];
+        let m = read_tdf_mz_model(&calibration_db(&rows, &[1, 2, 2])).unwrap();
+        assert_eq!(m.c0, 320.5);
+        let m = read_tdf_mz_model(&calibration_db(&rows, &[1, 1, 2])).unwrap();
+        assert_eq!(m.c0, 317.8);
+    }
+
+    #[test]
+    fn an_unknown_calibration_model_falls_back() {
+        let other = ["1, 2, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, 0"];
+        assert_eq!(read_tdf_mz_model(&calibration_db(&other, &[1])), None);
+        let c3 = ["1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 1, 0"];
+        assert_eq!(read_tdf_mz_model(&calibration_db(&c3, &[1])), None);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert_eq!(read_tdf_mz_model(&conn), None);
     }
 }

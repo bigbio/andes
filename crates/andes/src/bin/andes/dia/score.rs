@@ -263,7 +263,7 @@ pub(crate) fn learned_score(
 /// own nominees (their SpecIds are pass-1 SpecIds).
 struct Pass1 {
     names: Vec<String>,
-    rows: HashMap<(String, String, u8), Vec<f32>>,
+    rows: rustc_hash::FxHashMap<(String, String, u8), Vec<f32>>,
     run_file: HashMap<u32, String>,
 }
 
@@ -292,7 +292,8 @@ fn read_pass1(pin: &Path, own: &HashMap<&str, u32>) -> Result<Pass1, String> {
         names: Vec<String>,
     }
     let layout: std::cell::OnceCell<Layout> = std::cell::OnceCell::new();
-    let mut rows: HashMap<(String, String, u8), Vec<f32>> = HashMap::new();
+    let mut rows: rustc_hash::FxHashMap<(String, String, u8), Vec<f32>> =
+        rustc_hash::FxHashMap::default();
     let mut run_file: HashMap<u32, String> = HashMap::new();
     crate::dia::blocks::read_blocks(
         pin,

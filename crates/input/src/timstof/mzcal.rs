@@ -284,10 +284,13 @@ pub(crate) fn read_tdf_mz_models(conn: &rusqlite::Connection) -> TdfMzModels {
             *count.entry(row).or_default() += 1;
         }
     }
+    // With no frame on a usable row, a usable row is still closer than the acquisition-range
+    // line, so take the lowest Id.
     out.main = count
         .iter()
         .max_by_key(|&(id, n)| (*n, std::cmp::Reverse(*id)))
-        .map(|(id, _)| *id);
+        .map(|(id, _)| *id)
+        .or_else(|| out.rows.keys().min().copied());
     out.unusable_frames = out
         .frame_row
         .values()
@@ -658,6 +661,21 @@ mod tests {
         assert_eq!(m.for_frame(2).unwrap().c0, 317.8);
         assert_eq!(m.unusable_frames, 1);
         assert_eq!(m.unusable_summary().unwrap(), "1 frame with no row");
+    }
+
+    #[test]
+    fn with_no_frame_on_a_usable_row_the_lowest_usable_row_is_the_main_row() {
+        let rows = [
+            "2, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 320.5, 151916.0, 0.0021, 0, -0.08",
+            "1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, -0.02",
+            "3, 3, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 320.5, 151916.0, 0.0021, 0, -0.08",
+        ];
+        for frames in [[0, 0], [3, 3]] {
+            let m = read_tdf_mz_models(&calibration_db(&rows, &frames));
+            assert_eq!(m.main_id(), Some(1), "frames {frames:?}");
+            assert_eq!(m.for_frame(1).unwrap().c0, 317.8);
+            assert_eq!(m.unusable_frames, 2);
+        }
     }
 
     #[test]

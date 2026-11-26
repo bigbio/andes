@@ -9,6 +9,8 @@ use search::decoy::entrapment::{is_entrapment_accession, EntrapmentLookup};
 
 use crate::cli::Cli;
 
+mod shared;
+
 /// Percentage points per unit fraction in the diagnostic summary.
 const PERCENT_PER_FRACTION: f64 = 100.0;
 
@@ -70,6 +72,7 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
         &digest,
     )
     .ok_or("--add-entrapment: searched database contains no entrapment proteins")?;
+    let shared = shared::peptides(index, rows.values())?;
     let charges = charges(pin, rows)?;
     let mut psms = Vec::with_capacity(rows.len());
     let mut peptides = Vec::with_capacity(rows.len());
@@ -90,7 +93,7 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
             ));
         }
         let entrapment = proteins.iter().all(|a| is_entrapment_accession(a))
-            && !lookup.is_target_peptide(peptide.as_bytes());
+            && !shared.contains(&peptide.replace('I', "L"));
         let pair = peptide_pair(&lookup, &proteins, &peptide, entrapment);
         let discovery = Discovery {
             key: peptide.replace('I', "L"),
@@ -177,6 +180,12 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
     log::info!(target: "output", "Wrote entrapment diagnostics: {}", path.display());
     let q = cli.psm_fdr();
     let mut summary = format!("Entrapment  experimental q-only diagnostics at q <= {q}\n");
+    if !shared.is_empty() {
+        summary.push_str(&format!(
+            "  {} distinct peptide sequences rescued by target-substring matches (I = L)\n",
+            output::statistics::thousands(shared.len()),
+        ));
+    }
     for level in &levels {
         let e = entrapment::at_q(&level.rows, &level.curve, q);
         summary.push_str(&format!(
@@ -194,7 +203,7 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
     summary.push_str(
         "  Peptide/precursor counts use PSM q, not independent level FDR.\n\
          \x20 Counts do not apply the additional --pep or --protein-fdr report filters.\n\
-                        \x20 PSM/precursor combined FDP uses the digest peptide ratio as a proxy.\n\
+                        \x20 Combined FDP uses the searched digest ratio as a background proxy.\n\
                         \x20 NaN paired FDP means pairing is unavailable, not zero error.\n",
     );
     Ok(Some(summary))

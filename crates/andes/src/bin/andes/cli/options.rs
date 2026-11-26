@@ -1077,7 +1077,8 @@ pub(crate) struct SearchArgs {
     /// <stem>.entrapment.parquet report diagnostic lower-bound, combined and paired FDP
     /// estimates of PSMs, precursors, peptides and protein groups at --psm-fdr. Peptide
     /// and precursor counts inherit best-PSM q-values, not independent level FDR. The
-    /// digest peptide ratio is a proxy for PSM/precursor combined FDP. Paired FDP is
+    /// digest-independent target-substring rescue is applied with I and L folded. The
+    /// searched digest ratio is a background proxy for combined FDP. Paired FDP is
     /// unavailable (NaN) without an unambiguous one-to-one peptide pairing, including
     /// PSM, precursor and protein-group levels. Use a target-only database and generated
     /// decoys: prebuilt databases, existing decoys and --decoy-strategy none are rejected.

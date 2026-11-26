@@ -3,8 +3,9 @@
 //!
 //! A search run with `--add-entrapment` holds one shuffled entrapment protein per target
 //! (`search::decoy::entrapment`). An identification is an entrapment discovery when every
-//! protein it maps to is an entrapment protein and its peptide (I and L folded) is no target
-//! peptide. With `N_T` target and `N_E` entrapment discoveries above a cut, the estimators are
+//! protein it maps to is an entrapment protein and its peptide (I and L folded) is not a
+//! substring of any original target protein, independently of the search digest. With `N_T`
+//! target and `N_E` entrapment discoveries above a cut, the estimators are
 //! the lower bound `N_E / (N_T + N_E)`, the combined estimate `N_E (1 + 1/r) / (N_T + N_E)` with
 //! `r` the entrapment to target ratio, and the paired estimate
 //! `(N_E + N_{E>=s>T} + 2 N_{E>T>=s}) / (N_T + N_E)`, which counts each entrapment discovery

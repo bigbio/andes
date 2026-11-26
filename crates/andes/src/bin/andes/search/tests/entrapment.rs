@@ -39,6 +39,49 @@ fn entrapment_rejects_disabled_decoys_and_prebuilt_decoy_entries() {
 }
 
 #[test]
+fn target_rescue_is_digest_independent_folded_overlapping_and_never_crosses_proteins() {
+    let proteins = [
+        ("P1", "MAGPEPTIDEKA"),
+        ("P2", "AAACROSS"),
+        ("P3", "BORDERAAA"),
+        ("XXX_P1", "DECOYONLY"),
+        ("ENTRAP_P1", "ENTRAPONLY"),
+    ]
+    .into_iter()
+    .map(|(accession, sequence)| model::protein::Protein {
+        accession: accession.into(),
+        sequence: sequence.as_bytes().to_vec(),
+        description: String::new(),
+        annotation: None,
+    })
+    .collect();
+    let index =
+        search::SearchIndex::from_prebuilt(model::protein::ProteinDb { proteins }, "XXX", None);
+    let rows: Vec<_> = [
+        "PEPTLDEK",
+        "EPTIDE",
+        "CROSSBORDER",
+        "DECOYONLY",
+        "ENTRAPONLY",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, peptide)| psm(&i.to_string(), peptide, "ENTRAP_P1"))
+    .collect();
+    let lookup = EntrapmentLookup::new(
+        index.iter_target_proteins(),
+        &search::decoy::Proteases::default(),
+    )
+    .unwrap();
+    assert!(!lookup.is_target_peptide(b"PEPTIDEK"));
+    let rescued = shared::peptides(&index, rows.iter()).unwrap();
+    assert_eq!(
+        rescued,
+        std::collections::HashSet::from(["PEPTLDEK".into(), "EPTLDE".into()])
+    );
+}
+
+#[test]
 fn precursor_keys_ignore_flanks_but_keep_modifications() {
     assert_eq!(peptidoform("K.PEPTIM+15.99492K.G"), "PEPTLM+15.99492K");
     assert_eq!(peptidoform("R.PEPTIM+15.99492K.A"), "PEPTLM+15.99492K");

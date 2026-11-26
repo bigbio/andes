@@ -65,7 +65,9 @@ pub fn ms2_features(
     peaks: &[(f64, f32)],
     tol: FragmentTolerance,
 ) -> [f64; 8] {
-    ms2_features_with(pred, ions, mass, charge, |_, mz| peak_intensity(peaks, tol, mz))
+    ms2_features_with(pred, ions, mass, charge, |_, mz| {
+        peak_intensity(peaks, tol, mz)
+    })
 }
 
 /// [`ms2_features`] with each fragment's observed intensity from `observed(k, mz)`: `k` counts
@@ -92,7 +94,9 @@ pub fn ms2_features_where(
     tol: FragmentTolerance,
     keep: &dyn Fn(usize, bool) -> bool,
 ) -> [f64; 8] {
-    features(pred, ions, mass, charge, keep, |_, mz| peak_intensity(peaks, tol, mz))
+    features(pred, ions, mass, charge, keep, |_, mz| {
+        peak_intensity(peaks, tol, mz)
+    })
 }
 
 fn features(
@@ -234,7 +238,11 @@ mod tests {
         }
         let tol = FragmentTolerance::Ppm(20.0);
         let all = ms2_features(&pred, &BY1, &mass, 2, &peaks, tol);
-        assert!(all[6] < 0.9, "the corrupted ion lowers the angle: {}", all[6]);
+        assert!(
+            all[6] < 0.9,
+            "the corrupted ion lowers the angle: {}",
+            all[6]
+        );
         let kept = ms2_features_where(&pred, &BY1, &mass, 2, &peaks, tol, &|i, b| !(b && i == 5));
         assert!((kept[6] - 1.0).abs() < 1e-6, "spectral angle {}", kept[6]);
         let same = ms2_features_where(&pred, &BY1, &mass, 2, &peaks, tol, &|_, _| true);

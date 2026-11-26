@@ -77,9 +77,6 @@ pub(crate) const GAP_FEATURES: [&str; 6] = [
     "beta_gap_missing",
 ];
 
-/// The fragment-intensity features of a CSM the model has no row for: zero, marked missing.
-const MS2_NONE: crate::xl::ms2::Ms2Row = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
-
 /// The PIN `SpecId` of a spectrum's crosslink row; the CSM table repeats it in `spec_id`, so a
 /// rescored PIN joins back to the table by it.
 pub(crate) fn spec_id(r: &XlSpectrumResult) -> String {
@@ -233,7 +230,11 @@ pub(crate) fn write_xl_pin(
         ];
         row.extend(f.iter().map(|v| format!("{v:.5}")));
         if let Some(rows) = ms2 {
-            let m = rows.get(ri).copied().flatten().unwrap_or(MS2_NONE);
+            let m = rows
+                .get(ri)
+                .copied()
+                .flatten()
+                .unwrap_or(crate::xl::ms2::MISSING);
             row.extend(m.iter().map(|v| format!("{v:.5}")));
         }
         row.push(format!(

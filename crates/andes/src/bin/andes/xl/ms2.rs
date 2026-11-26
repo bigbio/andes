@@ -6,6 +6,10 @@
 //! linear prediction applies to it; a fragment with the link site carries the partner and is
 //! left out. A random partner that matches a few fragments by chance matches them without the
 //! peptide's intensity pattern.
+//!
+//! The features apply to MS-cleavable crosslinkers only. For a non-cleavable linker, a partner
+//! that is in the spectrum but not linked to the other peptide has a genuine intensity pattern
+//! too, so the features reward it, and the decoys, which never have one, cannot model that.
 
 use std::borrow::Cow;
 
@@ -15,27 +19,33 @@ use onnx_infer::predictors::spectral::{ms2_features_where, FragmentTolerance};
 use onnx_infer::predictors::{NativeMs2, Predictor};
 use rayon::prelude::*;
 use search::crosslinks::{Csm, PeptideHit, XlCandidates, XlSpectrumResult};
+use xl::crosslinker::Crosslinker;
 
 use crate::acquisition::Acquisition;
 use crate::cli::{Cli, PredictFeature};
 use crate::xl::fdr::XlRun;
 
 /// The PIN columns `--predict ms2` adds to a crosslink PIN.
-pub(crate) const FEATURES: [&str; 7] = [
+pub(crate) const FEATURES: [&str; 4] = [
     "alpha_ms2_angle",
     "beta_ms2_angle",
     "min_ms2_angle",
-    "alpha_ms2_pearson",
-    "beta_ms2_pearson",
-    "min_ms2_pearson",
     "ms2_missing",
 ];
 
-/// Indices of the spectral angle and the Pearson correlation in `ms2_features_where`.
+/// Index of the spectral angle in `ms2_features_where`.
 const ANGLE: usize = 6;
-const PEARSON: usize = 0;
 
 pub(crate) type Ms2Row = [f64; FEATURES.len()];
+
+/// The features of a CSM without a prediction (a non-cleavable linker's CSM, or a peptide the
+/// model cannot encode): zero, marked missing.
+pub(crate) const MISSING: Ms2Row = [0.0, 0.0, 0.0, 1.0];
+
+/// Whether the features apply to a search with these linkers: one of them is MS-cleavable.
+pub(crate) fn applies(linkers: &[Crosslinker]) -> bool {
+    linkers.iter().any(|l| l.cleavage.is_some())
+}
 
 pub(crate) struct XlMs2 {
     model: NativeMs2,
@@ -43,9 +53,22 @@ pub(crate) struct XlMs2 {
 }
 
 impl XlMs2 {
-    /// The model when `--predict` asks for `ms2`, else `None`.
-    pub(crate) fn from_cli(cli: &Cli, acquisition: &Acquisition) -> Result<Option<Self>, String> {
+    /// The model when `--predict` asks for `ms2` and one of `linkers` is MS-cleavable, else
+    /// `None`.
+    pub(crate) fn from_cli(
+        cli: &Cli,
+        acquisition: &Acquisition,
+        linkers: &[Crosslinker],
+    ) -> Result<Option<Self>, String> {
         if !cli.predict.contains(&PredictFeature::Ms2) {
+            return Ok(None);
+        }
+        if !applies(linkers) {
+            log::info!(
+                target: "xl",
+                "--predict ms2: the fragment-intensity features apply to MS-cleavable \
+                 crosslinkers only; none of this search's linkers is, so the crosslink PIN has none"
+            );
             return Ok(None);
         }
         Ok(Some(XlMs2 {
@@ -54,7 +77,7 @@ impl XlMs2 {
         }))
     }
 
-    /// One feature row per result with a CSM, aligned with `results`.
+    /// One feature row per result with a CSM of an MS-cleavable linker, aligned with `results`.
     pub(crate) fn rows(
         &self,
         spectra: &[Spectrum],
@@ -65,7 +88,9 @@ impl XlMs2 {
             .par_iter()
             .map(|r| {
                 let c = r.csm.as_ref()?;
-                Some(self.row(&spectra[r.spec_idx], c, &runs[r.linker].table))
+                let run = &runs[r.linker];
+                run.linker.cleavage.as_ref()?;
+                Some(self.row(&spectra[r.spec_idx], c, &run.table))
             })
             .collect()
     }
@@ -74,14 +99,18 @@ impl XlMs2 {
         let peaks = sorted(&spec.peaks);
         let z = predictor_charge(c.charge);
         let side = |h: &PeptideHit| {
-            self.side(&table.peptides()[h.pep as usize].peptide, h.site.pos, z, &peaks)
+            self.side(
+                &table.peptides()[h.pep as usize].peptide,
+                h.site.pos,
+                z,
+                &peaks,
+            )
         };
         let (a, b) = (side(&c.alpha), side(&c.beta));
         let missing = u8::from(a.is_none() || b.is_none()) as f64;
         let get = |s: &Option<[f64; 8]>, k: usize| s.map_or(0.0, |v| v[k]);
         let (aa, ba) = (get(&a, ANGLE), get(&b, ANGLE));
-        let (ap, bp) = (get(&a, PEARSON), get(&b, PEARSON));
-        [aa, ba, aa.min(ba), ap, bp, ap.min(bp), missing]
+        [aa, ba, aa.min(ba), missing]
     }
 
     fn side(&self, p: &Peptide, site: usize, z: u8, peaks: &[(f64, f32)]) -> Option<[f64; 8]> {
@@ -144,6 +173,19 @@ mod tests {
         assert!(!unlinked(1, false, 2));
         assert!(!unlinked(0, true, 0));
         assert!(unlinked(0, false, 0));
+    }
+
+    #[test]
+    fn the_features_apply_only_to_a_search_with_an_ms_cleavable_linker() {
+        let dsso = Crosslinker::dsso();
+        let mut dss = dsso.clone();
+        dss.cleavage = None;
+        assert!(applies(&[dsso.clone()]));
+        assert!(!applies(&[dss.clone()]));
+        assert!(applies(&[dss.clone(), dsso]));
+        assert!(!applies(&[]));
+        assert_eq!(MISSING.len(), FEATURES.len());
+        assert_eq!(MISSING[FEATURES.len() - 1], 1.0);
     }
 
     #[test]

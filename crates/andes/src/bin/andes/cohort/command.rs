@@ -349,8 +349,7 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
                             &g.dir.join(format!("{}.{project}", g.name)),
                             &projects,
                             db.as_deref(),
-                            crate::cli::default_value::<CohortXlFdrArgs>("rescore_seed")
-                                .parse()?,
+                            crate::cli::default_value::<CohortXlFdrArgs>("rescore_seed").parse()?,
                         )?;
                     }
                 }
@@ -642,26 +641,87 @@ type InterModel = (Vec<xl::rollup::LinkClass>, Vec<&'static str>);
 /// its own without them: a peptide's fragment intensities confirm the peptide but not which of
 /// its near-identical proteins it came from, which is what the class is uncertain about.
 fn inter_models(tables: &[PathBuf]) -> Result<Vec<InterModel>, Box<dyn Error>> {
-    use std::io::BufRead;
     use xl::rollup::LinkClass::{Inter, InterAmbiguous};
     let gap = crate::xl::fdr::GAP_FEATURES.to_vec();
-    let mut header = String::new();
-    if let Some(pin) = tables.first().map(|t| pin_of(t)).filter(|p| p.exists()) {
-        std::io::BufReader::new(
-            std::fs::File::open(&pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
-        )
-        .read_line(&mut header)?;
+    let mut any_ms2 = false;
+    for pin in tables.iter().map(|t| pin_of(t)).filter(|p| p.exists()) {
+        any_ms2 |= has_ms2(&pin_header(&pin)?);
     }
-    let has_ms2 = header
-        .trim_end()
-        .split('\t')
-        .any(|c| crate::xl::ms2::FEATURES.contains(&c));
-    if !has_ms2 {
+    if !any_ms2 {
         return Ok(vec![(vec![Inter, InterAmbiguous], gap)]);
     }
     let mut without = gap.clone();
     without.extend(crate::xl::ms2::FEATURES);
     Ok(vec![(vec![Inter], gap), (vec![InterAmbiguous], without)])
+}
+
+/// Where a column of the pooled PIN comes from in one run's PIN: one of its own columns, or a
+/// fill value for a column that run's PIN does not have.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PinColumn {
+    At(usize),
+    Fill(f64),
+}
+
+fn pin_header(pin: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(
+        std::fs::File::open(pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
+    )
+    .read_line(&mut line)?;
+    Ok(line
+        .trim_end_matches(['\n', '\r'])
+        .split('\t')
+        .map(str::to_string)
+        .collect())
+}
+
+fn has_ms2(header: &[String]) -> bool {
+    header
+        .iter()
+        .any(|c| crate::xl::ms2::FEATURES.contains(&c.as_str()))
+}
+
+/// The columns of the pooled PIN: those of a run whose PIN has the fragment-intensity features
+/// (the runs of an MS-cleavable linker searched with `--predict ms2`), else those of the first.
+fn pin_reference(headers: &[Vec<String>]) -> Vec<String> {
+    headers
+        .iter()
+        .find(|h| has_ms2(h))
+        .or(headers.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// For each column of `reference`, where the PIN with `header` holds it. A PIN that lacks
+/// exactly the fragment-intensity columns (a non-cleavable linker's run, which never has them)
+/// gets them as missing; any other difference is `None`.
+fn pin_columns(reference: &[String], header: &[String]) -> Option<Vec<PinColumn>> {
+    if header == reference {
+        return Some((0..header.len()).map(PinColumn::At).collect());
+    }
+    let feature = |c: &str| crate::xl::ms2::FEATURES.iter().position(|f| *f == c);
+    let rest: Vec<&String> = reference.iter().filter(|c| feature(c).is_none()).collect();
+    if has_ms2(header)
+        || rest.len() != header.len()
+        || rest.iter().zip(header).any(|(a, b)| *a != b)
+    {
+        return None;
+    }
+    let mut j = 0;
+    Some(
+        reference
+            .iter()
+            .map(|c| match feature(c) {
+                Some(k) => PinColumn::Fill(crate::xl::ms2::MISSING[k]),
+                None => {
+                    j += 1;
+                    PinColumn::At(j - 1)
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Replace the pair score of the CSMs of `classes` with the score of one Percolator model
@@ -697,67 +757,79 @@ fn rescore(
     let pooled = dir.path().join("rescore.pin");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&pooled)?);
     let mut key_of: HashMap<String, (usize, String)> = HashMap::new();
-    let mut head: Option<Vec<String>> = None;
-    let mut keep: Vec<usize> = Vec::new();
-    let (mut si, mut sc) = (0, 0);
+    let headers: Vec<Vec<String>> = pins
+        .iter()
+        .map(|p| pin_header(p))
+        .collect::<Result<_, _>>()?;
+    let reference = pin_reference(&headers);
+    let pos = |c: &str| {
+        reference
+            .iter()
+            .position(|x| x == c)
+            .ok_or_else(|| format!("{}: no `{c}` column", pins[0].display()))
+    };
+    let (si, sc) = (pos("SpecId")?, pos("ScanNr")?);
+    let keep: Vec<usize> = (0..reference.len())
+        .filter(|&i| {
+            let c = reference[i].as_str();
+            !["FileName", "ExpMass", "CalcMass"].contains(&c) && !dropped.contains(&c)
+        })
+        .collect();
+    let cols: Vec<&str> = keep.iter().map(|&i| reference[i].as_str()).collect();
+    writeln!(out, "{}", cols.join("\t"))?;
+    let mut filled = 0usize;
     for (k, pin) in pins.iter().enumerate() {
+        let map = pin_columns(&reference, &headers[k]).ok_or_else(|| {
+            format!(
+                "{}: its PIN columns differ from {}; search all runs with the same andes version",
+                pin.display(),
+                pins[0].display()
+            )
+        })?;
+        if map.iter().any(|m| matches!(m, PinColumn::Fill(_))) {
+            filled += 1;
+        }
+        let src = |i: usize| match map[i] {
+            PinColumn::At(j) => Some(j),
+            PinColumn::Fill(_) => None,
+        };
+        let (psi, psc) = (
+            src(si).ok_or("SpecId is not a filled column")?,
+            src(sc).ok_or("ScanNr is not a filled column")?,
+        );
         let mut lines = BufReader::new(
             std::fs::File::open(pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
         )
         .lines();
-        let h: Vec<String> = lines
-            .next()
-            .transpose()?
-            .unwrap_or_default()
-            .split('\t')
-            .map(str::to_string)
-            .collect();
-        match &head {
-            None => {
-                let pos = |c: &str| {
-                    h.iter()
-                        .position(|x| x == c)
-                        .ok_or_else(|| format!("{}: no `{c}` column", pin.display()))
-                };
-                si = pos("SpecId")?;
-                sc = pos("ScanNr")?;
-                keep = (0..h.len())
-                    .filter(|&i| {
-                        let c = h[i].as_str();
-                        !["FileName", "ExpMass", "CalcMass"].contains(&c) && !dropped.contains(&c)
-                    })
-                    .collect();
-                let cols: Vec<&str> = keep.iter().map(|&i| h[i].as_str()).collect();
-                writeln!(out, "{}", cols.join("\t"))?;
-                head = Some(h);
-            }
-            Some(first) if *first != h => {
-                return Err(format!(
-                    "{}: its PIN columns differ from {}; search all runs with the same andes version",
-                    pin.display(),
-                    pins[0].display()
-                )
-                .into());
-            }
-            Some(_) => {}
-        }
+        lines.next().transpose()?;
         for line in lines {
             let line = line?;
             let mut f: Vec<String> = line.split('\t').map(str::to_string).collect();
-            let scan = f.get(sc).cloned().unwrap_or_default();
+            let scan = f.get(psc).cloned().unwrap_or_default();
             let n: u64 = scan
                 .parse()
                 .map_err(|_| format!("{}: ScanNr `{scan}` is not a number", pin.display()))?;
-            let id = format!("{k}|{}", f[si]);
-            let spec_id = std::mem::replace(&mut f[si], id.clone());
-            f[sc] = (k as u64 * 1_000_000_000 + n).to_string();
+            let id = format!("{k}|{}", f.get(psi).cloned().unwrap_or_default());
+            let spec_id = std::mem::replace(&mut f[psi], id.clone());
+            f[psc] = (k as u64 * 1_000_000_000 + n).to_string();
             key_of.insert(id, (k, spec_id));
-            let cols: Vec<&str> = keep
+            let cols: Vec<String> = keep
                 .iter()
-                .filter_map(|&i| f.get(i).map(String::as_str))
+                .filter_map(|&i| match map[i] {
+                    PinColumn::At(j) => f.get(j).cloned(),
+                    PinColumn::Fill(v) => Some(format!("{v:.5}")),
+                })
                 .collect();
             writeln!(out, "{}", cols.join("\t"))?;
         }
+    }
+    if filled > 0 {
+        log::info!(
+            target: "cohort",
+            "{what}: {filled} of {} runs have no fragment-intensity features (a non-cleavable \
+             linker); their CSMs enter the pooled model with the features marked missing",
+            pins.len()
+        );
     }
     out.flush()?;
     drop(out);
@@ -765,7 +837,11 @@ fn rescore(
         memory: crate::memory::rescore_memory(None, dir.path().to_path_buf()),
     };
     let t = std::time::Instant::now();
-    let mut scored = match output::run_percolator_pooled(&backend, &pooled, &["--seed".into(), seed.to_string()]) {
+    let mut scored = match output::run_percolator_pooled(
+        &backend,
+        &pooled,
+        &["--seed".into(), seed.to_string()],
+    ) {
         Ok(s) => s,
         Err(e) => {
             log::warn!(

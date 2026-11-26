@@ -599,7 +599,7 @@ pub(crate) fn run_xl(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let linkers = cli.xl.clone().ok_or("--xl: no crosslinker")?.0;
-    let ms2_model = crate::xl::ms2::XlMs2::from_cli(cli, acquisition)?;
+    let ms2_model = crate::xl::ms2::XlMs2::from_cli(cli, acquisition, &linkers)?;
     let several = linkers.len() > 1;
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]

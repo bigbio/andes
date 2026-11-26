@@ -380,3 +380,60 @@ fn ambiguous_inter_links_are_rescored_without_the_fragment_intensity_features() 
         ]
     );
 }
+
+#[test]
+fn a_pin_without_the_fragment_intensity_columns_joins_a_cohort_that_has_them_as_missing() {
+    let s = |v: &[&str]| v.iter().map(|c| c.to_string()).collect::<Vec<String>>();
+    let mut with = vec!["SpecId", "Label", "ScanNr", "pair_score"];
+    with.extend(crate::xl::ms2::FEATURES);
+    with.extend(["Peptide", "Proteins"]);
+    let without = s(&[
+        "SpecId",
+        "Label",
+        "ScanNr",
+        "pair_score",
+        "Peptide",
+        "Proteins",
+    ]);
+    let reference = pin_reference(&[without.clone(), s(&with)]);
+    assert_eq!(reference, s(&with));
+    let same = pin_columns(&reference, &s(&with)).unwrap();
+    assert!(same.iter().enumerate().all(|(i, c)| *c == PinColumn::At(i)));
+    let filled = pin_columns(&reference, &without).unwrap();
+    assert_eq!(filled[3], PinColumn::At(3));
+    for (k, f) in crate::xl::ms2::FEATURES.iter().enumerate() {
+        let i = reference.iter().position(|c| c == f).unwrap();
+        assert_eq!(filled[i], PinColumn::Fill(crate::xl::ms2::MISSING[k]));
+    }
+    assert_eq!(filled[reference.len() - 1], PinColumn::At(5));
+    let other = s(&[
+        "SpecId",
+        "Label",
+        "ScanNr",
+        "other_score",
+        "Peptide",
+        "Proteins",
+    ]);
+    assert!(pin_columns(&reference, &other).is_none());
+    assert_eq!(pin_reference(&[without.clone(), without.clone()]), without);
+}
+
+#[test]
+fn the_inter_models_split_when_any_pin_of_the_cohort_has_the_fragment_intensity_columns() {
+    let t = tempfile::tempdir().unwrap();
+    let (a, b) = (t.path().join("A.r1.xl.tsv"), t.path().join("B.r1.xl.tsv"));
+    let mut head = vec!["SpecId", "Label", "ScanNr", "pair_score"];
+    head.extend(crate::xl::fdr::GAP_FEATURES);
+    std::fs::write(
+        pin_of(&a),
+        format!("{}\tPeptide\tProteins\n", head.join("\t")),
+    )
+    .unwrap();
+    head.extend(crate::xl::ms2::FEATURES);
+    std::fs::write(
+        pin_of(&b),
+        format!("{}\tPeptide\tProteins\n", head.join("\t")),
+    )
+    .unwrap();
+    assert_eq!(inter_models(&[a, b]).unwrap().len(), 2);
+}

@@ -19,11 +19,11 @@ use crate::timstof::ms1::{
     MzCalibration, OffsetCurve, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS,
     REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
-use crate::timstof::mzcal::{frame_temperatures, read_tdf_mz_models, TdfMzModel, TdfMzModels};
 use crate::timstof::ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
     slice_dia_windows, FrameRow, PasefPrecursor,
 };
+use crate::timstof::mzcal::{frame_temperatures, read_tdf_mz_models, TdfMzModel, TdfMzModels};
 use crate::{Ms1Link, Spectrum};
 
 #[derive(Debug, thiserror::Error)]
@@ -249,11 +249,18 @@ impl Ms1Frames {
                         models.rows_in_use()
                     );
                 }
-                if models.unusable_frames > 0 {
+                if let Some(summary) = models.unusable_summary() {
                     log::warn!(
-                        "{} frames reference an MzCalibration row this reader cannot use; \
-                         they use the row most frames use",
-                        models.unusable_frames
+                        "MzCalibration rows this reader cannot use: {summary}. They use row \
+                         {}, the row most frames use",
+                        models.main_id().unwrap_or_default()
+                    );
+                }
+                if models.without_correction > 0 {
+                    log::warn!(
+                        "{} ModelType 2 MzCalibration rows have no usable correction (C5..C14), so \
+                         their m/z uses the base curve only, which can be a few ppm off",
+                        models.without_correction
                     );
                 }
                 MzCalibration::tdf(model, scale)

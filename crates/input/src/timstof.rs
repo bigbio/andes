@@ -13,10 +13,10 @@ use timsrust::MSLevel;
 use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof::ms1::{
-    centroid_frame, centroid_profile, fit_calibration, match_precursors, offset_curve,
-    read_tdf_mz_model, sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid,
-    MzCalibration, OffsetCurve, TdfMzModel, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
-    REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
+    centroid_frame, centroid_profile, fit_beats_base, fit_calibration, frame_temperatures,
+    match_precursors, offset_curve, read_tdf_mz_models, sum_over_mobility, CalibrationFit,
+    FrameConditions, MobilityCentroid, MzCalibration, OffsetCurve, TdfMzModels,
+    MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::timstof::ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
@@ -84,7 +84,8 @@ struct Ms1Frames {
     frames: FrameReader,
     positions: Vec<usize>,
     ids: Vec<usize>,
-    temperatures: HashMap<usize, [f64; 2]>,
+    temperatures: HashMap<usize, [Option<f64>; 2]>,
+    models: TdfMzModels,
     calibration: MzCalibration,
     im: timsrust::converters::Scan2ImConverter,
     resolve: bool,
@@ -99,9 +100,9 @@ struct DecodedMs1 {
 }
 
 struct TdfTables {
-    temperatures: HashMap<usize, [f64; 2]>,
+    temperatures: HashMap<usize, [Option<f64>; 2]>,
     precursor_peaks: HashMap<usize, Vec<f64>>,
-    mz_model: Option<TdfMzModel>,
+    mz_models: TdfMzModels,
 }
 
 fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
@@ -120,16 +121,16 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         })?;
         for row in rows {
             let (id, t1, t2) = row?;
-            temperatures.insert(id as usize, [t1.unwrap_or(0.0), t2.unwrap_or(0.0)]);
+            temperatures.insert(id as usize, [t1, t2]);
         }
     }
-    let mz_model = read_tdf_mz_model(&conn);
+    let mz_models = read_tdf_mz_models(&conn);
     let mut precursor_peaks: HashMap<usize, Vec<f64>> = HashMap::new();
     if !has_table(&conn, "Precursors")? {
         return Ok(TdfTables {
             temperatures,
             precursor_peaks,
-            mz_model,
+            mz_models,
         });
     }
     let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
@@ -150,7 +151,7 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
     Ok(TdfTables {
         temperatures,
         precursor_peaks,
-        mz_model,
+        mz_models,
     })
 }
 
@@ -237,8 +238,24 @@ impl Ms1Frames {
         let intercept = conv.convert(0.0).sqrt();
         let slope = conv.convert(1.0).sqrt() - intercept;
         let scale = conv.invert(metadata.upper_mz).max(1.0);
-        let base = match tables.mz_model {
-            Some(model) => MzCalibration::tdf(model, scale),
+        let models = tables.mz_models;
+        let base = match models.main() {
+            Some(model) => {
+                if models.rows_in_use() > 1 {
+                    log::info!(
+                        "frames use {} MzCalibration rows; each frame's m/z uses its own row",
+                        models.rows_in_use()
+                    );
+                }
+                if models.unusable_frames > 0 {
+                    log::warn!(
+                        "{} frames reference an MzCalibration row this reader cannot use; \
+                         they use the row most frames use",
+                        models.unusable_frames
+                    );
+                }
+                MzCalibration::tdf(model, scale)
+            }
             None => {
                 log::warn!(
                     "no usable MzCalibration row in analysis.tdf; m/z starts from the \
@@ -252,25 +269,35 @@ impl Ms1Frames {
             positions,
             ids,
             temperatures: tables.temperatures,
+            models,
             calibration: base.clone(),
             im: metadata.im_converter,
             resolve,
             cursor: 0,
             ready: VecDeque::new(),
         };
+        let base_name = if base.is_tdf() {
+            "instrument calibration"
+        } else {
+            "acquisition-range model"
+        };
         match ms1.calibrate(&base, &tables.precursor_peaks) {
             Some(fit) => {
+                let keep_base = base.is_tdf() && !fit_beats_base(&fit);
                 log::info!(
                     "MS1 m/z calibration from {} precursor peaks: residual to the \
-                     vendor m/z median {:+.2} ppm, robust SD {:.2} ppm (acquisition-range \
-                     model: {:+.2} ppm, SD {:.2} ppm)",
+                     vendor m/z median {:+.2} ppm, robust SD {:.2} ppm ({base_name}: \
+                     {:+.2} ppm, SD {:.2} ppm); using the {}",
                     fit.n_used,
                     fit.median_ppm,
                     fit.sigma_ppm,
                     fit.base_median_ppm,
-                    fit.base_sigma_ppm
+                    fit.base_sigma_ppm,
+                    if keep_base { base_name } else { "fit" }
                 );
-                ms1.calibration = fit.calibration;
+                if !keep_base {
+                    ms1.calibration = fit.calibration;
+                }
             }
             None if base.is_tdf() => log::info!(
                 "m/z from the instrument calibration in analysis.tdf (MzCalibration, \
@@ -285,7 +312,13 @@ impl Ms1Frames {
     }
 
     fn temperature(&self, id: usize) -> [f64; 2] {
-        self.temperatures.get(&id).copied().unwrap_or([0.0; 2])
+        let t = self.temperatures.get(&id).copied().unwrap_or([None; 2]);
+        frame_temperatures(t, self.models.for_frame(id).as_ref())
+    }
+
+    /// The run calibration with the frame's own MzCalibration row.
+    fn calibration_for(&self, calibration: &MzCalibration, id: usize) -> MzCalibration {
+        calibration.for_frame(self.models.for_frame(id))
     }
 
     fn calibrate(
@@ -318,7 +351,7 @@ impl Ms1Frames {
                     centroids,
                     &peaks[id],
                     *cond,
-                    calibration,
+                    &self.calibration_for(calibration, *id),
                     offset,
                     window,
                     &mut points,
@@ -363,10 +396,11 @@ impl Ms1Frames {
                             &frame.intensities,
                             self.resolve,
                         );
-                        let summed = to_peaks(&summed, &self.calibration, cond);
+                        let calibration = self.calibration_for(&self.calibration, id);
+                        let summed = to_peaks(&summed, &calibration, cond);
                         if self.resolve {
                             let (peaks, mobility) =
-                                to_resolved_peaks(&resolved, &self.calibration, &self.im, cond);
+                                to_resolved_peaks(&resolved, &calibration, &self.im, cond);
                             (frame.rt_in_seconds, peaks, mobility, Some(summed))
                         } else {
                             (frame.rt_in_seconds, summed, Vec::new(), None)
@@ -426,6 +460,7 @@ struct Ms2Source {
     frames: FrameReader,
     positions: HashMap<usize, usize>,
     rows: HashMap<usize, FrameRow>,
+    models: TdfMzModels,
     precursors: Vec<PasefPrecursor>,
     im: Scan2ImConverter,
 }
@@ -456,6 +491,7 @@ impl Ms2Source {
             precursors = read_dia_windows(&conn).map_err(tables_err)?;
         }
         let rows = read_frame_rows(&conn).map_err(tables_err)?;
+        let models = read_tdf_mz_models(&conn);
         let mut positions = HashMap::with_capacity(frames.len());
         for pos in 0..frames.len() {
             let f = frames
@@ -467,6 +503,7 @@ impl Ms2Source {
             frames,
             positions,
             rows,
+            models,
             precursors,
             im: metadata.im_converter,
         })
@@ -512,6 +549,7 @@ impl Ms2Source {
         let mut n_frames = 0usize;
         let (mut t, mut rt) = ([0.0f64; 2], 0.0f64);
         let mut error: Option<String> = None;
+        let mut frame_model = None;
         for s in &p.selections {
             let Some(result) = decoded.get(&s.frame_id) else {
                 continue;
@@ -527,10 +565,14 @@ impl Ms2Source {
                         &mut tof,
                         &mut intensity,
                     );
-                    let row = self.rows.get(&s.frame_id);
-                    let ft = row.map_or([0.0; 2], |r| r.t);
+                    let model = self.models.for_frame(s.frame_id);
+                    let ft = frame_temperatures(
+                        self.rows.get(&s.frame_id).map_or([None; 2], |r| r.t),
+                        model.as_ref(),
+                    );
                     t[0] += ft[0];
                     t[1] += ft[1];
+                    frame_model.get_or_insert(model);
                     rt += frame.rt_in_seconds;
                     n_frames += 1;
                 }
@@ -559,7 +601,13 @@ impl Ms2Source {
                 t: [t[0] / n, t[1] / n],
                 rt_s: rt / n,
             };
-            ms2_peaks(&tof, &intensity, calibration, cond, n_frames)
+            ms2_peaks(
+                &tof,
+                &intensity,
+                &calibration.for_frame(frame_model.flatten()),
+                cond,
+                n_frames,
+            )
         } else {
             Vec::new()
         };
@@ -973,11 +1021,16 @@ mod tests {
         let conn = rusqlite::Connection::open(dir.path().join("analysis.tdf")).unwrap();
         conn.execute_batch(
             "CREATE TABLE Frames (Id INTEGER, T1 REAL, T2 REAL);
-             INSERT INTO Frames VALUES (1, 25.0, 26.0);",
+             INSERT INTO Frames VALUES (1, 25.0, 26.0), (2, NULL, 26.0);",
         )
         .unwrap();
         let t = read_tables(dir.path()).unwrap();
-        assert_eq!(t.temperatures[&1], [25.0, 26.0]);
+        assert_eq!(t.temperatures[&1], [Some(25.0), Some(26.0)]);
+        assert_eq!(
+            t.temperatures[&2],
+            [None, Some(26.0)],
+            "a NULL is kept as missing"
+        );
         assert!(t.precursor_peaks.is_empty());
         conn.execute_batch("CREATE TABLE Precursors (Parent INTEGER);")
             .unwrap();

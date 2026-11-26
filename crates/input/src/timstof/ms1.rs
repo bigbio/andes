@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use model::stats::{median_mad, Even, MAD_TO_SD};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TofCentroid {
@@ -381,22 +383,52 @@ impl TdfMzModel {
     }
 }
 
-/// The ModelType 1 row most frames use, or `None` when the table is missing, another model
-/// is in use, or a coefficient this model does not know (C3) is set.
-pub(crate) fn read_tdf_mz_model(conn: &rusqlite::Connection) -> Option<TdfMzModel> {
-    let sql = "SELECT ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, C1, \
-               C2, C3, C4 FROM MzCalibration WHERE Id = (SELECT MzCalibration FROM Frames \
-               GROUP BY MzCalibration ORDER BY COUNT(*) DESC LIMIT 1)";
-    let row = conn
-        .query_row(sql, [], |r| {
-            let mut v = [0.0f64; 11];
-            for (k, x) in v.iter_mut().enumerate() {
-                *x = r.get::<_, Option<f64>>(k + 1)?.unwrap_or(f64::NAN);
-            }
-            Ok((r.get::<_, Option<i64>>(0)?, v))
-        })
-        .ok()?;
-    let (kind, [timebase, delay, t1, t2, dc1, dc2, c0, c1, c2, c3, c4]) = row;
+/// A frame's (T1, T2) for the m/z model. A sensor with no reading takes the calibration row's
+/// own temperature, so it adds no correction (a reading of 0 would shift m/z by hundreds of
+/// ppm). Without a TDF model it is 0, as before, and the linear model ignores it.
+pub(crate) fn frame_temperatures(t: [Option<f64>; 2], model: Option<&TdfMzModel>) -> [f64; 2] {
+    let fallback = model.map_or([0.0; 2], |m| m.t_cal);
+    [0, 1].map(|k| t[k].filter(|x| x.is_finite()).unwrap_or(fallback[k]))
+}
+
+/// The usable ModelType 1 rows of the MzCalibration table and the row each frame uses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TdfMzModels {
+    rows: HashMap<i64, TdfMzModel>,
+    frame_row: HashMap<usize, i64>,
+    main: Option<i64>,
+    /// Frames whose row is missing or unusable; they use the main row.
+    pub unusable_frames: usize,
+}
+
+impl TdfMzModels {
+    /// The row most frames use, or `None` when that row is unusable or there is no table.
+    pub fn main(&self) -> Option<TdfMzModel> {
+        self.main.and_then(|id| self.rows.get(&id).copied())
+    }
+
+    /// The frame's own row, or the main row when the frame's row is unusable or unknown.
+    pub fn for_frame(&self, frame: usize) -> Option<TdfMzModel> {
+        let main = self.main()?;
+        Some(
+            self.frame_row
+                .get(&frame)
+                .and_then(|id| self.rows.get(id))
+                .copied()
+                .unwrap_or(main),
+        )
+    }
+
+    pub fn rows_in_use(&self) -> usize {
+        let mut ids: Vec<i64> = self.frame_row.values().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.len()
+    }
+}
+
+fn tdf_row(kind: Option<i64>, v: [f64; 11]) -> Option<TdfMzModel> {
+    let [timebase, delay, t1, t2, dc1, dc2, c0, c1, c2, c3, c4] = v;
     let usable = kind == Some(1)
         && c3 == 0.0
         && timebase > 0.0
@@ -414,6 +446,52 @@ pub(crate) fn read_tdf_mz_model(conn: &rusqlite::Connection) -> Option<TdfMzMode
         c2,
         c4,
     })
+}
+
+/// Every usable ModelType 1 row (another model type or a set C3 is not usable) and each
+/// frame's row. A missing table or column gives no rows, so m/z keeps the linear model.
+pub(crate) fn read_tdf_mz_models(conn: &rusqlite::Connection) -> TdfMzModels {
+    let mut out = TdfMzModels::default();
+    let sql = "SELECT Id, ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, \
+               C1, C2, C3, C4 FROM MzCalibration";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| {
+        let mut v = [0.0f64; 11];
+        for (k, x) in v.iter_mut().enumerate() {
+            *x = r.get::<_, Option<f64>>(k + 2)?.unwrap_or(f64::NAN);
+        }
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, v))
+    });
+    for (id, kind, v) in rows.into_iter().flatten().flatten() {
+        if let Some(model) = tdf_row(kind, v) {
+            out.rows.insert(id, model);
+        }
+    }
+    let Ok(mut stmt) = conn.prepare("SELECT Id, MzCalibration FROM Frames") else {
+        return out;
+    };
+    let frames = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+    });
+    let mut count: HashMap<i64, usize> = HashMap::new();
+    for (frame, row) in frames.into_iter().flatten().flatten() {
+        if let Some(row) = row {
+            out.frame_row.insert(frame as usize, row);
+            *count.entry(row).or_default() += 1;
+        }
+    }
+    out.main = count
+        .iter()
+        .max_by_key(|&(id, n)| (*n, std::cmp::Reverse(*id)))
+        .map(|(id, _)| *id);
+    out.unusable_frames = out
+        .frame_row
+        .values()
+        .filter(|id| !out.rows.contains_key(id))
+        .count();
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -445,6 +523,18 @@ impl MzCalibration {
 
     pub fn is_tdf(&self) -> bool {
         self.tdf.is_some()
+    }
+
+    /// This calibration with a frame's own TDF row in place of the run's main row. A linear
+    /// or fitted calibration is returned unchanged.
+    pub fn for_frame(&self, model: Option<TdfMzModel>) -> Self {
+        match (self.tdf, model) {
+            (Some(_), Some(m)) => Self {
+                tdf: Some(m),
+                ..self.clone()
+            },
+            _ => self.clone(),
+        }
     }
 
     pub fn mz(&self, tof: f64, c: Conditions) -> f64 {
@@ -629,6 +719,19 @@ pub(crate) struct CalibrationFit {
 fn residual_stats(ppm: &[f64]) -> (f64, f64) {
     let (med, mad) = median_mad(ppm, Even::Upper).unwrap_or((0.0, 0.0));
     (med, MAD_TO_SD * mad)
+}
+
+/// Fraction of the base model's residual (offset and spread together) that a precursor-peak
+/// fit must stay under to replace an instrument (TDF) calibration.
+const FIT_OVER_TDF: f64 = 0.8;
+
+/// Whether a precursor-peak fit is clearly closer to the vendor m/z than its base model. The
+/// vendor m/z come from the same instrument calibration, so on a TDF base the fit should only
+/// win when the calibration does not describe the frames (for example an unusable row).
+pub(crate) fn fit_beats_base(fit: &CalibrationFit) -> bool {
+    let fit_err = fit.median_ppm.hypot(fit.sigma_ppm);
+    let base_err = fit.base_median_ppm.hypot(fit.base_sigma_ppm);
+    fit_err < FIT_OVER_TDF * base_err
 }
 
 pub(crate) fn fit_calibration(
@@ -1167,24 +1270,94 @@ mod tests {
     }
 
     #[test]
-    fn the_tdf_model_comes_from_the_row_most_frames_use() {
+    fn each_frame_uses_its_own_calibration_row() {
         let rows = [
             "1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, -0.02",
             "2, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 320.5, 151916.0, 0.0021, 0, -0.08",
         ];
-        let m = read_tdf_mz_model(&calibration_db(&rows, &[1, 2, 2])).unwrap();
-        assert_eq!(m.c0, 320.5);
-        let m = read_tdf_mz_model(&calibration_db(&rows, &[1, 1, 2])).unwrap();
-        assert_eq!(m.c0, 317.8);
+        let m = read_tdf_mz_models(&calibration_db(&rows, &[1, 2, 2]));
+        assert_eq!(m.main().unwrap().c0, 320.5);
+        assert_eq!(m.for_frame(1).unwrap().c0, 317.8);
+        assert_eq!(m.for_frame(3).unwrap().c0, 320.5);
+        assert_eq!(
+            m.for_frame(99).unwrap().c0,
+            320.5,
+            "an unknown frame takes the main row"
+        );
+        assert_eq!(m.rows_in_use(), 2);
+        assert_eq!(m.unusable_frames, 0);
+        let m = read_tdf_mz_models(&calibration_db(&rows, &[1, 1, 2]));
+        assert_eq!(m.main().unwrap().c0, 317.8);
+        let base = MzCalibration::tdf(m.main().unwrap(), 400_000.0);
+        let own = base.for_frame(m.for_frame(3));
+        let t = [25.8, 26.1, 0.0, 0.0, 0.0];
+        assert_ne!(base.mz(250_000.0, t), own.mz(250_000.0, t));
+        let linear = MzCalibration::linear(10.0, 1e-4, 1.0);
+        assert_eq!(linear.for_frame(m.for_frame(3)), linear);
+    }
+
+    #[test]
+    fn a_frame_on_an_unusable_row_uses_the_main_row() {
+        let rows = [
+            "1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, -0.02",
+            "2, 2, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 320.5, 151916.0, 0.0021, 0, -0.08",
+        ];
+        let m = read_tdf_mz_models(&calibration_db(&rows, &[1, 1, 2]));
+        assert_eq!(m.for_frame(3).unwrap().c0, 317.8);
+        assert_eq!(m.unusable_frames, 1);
     }
 
     #[test]
     fn an_unknown_calibration_model_falls_back() {
         let other = ["1, 2, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 0, 0"];
-        assert_eq!(read_tdf_mz_model(&calibration_db(&other, &[1])), None);
+        assert_eq!(
+            read_tdf_mz_models(&calibration_db(&other, &[1])).main(),
+            None
+        );
         let c3 = ["1, 1, 0.2, 25279.6, 25.8, 26.1, 13.4, 0, 317.8, 152422.7, 0.00045, 1, 0"];
-        assert_eq!(read_tdf_mz_model(&calibration_db(&c3, &[1])), None);
+        assert_eq!(read_tdf_mz_models(&calibration_db(&c3, &[1])).main(), None);
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        assert_eq!(read_tdf_mz_model(&conn), None);
+        assert_eq!(read_tdf_mz_models(&conn).main(), None);
+    }
+
+    #[test]
+    fn a_missing_temperature_takes_the_calibration_temperature() {
+        let (model, t, pairs) = sdk_cases()[0];
+        let (tof, sdk) = pairs[2];
+        let at_cal = model.mz(tof, model.t_cal);
+        for reading in [[None, None], [None, Some(t[1])]] {
+            let ft = frame_temperatures(reading, Some(&model));
+            assert_eq!(ft[0], model.t_cal[0]);
+            let ppm = (model.mz(tof, ft) - at_cal) / at_cal * 1e6;
+            assert!(ppm.abs() < 0.05, "{ppm}");
+        }
+        let ft = frame_temperatures([Some(t[0]), Some(f64::NAN)], Some(&model));
+        assert_eq!(ft, [t[0], model.t_cal[1]]);
+        assert!(((model.mz(tof, ft) - sdk) / sdk * 1e6).abs() < 0.05);
+        let zero = frame_temperatures([Some(0.0), Some(0.0)], Some(&model));
+        assert_eq!(
+            zero,
+            [0.0, 0.0],
+            "a measured 0 is a reading, not a missing one"
+        );
+        assert_eq!(frame_temperatures([None, None], None), [0.0, 0.0]);
+    }
+
+    fn fit_with(median: f64, sigma: f64, base_median: f64, base_sigma: f64) -> CalibrationFit {
+        CalibrationFit {
+            calibration: MzCalibration::linear(10.0, 1e-4, 1.0),
+            n_used: 1000,
+            median_ppm: median,
+            sigma_ppm: sigma,
+            base_median_ppm: base_median,
+            base_sigma_ppm: base_sigma,
+        }
+    }
+
+    #[test]
+    fn a_fit_replaces_the_tdf_model_only_when_clearly_closer() {
+        assert!(!fit_beats_base(&fit_with(-0.1, 2.0, 0.1, 2.1)));
+        assert!(!fit_beats_base(&fit_with(0.0, 1.8, 0.3, 2.0)));
+        assert!(fit_beats_base(&fit_with(-0.18, 2.07, 16.78, 7.63)));
     }
 }

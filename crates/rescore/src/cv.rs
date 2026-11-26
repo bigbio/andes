@@ -1,4 +1,5 @@
 use crate::budget::Reservation;
+use crate::codec::RowCodec;
 use crate::direction::{init_directions, pin_direction};
 use crate::folds::folds_by_precursor;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
@@ -6,6 +7,7 @@ use crate::pin::Pin;
 use crate::scores::tdc_cut;
 use crate::svm::{mfn_from, warm_scores, Examples, MfnOpts, Rows, GRAM_BYTES};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 const FOLDS: usize = 3;
 
@@ -242,6 +244,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     if full.is_none() {
         log::debug!(target: "rescore", "training rows gathered per iteration (the budget does not hold every row)");
     }
+    let mut codec: Option<Arc<RowCodec>> = None;
     let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
     let mut fixed: Option<[usize; FOLDS]> = None;
     let (mut found_old_old, mut found_old) = (0i64, 0i64);
@@ -262,9 +265,20 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             Some(x) => x,
             None => {
                 let union = example_union(&sets);
-                compact = Rows::gather_within(&pin.rows, norm, &union, &pin.budget)?;
+                let codec = codec.get_or_insert_with(|| {
+                    let stride = crate::svm::stride_for(pin.rows.nfeat() + 1);
+                    Arc::new(RowCodec::scan(&pin.rows, norm, stride))
+                });
+                compact = Rows::gather_within(&pin.rows, norm, &union, &pin.budget, codec)?;
                 if compact.is_spilled() {
-                    log::debug!(target: "rescore", "iteration {}: training rows spilled", it + 1);
+                    log::debug!(
+                        target: "rescore",
+                        "iteration {}: training rows spilled, {} bytes a row ({} of {} features as one byte)",
+                        it + 1,
+                        codec.width(),
+                        codec.coded(),
+                        pin.rows.nfeat()
+                    );
                 }
                 for t in sets.iter_mut() {
                     to_positions(&mut t.ex.rows, &union);

@@ -6,6 +6,7 @@
 
 mod args;
 mod budget;
+mod codec;
 mod cv;
 mod direction;
 mod folds;

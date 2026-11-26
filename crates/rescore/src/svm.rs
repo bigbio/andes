@@ -1,4 +1,5 @@
 use crate::budget::{Budget, Reservation};
+use crate::codec::{normalised, RowCodec};
 use crate::normalize::Norm;
 use crate::store::Store;
 use rayon::prelude::*;
@@ -19,7 +20,7 @@ pub struct Rows {
 
 enum RowData {
     Ram(Vec<f32>),
-    Spill(PathBuf),
+    Spill(PathBuf, Arc<RowCodec>),
 }
 
 static ROWS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +48,12 @@ pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
 }
 
-pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMut(usize, &[f32])) {
+pub(crate) fn fill(
+    store: &Store,
+    norm: &Norm,
+    idx: &[usize],
+    mut put: impl FnMut(usize, &[f32], &[f32]),
+) {
     let nf = store.nfeat();
     let stride = stride_for(nf + 1);
     let mut buf = vec![0.0f32; stride];
@@ -57,7 +63,7 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
     }
     if nf == 0 {
         for p in 0..idx.len() {
-            put(p, &buf);
+            put(p, &buf, &[]);
         }
         return;
     }
@@ -76,9 +82,9 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
                 .zip(&norm.mean)
                 .zip(&norm.inv_sd)
             {
-                *d = ((f64::from(x) - m) * sd) as f32;
+                *d = normalised(x, m, sd);
             }
-            put(p, &buf);
+            put(p, &buf, src);
             next += 1;
         }
     });
@@ -96,7 +102,7 @@ impl Rows {
         let ncols = store.nfeat() + 1;
         let stride = stride_for(ncols);
         let mut data = vec![0.0f32; idx.len() * stride];
-        fill(store, norm, idx, |p, row| {
+        fill(store, norm, idx, |p, row, _| {
             data[p * stride..(p + 1) * stride].copy_from_slice(row)
         });
         Rows {
@@ -155,11 +161,14 @@ impl Rows {
         })
     }
 
-    pub fn gather_within(
+    /// The normalised rows `idx` of `store`: in memory when the budget holds them, else in a
+    /// spill file written in `codec`'s layout.
+    pub(crate) fn gather_within(
         store: &Store,
         norm: &Norm,
         idx: &[usize],
         budget: &Arc<Budget>,
+        codec: &Arc<RowCodec>,
     ) -> Result<Rows, String> {
         let ncols = store.nfeat() + 1;
         let stride = stride_for(ncols);
@@ -174,7 +183,7 @@ impl Rows {
             .spill_dir()
             .join(format!("rescore-{}-{}.rows", std::process::id(), k));
         let rows = Rows {
-            data: RowData::Spill(path.clone()),
+            data: RowData::Spill(path.clone(), codec.clone()),
             nrows: idx.len(),
             ncols,
             stride,
@@ -182,20 +191,18 @@ impl Rows {
         };
         let file = File::create(&path)
             .map_err(|e| format!("create spill file {}: {e}", path.display()))?;
-        file.set_len(bytes)
+        let width = codec.width() as u64;
+        file.set_len(idx.len() as u64 * width)
             .map_err(|e| format!("size spill file {}: {e}", path.display()))?;
         let mut file = BufWriter::with_capacity(8 << 20, file);
-        let width = (stride * 4) as u64;
         let mut at = 0u64;
-        let mut bytes_row = vec![0u8; stride * 4];
+        let mut bytes_row = vec![0u8; codec.width()];
         let mut failed = None;
-        fill(store, norm, idx, |p, row| {
+        fill(store, norm, idx, |p, row, raw| {
             if failed.is_some() {
                 return;
             }
-            for (c, v) in bytes_row.chunks_exact_mut(4).zip(row) {
-                c.copy_from_slice(&v.to_le_bytes());
-            }
+            codec.encode(raw, row, &mut bytes_row);
             let to = p as u64 * width;
             let res = if to == at {
                 Ok(0)
@@ -236,13 +243,13 @@ impl Rows {
     }
 
     pub fn is_spilled(&self) -> bool {
-        matches!(self.data, RowData::Spill(_))
+        matches!(self.data, RowData::Spill(..))
     }
 
     pub fn row(&self, i: usize) -> &[f32] {
         match &self.data {
             RowData::Ram(v) => &v[i * self.stride..(i + 1) * self.stride],
-            RowData::Spill(_) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
+            RowData::Spill(..) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
         }
     }
 
@@ -254,9 +261,9 @@ impl Rows {
                     f(k, self.row(i));
                 }
             }
-            RowData::Spill(path) => {
+            RowData::Spill(path, codec) => {
                 let file = File::open(path).expect("open rows spill file");
-                read_rows(&file, self.stride, ids, f);
+                read_rows(&file, codec, ids, f);
             }
         }
     }
@@ -269,16 +276,16 @@ const READ_GAP_BYTES: usize = 64 << 10;
 /// Bytes one `pread` of spilled rows reads at most.
 const READ_SPAN_BYTES: usize = 4 << 20;
 
-/// Calls `f(j, row)` for each row `ids[j]` of a spilled row file, in order. `ids` must not
-/// decrease; nearby rows are read together with positioned reads, so several threads can read
-/// one file at once.
-fn read_rows(file: &File, stride: usize, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
+/// Calls `f(j, row)` for each row `ids[j]` of a spilled row file in `codec`'s layout, in
+/// order. `ids` must not decrease; nearby rows are read together with positioned reads, so
+/// several threads can read one file at once.
+fn read_rows(file: &File, codec: &RowCodec, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
     use std::os::unix::fs::FileExt;
-    let width = stride * 4;
-    let span_rows = (READ_SPAN_BYTES / width).max(1);
-    let gap_rows = (READ_GAP_BYTES / width).max(1);
+    let width = codec.width();
+    let span_rows = (READ_SPAN_BYTES / width.max(1)).max(1);
+    let gap_rows = (READ_GAP_BYTES / width.max(1)).max(1);
     let mut bytes: Vec<u8> = Vec::new();
-    let mut vals = vec![0.0f32; stride];
+    let mut vals = codec.blank();
     let mut a = 0usize;
     while a < ids.len() {
         let lo = ids[a];
@@ -295,10 +302,7 @@ fn read_rows(file: &File, stride: usize, ids: &[usize], mut f: impl FnMut(usize,
         file.read_exact_at(&mut bytes, (lo * width) as u64)
             .expect("read rows spill file");
         for (j, &i) in ids.iter().enumerate().take(b).skip(a) {
-            let src = &bytes[(i - lo) * width..(i - lo + 1) * width];
-            for (v, c) in vals.iter_mut().zip(src.chunks_exact(4)) {
-                *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-            }
+            codec.decode(&bytes[(i - lo) * width..(i - lo + 1) * width], &mut vals);
             f(j, &vals);
         }
         a = b;
@@ -307,7 +311,7 @@ fn read_rows(file: &File, stride: usize, ids: &[usize], mut f: impl FnMut(usize,
 
 impl Drop for Rows {
     fn drop(&mut self) {
-        if let RowData::Spill(p) = &self.data {
+        if let RowData::Spill(p, _) = &self.data {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -419,17 +423,16 @@ impl Train<'_> {
                 init,
                 body,
             ),
-            RowData::Spill(path) => {
+            RowData::Spill(path, codec) => {
                 let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
                 let file = File::open(path).expect("open rows spill file");
-                let stride = self.x.stride;
                 out[..subset.len()]
                     .par_chunks_mut(CHUNK)
                     .enumerate()
                     .map(|(c, outs)| {
                         let mut part = init();
                         let first = c * CHUNK;
-                        read_rows(&file, stride, &ids[first..first + outs.len()], |j, row| {
+                        read_rows(&file, codec, &ids[first..first + outs.len()], |j, row| {
                             body(&mut part, first + j, row, &mut outs[j]);
                         });
                         part
@@ -1207,8 +1210,15 @@ mod tests {
         };
         let all: Vec<usize> = (0..6).collect();
         let ram = Rows::gather(&store, &norm, &all);
-        let spilled =
-            Rows::gather_within(&store, &norm, &all, &Budget::new(0, dir.path())).unwrap();
+        let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
+        let spilled = Rows::gather_within(
+            &store,
+            &norm,
+            &all,
+            &Budget::new(0, dir.path()),
+            &codec,
+        )
+        .unwrap();
         assert!(spilled.is_spilled());
         let ids = [0, 0, 1, 3, 3, 3, 5];
         let collect = |rows: &Rows| {
@@ -1240,8 +1250,15 @@ mod tests {
         };
         let all: Vec<usize> = (0..n).collect();
         let ram = Rows::gather(&store, &norm, &all);
-        let spilled =
-            Rows::gather_within(&store, &norm, &all, &Budget::new(0, dir.path())).unwrap();
+        let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
+        let spilled = Rows::gather_within(
+            &store,
+            &norm,
+            &all,
+            &Budget::new(0, dir.path()),
+            &codec,
+        )
+        .unwrap();
         assert!(spilled.is_spilled());
         let rows: Vec<usize> = (0..n).filter(|r| r % 3 != 1 || r % 41 == 0).collect();
         let pos: Vec<bool> = rows.iter().map(|r| r % 5 == 0).collect();

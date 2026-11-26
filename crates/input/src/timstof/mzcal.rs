@@ -1,3 +1,7 @@
+//! TOF index to m/z from the MzCalibration table of a Bruker `.d`: ModelType 1 and 2 rows,
+//! the frame temperature correction, the ModelType 2 correction polynomial, and the row
+//! each frame uses.
+
 use std::collections::HashMap;
 
 /// The instrument's own TOF to m/z model, a ModelType 1 or 2 row of the MzCalibration table.

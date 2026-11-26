@@ -1,4 +1,5 @@
 pub mod archive;
+pub(crate) mod imcal;
 pub(crate) mod ms1;
 pub(crate) mod ms2;
 pub(crate) mod mzcal;
@@ -7,12 +8,15 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use timsrust::converters::{ConvertableDomain, Scan2ImConverter};
+use timsrust::converters::ConvertableDomain;
 use timsrust::readers::{FrameReader, FrameReaderError, MetadataReader};
 use timsrust::MSLevel;
 
 use model::scan::{Ms1Scan, ScanContext};
 
+use crate::timstof::imcal::{
+    log_tims_im_calibration, read_tims_im_models, TimsImModel, TimsImModels,
+};
 use crate::timstof::ms1::{
     centroid_frame, centroid_profile, fit_beats_base, fit_calibration, match_precursors,
     offset_curve, sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid,
@@ -89,7 +93,7 @@ struct Ms1Frames {
     temperatures: HashMap<usize, [Option<f64>; 2]>,
     models: TdfMzModels,
     calibration: MzCalibration,
-    im: timsrust::converters::Scan2ImConverter,
+    im: TimsImModels,
     resolve: bool,
     cursor: usize,
     ready: VecDeque<DecodedMs1>,
@@ -105,9 +109,10 @@ struct TdfTables {
     temperatures: HashMap<usize, [Option<f64>; 2]>,
     precursor_peaks: HashMap<usize, Vec<f64>>,
     mz_models: TdfMzModels,
+    im_models: TimsImModels,
 }
 
-fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
+fn read_tables(dir: &Path, linear_im: TimsImModel) -> Result<TdfTables, rusqlite::Error> {
     let conn = rusqlite::Connection::open_with_flags(
         dir.join("analysis.tdf"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -133,6 +138,7 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
             temperatures,
             precursor_peaks,
             mz_models,
+            im_models: read_tims_im_models(&conn, linear_im),
         });
     }
     let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
@@ -154,6 +160,7 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         temperatures,
         precursor_peaks,
         mz_models,
+        im_models: read_tims_im_models(&conn, linear_im),
     })
 }
 
@@ -187,7 +194,7 @@ pub(crate) fn finite_sorted_peaks(peaks: impl Iterator<Item = (f64, f32)>) -> Ve
 fn to_resolved_peaks(
     centroids: &[MobilityCentroid],
     calibration: &MzCalibration,
-    im: &timsrust::converters::Scan2ImConverter,
+    im: TimsImModel,
     frame: FrameConditions,
 ) -> (Vec<(f64, f32)>, Vec<f32>) {
     let mut rows: Vec<(f64, f32, f32)> = centroids
@@ -221,10 +228,13 @@ impl Ms1Frames {
         };
         let frames = FrameReader::new(dir).map_err(frames_err)?;
         let metadata = MetadataReader::new(dir).map_err(|e| frames_err(e.into()))?;
-        let tables = read_tables(dir).map_err(|source| TimsTofParseError::Tables {
-            path: dir.display().to_string(),
-            source,
-        })?;
+        let tables =
+            read_tables(dir, TimsImModel::linear(metadata.im_converter)).map_err(|source| {
+                TimsTofParseError::Tables {
+                    path: dir.display().to_string(),
+                    source,
+                }
+            })?;
         let mut positions = Vec::new();
         let mut ids = Vec::new();
         for pos in 0..frames.len() {
@@ -280,7 +290,7 @@ impl Ms1Frames {
             temperatures: tables.temperatures,
             models,
             calibration: base.clone(),
-            im: metadata.im_converter,
+            im: tables.im_models,
             resolve,
             cursor: 0,
             ready: VecDeque::new(),
@@ -409,8 +419,12 @@ impl Ms1Frames {
                         let calibration = self.calibration_for(&self.calibration, id);
                         let summed = to_peaks(&summed, &calibration, cond);
                         if self.resolve {
-                            let (peaks, mobility) =
-                                to_resolved_peaks(&resolved, &calibration, &self.im, cond);
+                            let (peaks, mobility) = to_resolved_peaks(
+                                &resolved,
+                                &calibration,
+                                self.im.for_frame(id),
+                                cond,
+                            );
                             (frame.rt_in_seconds, peaks, mobility, Some(summed))
                         } else {
                             (frame.rt_in_seconds, summed, Vec::new(), None)
@@ -472,7 +486,7 @@ struct Ms2Source {
     rows: HashMap<usize, FrameRow>,
     models: TdfMzModels,
     precursors: Vec<PasefPrecursor>,
-    im: Scan2ImConverter,
+    im: TimsImModels,
 }
 
 /// The selections of one precursor that share an MzCalibration row.
@@ -525,6 +539,8 @@ impl Ms2Source {
         }
         let rows = read_frame_rows(&conn).map_err(tables_err)?;
         let models = read_tdf_mz_models(&conn);
+        let im = read_tims_im_models(&conn, TimsImModel::linear(metadata.im_converter));
+        log_tims_im_calibration(&im);
         let mut positions = HashMap::with_capacity(frames.len());
         for pos in 0..frames.len() {
             let f = frames
@@ -538,7 +554,7 @@ impl Ms2Source {
             rows,
             models,
             precursors,
-            im: metadata.im_converter,
+            im,
         })
     }
 
@@ -661,7 +677,14 @@ impl Ms2Source {
                 .map(|r| r.time)
         });
         let spec = to_spectrum(p, rt_seconds, peaks)?;
-        let im = p.scan_number.map_or(f64::NAN, |s| self.im.convert(s));
+        let mobility_frame = p
+            .parent
+            .filter(|_| !p.dia)
+            .or_else(|| p.selections.first().map(|s| s.frame_id))
+            .unwrap_or_default();
+        let im = p
+            .scan_number
+            .map_or(f64::NAN, |s| self.im.for_frame(mobility_frame).convert(s));
         Some(Ok((spec, p.parent, im)))
     }
 }
@@ -777,8 +800,17 @@ impl TimsTofReader {
             .filter(|p| p.dia)
             .flat_map(|p| p.selections.iter().map(|s| s.scan_end))
             .max();
+        let frame = self
+            .ms2
+            .precursors
+            .iter()
+            .find(|p| p.dia)
+            .and_then(|p| p.selections.first())
+            .map(|s| s.frame_id)
+            .unwrap_or_default();
+        let im = self.ms2.im.for_frame(frame);
         last.map_or_else(Vec::new, |n| {
-            (0..=n).map(|s| self.ms2.im.convert(s as f64) as f32).collect()
+            (0..=n).map(|s| im.convert(s as f64) as f32).collect()
         })
     }
 
@@ -1082,7 +1114,11 @@ mod tests {
              INSERT INTO Frames VALUES (1, 25.0, 26.0), (2, NULL, 26.0);",
         )
         .unwrap();
-        let t = read_tables(dir.path()).unwrap();
+        let linear = TimsImModel::Linear {
+            intercept: 1.0,
+            slope: 0.0,
+        };
+        let t = read_tables(dir.path(), linear).unwrap();
         assert_eq!(t.temperatures[&1], [Some(25.0), Some(26.0)]);
         assert_eq!(
             t.temperatures[&2],
@@ -1092,7 +1128,7 @@ mod tests {
         assert!(t.precursor_peaks.is_empty());
         conn.execute_batch("CREATE TABLE Precursors (Parent INTEGER);")
             .unwrap();
-        assert!(read_tables(dir.path()).is_err());
+        assert!(read_tables(dir.path(), linear).is_err());
     }
 
     #[test]

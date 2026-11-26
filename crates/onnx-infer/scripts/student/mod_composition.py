@@ -48,8 +48,6 @@ UNIMOD = {
     122: ("Formyl", "C O", "K^"),
     188: ("Label:13C(6)", "13C6 C-6", "KR"),
     199: ("Dimethyl:2H(4)", "2H4 C2", "KR^"),
-    # Not in ``rt_native::mods`` yet: Rust encodes ADP-ribosylated peptides as unsupported until a model trained
-    # with this entry ships with the Rust table entry.
     213: ("ADP-Ribosyl", "H21 C15 N5 O13 P2", "CDEKNRS"),
     214: ("iTRAQ4plex", "H12 C4 13C3 N 15N O", "K^Y"),
     259: ("Label:13C(6)15N(2)", "13C6 C-6 15N2 N-2", "K"),

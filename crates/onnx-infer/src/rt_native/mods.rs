@@ -178,6 +178,13 @@ pub const UNIMOD: &[UnimodEntry] = table![
         32.056407
     ),
     (
+        213,
+        "ADP-Ribosyl",
+        "CDEKNRS",
+        [15.0, 21.0, 5.0, 13.0, 0.0, 2.0, 0.0],
+        541.061110
+    ),
+    (
         214,
         "iTRAQ4plex",
         "K^Y",
@@ -363,6 +370,27 @@ mod tests {
         assert_eq!(match_mass(42.01057, Some(b'M'), true, 2e-3), Some(1));
         assert_eq!(match_mass(42.01057, Some(b'M'), false, 2e-3), None);
         assert_eq!(match_mass(-17.02655, Some(b'Q'), true, 2e-3), Some(28));
+    }
+
+    #[test]
+    fn adp_ribosyl_mass_from_its_unimod_composition() {
+        use model::mass;
+        let e = by_id(213).unwrap();
+        assert_eq!(e.name, "ADP-Ribosyl");
+        let [c, h, n, o, s, p, other] = e.elements;
+        let mono = c as f64 * mass::C
+            + h as f64 * mass::H
+            + n as f64 * mass::N
+            + o as f64 * mass::O
+            + s as f64 * mass::S
+            + p as f64 * mass::P;
+        assert_eq!(other, 0.0);
+        assert!((mono - 541.06111).abs() < 1e-5, "{mono}");
+        assert!((e.mono - mono).abs() < 1e-5);
+        for site in *b"CDEKNRS" {
+            assert_eq!(match_mass(541.06111, Some(site), false, 2e-3), Some(213));
+        }
+        assert_eq!(match_mass(541.06111, Some(b'Y'), false, 2e-3), None);
     }
 
     #[test]

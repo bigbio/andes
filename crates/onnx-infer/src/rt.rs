@@ -2,6 +2,7 @@ pub mod mods;
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 
 use mods::N_COMP;
@@ -203,8 +204,45 @@ pub(crate) struct Conv {
     pub(crate) cin: usize,
     pub(crate) cout: usize,
     dil: usize,
-    pub(crate) w: Vec<f32>,
+    pub(crate) w: Weights,
     pub(crate) b: Vec<f32>,
+}
+
+/// Conv weights in 32-byte aligned storage: with a width that is a multiple of 8, every
+/// 8-channel group of a weight row starts on a 32-byte boundary, so the AVX kernel loads it
+/// with one aligned load.
+#[derive(Default)]
+pub(crate) struct Weights {
+    lanes: Vec<Lane>,
+    len: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(32))]
+struct Lane([f32; 8]);
+
+impl FromIterator<f32> for Weights {
+    fn from_iter<I: IntoIterator<Item = f32>>(values: I) -> Self {
+        let mut w = Self::default();
+        for v in values {
+            if w.len % 8 == 0 {
+                w.lanes.push(Lane::default());
+            }
+            w.lanes[w.len / 8].0[w.len % 8] = v;
+            w.len += 1;
+        }
+        w
+    }
+}
+
+impl std::ops::Deref for Weights {
+    type Target = [f32];
+
+    fn deref(&self) -> &[f32] {
+        // SAFETY: `Lane` is `repr(C)` around `[f32; 8]` with no padding, so the lanes are
+        // `8 * lanes.len()` contiguous initialised `f32`, and `len` never exceeds that.
+        unsafe { std::slice::from_raw_parts(self.lanes.as_ptr().cast::<f32>(), self.len) }
+    }
 }
 
 impl Conv {
@@ -228,19 +266,28 @@ impl Conv {
             cin,
             cout,
             dil,
-            w: t,
+            w: t.into_iter().collect(),
             b: b.data.clone(),
         })
     }
 
     pub(crate) fn apply(&self, x: &[f32], n: usize, y: &mut [f32]) {
+        self.apply_rows(x, n, 0..n, y);
+    }
+
+    /// The output rows `rows` of [`Self::apply`] over the `n` rows of `x`, written to the first
+    /// `rows.len()` rows of `y`. Each output sums its bias, then the taps in order, then the
+    /// input channels in order, whatever rows are asked for.
+    pub(crate) fn apply_rows(&self, x: &[f32], n: usize, rows: Range<usize>, y: &mut [f32]) {
         let (cin, cout) = (self.cin, self.cout);
         let half = (self.k / 2) as isize;
         let dil = self.dil as isize;
         let tiled = cout - cout % TILE_O;
-        let mut p0 = 0;
-        while p0 < n {
-            let np = TILE_P.min(n - p0);
+        let aligned = cout % 8 == 0 && (self.w.as_ptr() as usize) % 32 == 0;
+        let mut p0 = rows.start;
+        while p0 < rows.end {
+            let np = TILE_P.min(rows.end - p0);
+            let y0 = p0 - rows.start;
             for o0 in (0..tiled).step_by(TILE_O) {
                 let mut acc = [[0.0f32; TILE_O]; TILE_P];
                 for a in acc.iter_mut().take(np) {
@@ -256,15 +303,16 @@ impl Conv {
                     let q0 = ((p0 + lo) as isize + off) as usize;
                     let xs = &x[q0 * cin..(q0 + hi - lo) * cin];
                     let wk = &self.w[kk * cin * cout..(kk + 1) * cin * cout];
-                    tap_rows(&mut acc[lo..hi], xs, wk, cin, cout, o0);
+                    tap_rows(&mut acc[lo..hi], xs, wk, (cin, cout, o0), aligned);
                 }
                 for (r, a) in acc.iter().take(np).enumerate() {
-                    y[(p0 + r) * cout + o0..][..TILE_O].copy_from_slice(a);
+                    y[(y0 + r) * cout + o0..][..TILE_O].copy_from_slice(a);
                 }
             }
             if tiled < cout {
                 for p in p0..p0 + np {
-                    let yp = &mut y[p * cout + tiled..(p + 1) * cout];
+                    let yr = p - rows.start;
+                    let yp = &mut y[yr * cout + tiled..(yr + 1) * cout];
                     yp.copy_from_slice(&self.b[tiled..]);
                     for kk in 0..self.k {
                         let q = p as isize + (kk as isize - half) * dil;
@@ -287,38 +335,48 @@ impl Conv {
     }
 }
 
-const TILE_P: usize = 4;
+const TILE_P: usize = 6;
 const TILE_O: usize = 16;
 
-fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], cin: usize, cout: usize, o0: usize) {
+/// `(cin, cout, o0)` of a tap: the input width, the output width and the first output channel
+/// of the tile.
+type TapShape = (usize, usize, usize);
+
+fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], shape: TapShape, aligned: bool) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
     use avx::tap;
     match acc.len() {
-        1 => tap::<1>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        2 => tap::<2>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        3 => tap::<3>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        4 => tap::<4>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        1 => tap::<1>(acc, xs, wk, shape, aligned),
+        2 => tap::<2>(acc, xs, wk, shape, aligned),
+        3 => tap::<3>(acc, xs, wk, shape, aligned),
+        4 => tap::<4>(acc, xs, wk, shape, aligned),
+        5 => tap::<5>(acc, xs, wk, shape, aligned),
+        6 => tap::<6>(acc, xs, wk, shape, aligned),
         _ => unreachable!("tile holds at most TILE_P rows"),
     }
 }
 
+/// Adds one tap to the `R` rows of `acc`: `xs` holds the `R` input rows and `wk` the tap's
+/// weights, `cin` rows of `cout`. `aligned` only selects the load instruction of the AVX build.
 #[cfg_attr(
     all(target_arch = "x86_64", target_feature = "avx", not(test)),
     allow(dead_code)
 )]
 #[inline(always)]
 fn tap<const R: usize>(
-    acc: &mut [[f32; TILE_O]; R],
+    acc: &mut [[f32; TILE_O]],
     xs: &[f32],
     wk: &[f32],
-    cin: usize,
-    cout: usize,
-    o0: usize,
+    (cin, cout, o0): TapShape,
+    _aligned: bool,
 ) {
+    let Some(acc) = acc.first_chunk_mut::<R>() else {
+        unreachable!("the caller passes R rows")
+    };
     let mut a = *acc;
     let xs = &xs[..R * cin];
     for i in 0..cin {
-        let w: &[f32; TILE_O] = wk[i * cout + o0..][..TILE_O].try_into().unwrap();
+        let w = &wk[i * cout + o0..][..TILE_O];
         for (r, ar) in a.iter_mut().enumerate() {
             let xv = xs[r * cin + i];
             for (ao, &wo) in ar.iter_mut().zip(w) {
@@ -331,9 +389,10 @@ fn tap<const R: usize>(
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
 mod avx {
-    use super::TILE_O;
+    use super::{TapShape, TILE_O};
     use std::arch::x86_64::{
-        __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+        __m256, _mm256_add_ps, _mm256_load_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
+        _mm256_storeu_ps,
     };
 
     const V: usize = TILE_O / 8;
@@ -361,28 +420,52 @@ mod avx {
         ]
     }
 
+    /// The AVX form of [`super::tap`], with the same sums in the same order.
     #[inline(always)]
-    fn row_weights(wk: &[f32], i: usize, cout: usize, o0: usize) -> &[f32; TILE_O] {
-        wk[i * cout + o0..][..TILE_O].try_into().unwrap()
+    pub(super) fn tap<const R: usize>(
+        acc: &mut [[f32; TILE_O]],
+        xs: &[f32],
+        wk: &[f32],
+        shape: TapShape,
+        aligned: bool,
+    ) {
+        if aligned {
+            rows::<R, true>(acc, xs, wk, shape)
+        } else {
+            rows::<R, false>(acc, xs, wk, shape)
+        }
     }
 
     #[inline(always)]
-    pub(super) fn tap<const R: usize>(
-        acc: &mut [[f32; TILE_O]; R],
+    fn rows<const R: usize, const ALIGNED: bool>(
+        acc: &mut [[f32; TILE_O]],
         xs: &[f32],
         wk: &[f32],
-        cin: usize,
-        cout: usize,
-        o0: usize,
+        (cin, cout, o0): TapShape,
     ) {
-        let xs = &xs[..R * cin];
-        // SAFETY: AVX is enabled for this build (module `cfg`), and every load
+        let Some(acc) = acc.first_chunk_mut::<R>() else {
+            unreachable!("the caller passes R rows")
+        };
+        if cin == 0 {
+            return;
+        }
+        assert!(xs.len() >= R * cin && wk.len() >= (cin - 1) * cout + o0 + TILE_O);
+        assert!(!ALIGNED || (cout % 8 == 0 && (wk.as_ptr() as usize + 4 * o0) % 32 == 0));
+        let (xp, wp) = (xs.as_ptr(), wk.as_ptr());
+        // SAFETY: AVX is enabled for this build (module `cfg`). The asserts above keep every
+        // weight row `i * cout + o0 .. + TILE_O` (i < cin) and every input `r * cin + i`
+        // (r < R) in bounds, and make each aligned load start on a 32-byte boundary.
         unsafe {
             let mut a: [[__m256; V]; R] = std::array::from_fn(|r| load(&acc[r]));
             for i in 0..cin {
-                let w = load(row_weights(wk, i, cout, o0));
+                let row = wp.add(i * cout + o0);
+                let w = if ALIGNED {
+                    [_mm256_load_ps(row), _mm256_load_ps(row.add(8))]
+                } else {
+                    [_mm256_loadu_ps(row), _mm256_loadu_ps(row.add(8))]
+                };
                 for (r, ar) in a.iter_mut().enumerate() {
-                    *ar = step(*ar, w, xs[r * cin + i]);
+                    *ar = step(*ar, w, *xp.add(r * cin + i));
                 }
             }
             for (row, ar) in acc.iter_mut().zip(a) {
@@ -675,6 +758,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn conv_rows_match_the_full_apply_bitwise() {
+        let mut state = 0x6a09_e667_f3bc_c908u64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        for &(k, cin, cout, dil) in &[
+            (2, 96, 96, 1),
+            (3, 64, 64, 8),
+            (1, 96, 12, 1),
+            (3, 7, 33, 2),
+        ] {
+            let conv = Conv {
+                k,
+                cin,
+                cout,
+                dil,
+                w: (0..k * cin * cout).map(|_| rnd()).collect(),
+                b: (0..cout).map(|_| rnd()).collect(),
+            };
+            for n in 1..=24 {
+                let x: Vec<f32> = (0..n * cin).map(|_| rnd()).collect();
+                let mut full = vec![f32::NAN; n * cout];
+                conv.apply(&x, n, &mut full);
+                for (lo, hi) in [(0, n), (n.min(2), n), (n / 3, n - n / 4), (n - 1, n)] {
+                    let mut part = vec![f32::NAN; (hi - lo) * cout];
+                    conv.apply_rows(&x, n, lo..hi, &mut part);
+                    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&part),
+                        bits(&full[lo * cout..hi * cout]),
+                        "k{k} n{n} {lo}..{hi}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conv_weights_are_32_byte_aligned() {
+        for len in [1usize, 7, 8, 9, 96 * 96 * 3] {
+            let w: Weights = (0..len).map(|i| i as f32).collect();
+            assert_eq!(w.as_ptr() as usize % 32, 0);
+            assert_eq!(w.len(), len);
+            assert!(w.iter().enumerate().all(|(i, &v)| v == i as f32));
+        }
+    }
+
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
     #[test]
     fn avx_tap_matches_portable_tap() {
@@ -685,23 +819,35 @@ mod tests {
             state ^= state << 17;
             ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
         };
-        let (cin, cout, o0) = (37, 96, 32);
-        let wk: Vec<f32> = (0..cin * cout).map(|_| rnd()).collect();
-        let xs: Vec<f32> = (0..TILE_P * cin).map(|_| rnd()).collect();
-        let mut init = [[0.0f32; TILE_O]; TILE_P];
-        for v in init.iter_mut().flatten() {
-            *v = rnd();
-        }
         let bits =
             |a: &[[f32; TILE_O]]| a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
-        let (mut p4, mut v4) = (init, init);
-        tap::<4>(&mut p4, &xs, &wk, cin, cout, o0);
-        avx::tap::<4>(&mut v4, &xs, &wk, cin, cout, o0);
-        assert_eq!(bits(&p4), bits(&v4));
-        let (mut p1, mut v1) = ([init[0]], [init[0]]);
-        tap::<1>(&mut p1, &xs, &wk, cin, cout, o0);
-        avx::tap::<1>(&mut v1, &xs, &wk, cin, cout, o0);
-        assert_eq!(bits(&p1), bits(&v1));
+        for (cin, cout, o0) in [(37, 96, 32), (96, 96, 80), (5, 40, 16), (8, 33, 16)] {
+            let wk: Weights = (0..cin * cout).map(|_| rnd()).collect();
+            let xs: Vec<f32> = (0..TILE_P * cin).map(|_| rnd()).collect();
+            let mut init = [[0.0f32; TILE_O]; TILE_P];
+            for v in init.iter_mut().flatten() {
+                *v = rnd();
+            }
+            let aligned = cout % 8 == 0;
+            for r in 1..=TILE_P {
+                let (mut p, mut v) = (init, init);
+                tap_rows_portable(&mut p[..r], &xs, &wk, (cin, cout, o0));
+                tap_rows(&mut v[..r], &xs, &wk, (cin, cout, o0), aligned);
+                assert_eq!(bits(&p), bits(&v), "cin{cin} cout{cout} o0{o0} rows{r}");
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    fn tap_rows_portable(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], shape: TapShape) {
+        match acc.len() {
+            1 => tap::<1>(acc, xs, wk, shape, false),
+            2 => tap::<2>(acc, xs, wk, shape, false),
+            3 => tap::<3>(acc, xs, wk, shape, false),
+            4 => tap::<4>(acc, xs, wk, shape, false),
+            5 => tap::<5>(acc, xs, wk, shape, false),
+            _ => tap::<6>(acc, xs, wk, shape, false),
+        }
     }
 
     #[test]

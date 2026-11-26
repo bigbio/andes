@@ -35,7 +35,7 @@ crates/model/src/amino_acid/set.rs	1
 crates/onnx-infer/src/deeplc.rs	1
 crates/onnx-infer/src/predictors/calibration.rs	3
 crates/onnx-infer/src/predictors/form.rs	1
-crates/onnx-infer/src/rt.rs	8
+crates/onnx-infer/src/rt.rs	2
 crates/output/src/fdr/knockoff.rs	2
 crates/output/src/fdr/sites.rs	1
 crates/output/src/features.rs	29

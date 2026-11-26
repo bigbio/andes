@@ -177,27 +177,46 @@ impl<'a> PreparedSearch<'a> {
             .map(mass)
             .fold((f64::MAX, f64::MIN), |(lo, hi), m| (lo.min(m), hi.max(m)));
         let span_da = (hi - lo).max(1.0);
-        let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
+        let mut units: Vec<(usize, Option<i32>)> = Vec::with_capacity(spectra.len());
         for (i, s) in spectra.iter().enumerate() {
             if has_charge(s) {
-                units.push((i, s.clone()));
+                units.push((i, None));
             } else {
                 for z in params.charge_range.clone() {
-                    let mut unit = s.clone();
-                    unit.precursor_charge = Some(z as i32);
-                    units.push((i, unit));
+                    units.push((i, Some(z as i32)));
                 }
             }
         }
-        units.sort_by(|a, b| mass(&a.1).total_cmp(&mass(&b.1)).then(a.0.cmp(&b.0)));
+        let unit_mass = |&(i, z): &(usize, Option<i32>)| match z {
+            None => mass(&spectra[i]),
+            Some(z) => {
+                let z = if z > 0 { z } else { 2 };
+                spectra[i].precursor_mz * f64::from(z)
+            }
+        };
+        units.sort_by(|a, b| unit_mass(a).total_cmp(&unit_mass(b)).then(a.0.cmp(&b.0)));
         let mut merged: Vec<TopNQueue> = (0..spectra.len())
             .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
             .collect();
         let mut pools: Vec<Vec<f32>> = vec![Vec::new(); spectra.len()];
         let complete_later = params.score_mode == ScoreMode::Strong && params.open_search.is_none();
-        while !units.is_empty() {
-            let take = crate::fragments::index::index_chunk_len(&units, |u| mass(&u.1), span_da);
-            let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
+        let mut start = 0;
+        while start < units.len() {
+            let take =
+                crate::fragments::index::index_chunk_len(&units[start..], unit_mass, span_da);
+            let part = &units[start..start + take];
+            start += take;
+            let owners: Vec<usize> = part.iter().map(|&(i, _)| i).collect();
+            let chunk: Vec<Spectrum> = part
+                .iter()
+                .map(|&(i, z)| {
+                    let mut unit = spectra[i].clone();
+                    if z.is_some() {
+                        unit.precursor_charge = z;
+                    }
+                    unit
+                })
+                .collect();
             let got = self.run_chunk_inner(&chunk, 0, params, complete_later);
             merge_units(got, &owners, &mut merged, &mut pools, spectrum_idx_offset);
         }

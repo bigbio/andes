@@ -346,6 +346,7 @@ impl ChunkFragmentIndex {
             vote_peaks,
             &|_| true,
             None,
+            false,
         )
     }
 
@@ -361,6 +362,7 @@ impl ChunkFragmentIndex {
         vote_peaks: usize,
         keep: &dyn Fn(f64) -> bool,
         rt: Option<&FormRtSource<'_>>,
+        windows_only: bool,
     ) -> Vec<(u32, u16)> {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
@@ -414,16 +416,19 @@ impl ChunkFragmentIndex {
             }
             _ => Vec::new(),
         };
+        let ranges: smallvec::SmallVec<[(f64, f64); 16]> = if windows_only {
+            merged_ranges(&exact)
+        } else {
+            smallvec::smallvec![(lo, hi)]
+        };
         let mut sel = self.vote(
             spec,
-            lo,
-            hi,
+            &ranges,
             fragment_tol,
             min_matched,
             vote_peaks,
             &complement_masses,
         );
-        sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
         match (
             spec.rt_seconds
                 .filter(|t| params.dia && t.is_finite() && !self.form_rt_min.is_empty()),
@@ -431,9 +436,17 @@ impl ChunkFragmentIndex {
         ) {
             (Some(t), Some(rt)) => {
                 let scan_rt_min = t / SECS_PER_MIN;
-                select_top_k_by(&mut sel, top_k, |id, v| self.rt_key(id, v, scan_rt_min, rt));
+                select_top_k_kept_by(
+                    &mut sel,
+                    top_k,
+                    |id| keep(self.form_mass[id as usize]),
+                    |id, v| self.rt_key(id, v, scan_rt_min, rt),
+                );
             }
-            _ => select_top_k(&mut sel, top_k),
+            _ => {
+                sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
+                select_top_k(&mut sel, top_k)
+            }
         }
         sel.into_iter()
             .filter(|&(id, _, _)| {
@@ -460,8 +473,7 @@ impl ChunkFragmentIndex {
         }
         let mut sel = self.vote(
             spec,
-            lo,
-            hi,
+            &[(lo, hi)],
             fragment_tol,
             min_matched,
             vote_peaks,
@@ -476,25 +488,33 @@ impl ChunkFragmentIndex {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Counts, for every form whose mass lies in one of `mass_ranges` (sorted, disjoint), the
+    /// peaks of `spec` that match one of its b/y ions, and returns the forms with at least
+    /// `min_matched` matches as `(form id, matches, summed matched intensity)`.
     fn vote(
         &self,
         spec: &Spectrum,
-        lo: f64,
-        hi: f64,
+        mass_ranges: &[(f64, f64)],
         fragment_tol: Tolerance,
         min_matched: u16,
         vote_peaks: usize,
         complement_masses: &[f64],
     ) -> Vec<(u32, u16, f32)> {
-        let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
-        let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
-        if id_lo >= id_hi {
+        let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
+        let spans: smallvec::SmallVec<[(u32, u32, usize, usize); 16]> = mass_ranges
+            .iter()
+            .filter_map(|&(lo, hi)| {
+                let a = self.form_mass.partition_point(|&m| m < lo) as u32;
+                let b = self.form_mass.partition_point(|&m| m <= hi) as u32;
+                (a < b).then(|| (a, b, block_of(a), block_of(b - 1)))
+            })
+            .collect();
+        let (Some(first_span), Some(last_span)) = (spans.first(), spans.last()) else {
             return Vec::new();
-        }
+        };
+        let (id_lo, id_hi) = (first_span.0, last_span.1);
         let n_bins = self.bin_start.len() - 1;
         let width = (id_hi - id_lo) as usize;
-        let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
-        let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
         let row_len = self.n_blocks + 1;
         VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
@@ -524,22 +544,24 @@ impl ChunkFragmentIndex {
                 for bb in first..=last {
                     let base = self.bin_start[bb] as usize;
                     let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
-                    let seg =
-                        &self.entries[base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
-                    for e in seg {
-                        if e.0 < id_lo {
-                            continue;
-                        }
-                        if e.0 >= id_hi {
-                            break;
-                        }
-                        if ((e.1 as f64) - mz).abs() <= tol_da {
-                            let slot = &mut counts[(e.0 - id_lo) as usize];
-                            if slot.0 == 0 {
-                                touched.push(e.0);
+                    for &(s_lo, s_hi, blk_lo, blk_hi) in &spans {
+                        let seg = &self.entries
+                            [base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
+                        for e in seg {
+                            if e.0 < s_lo {
+                                continue;
                             }
-                            slot.0 += 1;
-                            slot.1 += intensity;
+                            if e.0 >= s_hi {
+                                break;
+                            }
+                            if ((e.1 as f64) - mz).abs() <= tol_da {
+                                let slot = &mut counts[(e.0 - id_lo) as usize];
+                                if slot.0 == 0 {
+                                    touched.push(e.0);
+                                }
+                                slot.0 += 1;
+                                slot.1 += intensity;
+                            }
                         }
                     }
                 }
@@ -614,6 +636,20 @@ impl ChunkFragmentIndex {
         }
         out
     }
+}
+
+/// `ranges` sorted by start, with overlapping or touching ranges merged.
+fn merged_ranges(ranges: &[(f64, f64)]) -> smallvec::SmallVec<[(f64, f64); 16]> {
+    let mut v: smallvec::SmallVec<[(f64, f64); 16]> = ranges.iter().copied().collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
+    for (a, b) in v {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
 }
 
 const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
@@ -709,6 +745,7 @@ pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize) {
 
 /// Keeps the `top_k` forms with the highest `key(form, votes)`, the vote intensity breaking
 /// ties and then the lower form id, sorted best first.
+#[cfg(test)]
 pub(crate) fn select_top_k_by(
     sel: &mut Vec<(u32, u16, f32)>,
     top_k: usize,
@@ -733,9 +770,106 @@ pub(crate) fn select_top_k_by(
     sel.extend(keyed.into_iter().map(|(_, e)| e));
 }
 
+/// A form ranked by the vote cut's order: higher key, then higher vote intensity, then lower id.
+#[derive(Clone, Copy)]
+struct Ranked(f64, (u32, u16, f32));
+
+impl Ranked {
+    fn order(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .total_cmp(&other.0)
+            .then_with(|| self.1 .2.total_cmp(&other.1 .2))
+            .then_with(|| other.1 .0.cmp(&self.1 .0))
+    }
+}
+
+impl PartialEq for Ranked {
+    fn eq(&self, other: &Self) -> bool {
+        self.order(other).is_eq()
+    }
+}
+impl Eq for Ranked {}
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Ranked {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order(other)
+    }
+}
+
+/// The result of `sel.retain(keep)` followed by [`select_top_k_by`]`(sel, top_k, key)`, for a
+/// `key(form, votes)` that is never above `votes`: forms are visited by descending votes and
+/// the visit stops once no later form can enter the top `top_k`, so `keep` and `key` run only
+/// for the forms that could.
+pub(crate) fn select_top_k_kept_by(
+    sel: &mut Vec<(u32, u16, f32)>,
+    top_k: usize,
+    keep: impl Fn(u32) -> bool,
+    key: impl Fn(u32, u16) -> f64,
+) {
+    if top_k == 0 {
+        sel.clear();
+        return;
+    }
+    sel.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best: std::collections::BinaryHeap<std::cmp::Reverse<Ranked>> =
+        std::collections::BinaryHeap::with_capacity(top_k + 1);
+    for &e in sel.iter() {
+        if let Some(worst) = best.peek().filter(|_| best.len() == top_k) {
+            if f64::from(e.1) < worst.0 .0 {
+                break;
+            }
+        }
+        if !keep(e.0) {
+            continue;
+        }
+        let r = Ranked(key(e.0, e.1), e);
+        if best.len() < top_k {
+            best.push(std::cmp::Reverse(r));
+        } else if best.peek().is_some_and(|w| r > w.0) {
+            best.pop();
+            best.push(std::cmp::Reverse(r));
+        }
+    }
+    let mut kept: Vec<Ranked> = best.into_iter().map(|r| r.0).collect();
+    kept.sort_unstable_by(|a, b| b.cmp(a));
+    sel.clear();
+    sel.extend(kept.into_iter().map(|r| r.1));
+}
+
 #[cfg(test)]
 mod select_top_k_tests {
-    use super::{select_top_k, select_top_k_by};
+    use super::{select_top_k, select_top_k_by, select_top_k_kept_by};
+
+    #[test]
+    fn the_bounded_cut_equals_filter_then_keyed_cut() {
+        let mut x = 12345u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..200 {
+            let n = (next() % 300) as usize;
+            let base: Vec<(u32, u16, f32)> = (0..n)
+                .map(|i| (i as u32 * 7 % 1009, (next() % 12) as u16 + 3, (next() % 50) as f32))
+                .collect();
+            let pen = |id: u32| -((id % 13) as f64) * 0.75;
+            let keep = |id: u32| id % 5 != 0;
+            for k in [0usize, 1, 5, 40, 100, 400] {
+                let mut a = base.clone();
+                a.retain(|e| keep(e.0));
+                select_top_k_by(&mut a, k, |id, v| f64::from(v) + pen(id));
+                let mut b = base.clone();
+                select_top_k_kept_by(&mut b, k, keep, |id, v| f64::from(v) + pen(id));
+                assert_eq!(a, b, "round {round} top {k}");
+            }
+        }
+    }
 
     #[test]
     fn a_form_at_its_predicted_rt_beats_one_with_one_more_vote_far_off_it() {

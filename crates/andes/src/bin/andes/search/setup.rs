@@ -170,6 +170,8 @@ pub(super) fn route_per_scan_scorers<'p>(
         let high_res = acquisition.high_res;
         let index_on = params.fragment_index_top_k > 0;
         let gbdt_max_trees = gbdt_k;
+        let no_search_gbdt = cli.no_search_gbdt;
+        let no_search_rich_ion = cli.no_search_rich_ion;
         let loader: search::ScorerLoader = Box::new(move |activation: ActivationMethod| {
             let route = match crate::models::load_activation_route(
                 activation,
@@ -198,6 +200,13 @@ pub(super) fn route_per_scan_scorers<'p>(
                 for slot in [&mut p.frag_intensity_model, &mut p.rich_ion_model] {
                     resolve::truncate_gbdt(slot, gbdt_max_trees);
                 }
+            }
+            if no_search_gbdt {
+                p.frag_intensity_model = None;
+                p.rich_ion_model = None;
+            }
+            if no_search_rich_ion {
+                p.rich_ion_model = None;
             }
             p.data_type.protocol = run_protocol;
             let mut sc = RankScorer::new(&p);

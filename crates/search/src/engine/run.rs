@@ -532,8 +532,13 @@ impl<'a> PreparedSearch<'a> {
         } else {
             None
         };
+        let slice_k0 = if params.dia {
+            self.dia_slice_mobility(spec)
+        } else {
+            None
+        };
         let (mmap_cands_owned, dia_windows) =
-            self.spectrum_candidates(chunk, spec, scorer, &charges_to_try, &ms1_gate);
+            self.spectrum_candidates(chunk, spec, scorer, &charges_to_try, &ms1_gate, slice_k0);
         let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
         let mmap_cands: &[Candidate] = &mmap_cands_owned;
         let cand_slice: &[Candidate] = mmap_cands;
@@ -573,8 +578,14 @@ impl<'a> PreparedSearch<'a> {
             let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
             for &z in &charges_to_try {
                 let scored_spec = scored_spec_for_charge(z);
-                let iso_errs =
-                    self.precursor_errors(spec, cand, z, params, &dia_windows, &ms1_gate);
+                let iso_errs = self.precursor_errors(
+                    spec,
+                    cand,
+                    z,
+                    params,
+                    &dia_windows,
+                    (&ms1_gate, slice_k0),
+                );
                 if iso_errs.is_empty() {
                     continue;
                 }
@@ -717,7 +728,9 @@ impl<'a> PreparedSearch<'a> {
 
     /// The precursor mass errors at which candidate `cand` matches the spectrum at charge `z`:
     /// under `--dia` inside the charge's isolation window (and an MS1 peak when the MS1 gate is
-    /// on), otherwise at each isotope offset of the range within the precursor tolerance.
+    /// on, within the learned mobility margin of the scan's slice `slice_k0` when the run has
+    /// MS1 mobility), otherwise at each isotope offset of the range within the precursor
+    /// tolerance.
     fn precursor_errors(
         &self,
         spec: &Spectrum,
@@ -725,7 +738,7 @@ impl<'a> PreparedSearch<'a> {
         z: u8,
         params: &SearchParams,
         dia_windows: &DiaWindows,
-        ms1_gate: &Option<std::ops::Range<usize>>,
+        (ms1_gate, slice_k0): (&Option<std::ops::Range<usize>>, Option<(f32, f32)>),
     ) -> SmallVec<[MassError; 4]> {
         let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
         if params.dia {
@@ -736,9 +749,9 @@ impl<'a> PreparedSearch<'a> {
             let mass = cand.peptide.mass();
             let mono_mz = mass / z as f64 + PROTON;
             if (lo..=hi).contains(&mass)
-                && ms1_gate
-                    .clone()
-                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm))
+                && ms1_gate.clone().is_none_or(|r| {
+                    self.dia_ms1_has_at(r, mono_mz, params.dia_ms1_tol_ppm, slice_k0)
+                })
             {
                 iso_errs.push(MassError {
                     mass_error_da: 0.0,
@@ -774,6 +787,7 @@ impl<'a> PreparedSearch<'a> {
         scorer: &RankScorer,
         charges_to_try: &[u8],
         ms1_gate: &Option<std::ops::Range<usize>>,
+        slice_k0: Option<(f32, f32)>,
     ) -> (Vec<Candidate>, DiaWindows) {
         let ChunkScoring {
             rt_source,
@@ -805,10 +819,11 @@ impl<'a> PreparedSearch<'a> {
                 ms1_gate.clone().is_none_or(|r| {
                     dia_windows.iter().any(|&(z, lo, hi)| {
                         (lo..=hi).contains(&mass)
-                            && self.dia_ms1_has(
+                            && self.dia_ms1_has_at(
                                 r.clone(),
                                 mass / z as f64 + PROTON,
                                 params.dia_ms1_tol_ppm,
+                                slice_k0,
                             )
                     })
                 })
@@ -831,6 +846,7 @@ impl<'a> PreparedSearch<'a> {
                 crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
                 &gate,
                 rt_source.as_ref(),
+                params.dia && ms1_gate.is_some(),
             );
             let relabel =
                 |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);

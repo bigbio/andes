@@ -66,6 +66,8 @@ const HIDDEN: &[&str] = &[
     "decoy_seed",
     "cal_min_spec_keys",
     "max_spectra",
+    "no_search_gbdt",
+    "no_search_rich_ion",
     "precursor_mono_dump",
     "glyco_scans",
     "debug_glyco",

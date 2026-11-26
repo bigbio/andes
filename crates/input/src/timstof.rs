@@ -659,6 +659,21 @@ impl TimsTofReader {
         self
     }
 
+    /// 1/K0 of every TIMS scan number up to the last scan a DIA window selects; empty without
+    /// DIA windows. Index `s` is scan `s` of a frame.
+    pub fn dia_scan_mobility(&self) -> Vec<f32> {
+        let last = self
+            .ms2
+            .precursors
+            .iter()
+            .filter(|p| p.dia)
+            .flat_map(|p| p.selections.iter().map(|s| s.scan_end))
+            .max();
+        last.map_or_else(Vec::new, |n| {
+            (0..=n).map(|s| self.ms2.im.convert(s as f64) as f32).collect()
+        })
+    }
+
     pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
         std::mem::take(&mut self.run_ms1)
     }

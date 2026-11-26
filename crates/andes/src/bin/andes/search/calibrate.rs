@@ -17,6 +17,13 @@ const DIA_RT_CAL_MIN_SPECTRA: usize = 2_000;
 /// Target-decoy q-value of the calibration winners that become RT anchors.
 const DIA_RT_CAL_Q: f64 = 0.01;
 const SECS_PER_MIN: f64 = 60.0;
+/// Fewest calibration anchors with an MS1 mobility for a learned mobility margin of the DIA MS1
+/// gate; with fewer the gate matches on m/z alone.
+const DIA_MOBILITY_MIN_ANCHORS: usize = 100;
+/// Quantile of the anchors' MS1 mobility error (1/K0 distance between an anchor's MS1 peak and
+/// its MS2 scan's mobility slice, 0 inside the slice) that becomes the DIA MS1 gate's mobility
+/// margin.
+const DIA_MOBILITY_MARGIN_QUANTILE: f64 = 0.9;
 
 /// Calibration sample sizes in search order: the first sample (`DIA_RT_CAL_FRACTION` of the
 /// run, at least `DIA_RT_CAL_MIN_SPECTRA`), then doubling up to every spectrum of the run.
@@ -42,6 +49,7 @@ pub(super) fn dia_rt_cal_sizes(n_spectra: usize) -> Vec<usize> {
 /// sparse run gets the anchors of a long one when its spectra hold them. With too few anchors
 /// no prior is installed and the cut keeps the vote rank.
 pub(super) fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f64) {
+    prepared.set_dia_mobility_margin(None);
     let Some(model) = prepared.form_rt_model() else {
         return;
     };
@@ -54,6 +62,8 @@ pub(super) fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], 
         .collect();
     order.sort_unstable();
     let mut tops: Vec<(u32, f64)> = Vec::new();
+    let learn_margin = prepared.dia_ms1_gate_tol_ppm();
+    let mut excess: Vec<Option<f32>> = Vec::new();
     let mut labels: Vec<search::tdc::ScoredLabel> = Vec::new();
     let mut anchors: Vec<(f64, f64)> = Vec::new();
     let mut searched = 0;
@@ -79,6 +89,12 @@ pub(super) fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], 
                         .filter(|t| t.is_finite())
                         .map_or(f64::NAN, |t| t / SECS_PER_MIN);
                     tops.push((idx, rt));
+                    excess.push(learn_margin.and_then(|tol_ppm| {
+                        let z = f64::from(p.charge_used);
+                        let mz = prepared.candidate_peptide(idx).mass() / z
+                            + model::mass::PROTON;
+                        prepared.dia_ms1_mobility_excess(s, mz, tol_ppm)
+                    }));
                     labels.push(search::tdc::ScoredLabel {
                         score: p.score,
                         is_decoy: prepared.candidate_is_decoy(idx),
@@ -98,6 +114,35 @@ pub(super) fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], 
             .collect();
         if anchors.len() >= search::dia::FULL_MAP_ANCHORS {
             break;
+        }
+    }
+    if learn_margin.is_some() {
+        let q = search::tdc::qvalues(&labels);
+        let mut d: Vec<f32> = excess
+            .iter()
+            .zip(&labels)
+            .zip(&q)
+            .filter(|((_, l), q)| !l.is_decoy && **q <= DIA_RT_CAL_Q)
+            .filter_map(|((e, _), _)| *e)
+            .collect();
+        d.sort_by(f32::total_cmp);
+        let at = |f: f64| d[((d.len() - 1) as f64 * f).round() as usize];
+        if d.len() >= DIA_MOBILITY_MIN_ANCHORS {
+            let margin = at(DIA_MOBILITY_MARGIN_QUANTILE);
+            log::info!(
+                target: "dia-ms1-mobility",
+                "MS1 gate mobility margin {margin:.4} 1/K0, learned from {} anchors (quantile \
+                 {DIA_MOBILITY_MARGIN_QUANTILE} of their MS1 peak's distance from the mobility slice)",
+                d.len()
+            );
+            prepared.set_dia_mobility_margin(Some(margin));
+        } else if !d.is_empty() {
+            log::info!(
+                target: "dia-ms1-mobility",
+                "MS1 gate on m/z alone: {} anchors with an MS1 mobility (at least \
+                 {DIA_MOBILITY_MIN_ANCHORS} needed for a mobility margin)",
+                d.len()
+            );
         }
     }
     match search::dia::DiaRtPrior::fit(&anchors) {

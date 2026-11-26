@@ -142,6 +142,8 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_scoring,
             ms1_link: None,
             dia_ms1: Vec::new(),
+            dia_scan_mobility: Vec::new(),
+            dia_mobility_margin: std::sync::RwLock::new(None),
             target_bare_seqs,
             candidate_filter: None,
             open_index: None,

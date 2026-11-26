@@ -9,6 +9,96 @@ impl<'a> PreparedSearch<'a> {
         self.dia_ms1 = scans;
     }
 
+    /// Installs the 1/K0 of every TIMS scan number, for the mobility term of the MS1 gate.
+    pub fn set_dia_scan_mobility(&mut self, k0: Vec<f32>) {
+        self.dia_scan_mobility = k0;
+    }
+
+    /// The DIA MS1 gate's ppm tolerance, for learning the gate's mobility margin (`None`
+    /// outside DIA).
+    pub fn dia_ms1_gate_tol_ppm(&self) -> Option<f64> {
+        self.params.dia.then_some(self.params.dia_ms1_tol_ppm)
+    }
+
+    /// Installs the mobility margin learned from the calibration anchors; `None` keeps the
+    /// MS1 gate on m/z alone.
+    pub fn set_dia_mobility_margin(&self, margin: Option<f32>) {
+        if let Ok(mut m) = self.dia_mobility_margin.write() {
+            *m = margin;
+        }
+    }
+
+    /// The 1/K0 range of `spec`'s mobility slice (no margin), when the run has a scan
+    /// mobility table.
+    fn slice_k0(&self, spec: &model::Spectrum) -> Option<(f32, f32)> {
+        let (a, b) = spec.mobility_window?;
+        let ka = *self.dia_scan_mobility.get(a as usize)?;
+        let kb = *self.dia_scan_mobility.get(b as usize)?;
+        Some((ka.min(kb), ka.max(kb)))
+    }
+
+    /// For a calibration anchor at precursor m/z `mz` in `spec`: the 1/K0 distance between
+    /// `spec`'s mobility slice and the nearest MS1 peak within `tol_ppm` of `mz` in the gate
+    /// scans (0 inside the slice); `None` without a slice, mobility data or matching peak.
+    pub fn dia_ms1_mobility_excess(
+        &self,
+        spec: &model::Spectrum,
+        mz: f64,
+        tol_ppm: f64,
+    ) -> Option<f32> {
+        let (lo, hi) = self.slice_k0(spec)?;
+        let scans = self.dia_ms1_scans(spec.rt_seconds)?;
+        let tol = mz * tol_ppm * 1e-6;
+        self.dia_ms1[scans]
+            .iter()
+            .filter(|s| s.mobility.len() == s.peaks.len())
+            .flat_map(|s| {
+                let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+                s.peaks[i..]
+                    .iter()
+                    .zip(&s.mobility[i..])
+                    .take_while(move |(p, _)| p.0 <= mz + tol)
+                    .map(|(_, &m)| (lo - m).max(m - hi).max(0.0))
+            })
+            .min_by(f32::total_cmp)
+    }
+
+    /// The 1/K0 range of `spec`'s mobility slice widened on each side by the learned margin,
+    /// once a margin is learned and when the run has a scan mobility table.
+    pub(super) fn dia_slice_mobility(&self, spec: &model::Spectrum) -> Option<(f32, f32)> {
+        let margin = self.dia_mobility_margin.read().ok().and_then(|g| *g)?;
+        let (a, b) = spec.mobility_window?;
+        let ka = *self.dia_scan_mobility.get(a as usize)?;
+        let kb = *self.dia_scan_mobility.get(b as usize)?;
+        Some((ka.min(kb) - margin, ka.max(kb) + margin))
+    }
+
+    /// [`Self::dia_ms1_has`] with the matching peak's mobility inside `k0` when given (scans
+    /// without per-peak mobility pass on m/z alone).
+    pub(super) fn dia_ms1_has_at(
+        &self,
+        scans: std::ops::Range<usize>,
+        mz: f64,
+        tol_ppm: f64,
+        k0: Option<(f32, f32)>,
+    ) -> bool {
+        let Some((lo, hi)) = k0 else {
+            return self.dia_ms1_has(scans, mz, tol_ppm);
+        };
+        let tol = mz * tol_ppm * 1e-6;
+        self.dia_ms1[scans].iter().any(|s| {
+            let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+            if s.mobility.len() != s.peaks.len() {
+                return s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol);
+            }
+            s.peaks[i..]
+                .iter()
+                .zip(&s.mobility[i..])
+                .take_while(|(p, _)| p.0 <= mz + tol)
+                .any(|(_, &m)| m >= lo && m <= hi)
+        })
+    }
+
     pub fn take_dia_ms1(&mut self) -> Vec<model::scan::Ms1Scan> {
         std::mem::take(&mut self.dia_ms1)
     }

@@ -1,6 +1,7 @@
 pub mod archive;
 pub(crate) mod ms1;
 pub(crate) mod ms2;
+pub(crate) mod mzcal;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -13,11 +14,12 @@ use timsrust::MSLevel;
 use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof::ms1::{
-    centroid_frame, centroid_profile, fit_beats_base, fit_calibration, frame_temperatures,
-    match_precursors, offset_curve, read_tdf_mz_models, sum_over_mobility, CalibrationFit,
-    FrameConditions, MobilityCentroid, MzCalibration, OffsetCurve, TdfMzModel, TdfMzModels,
-    MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
+    centroid_frame, centroid_profile, fit_beats_base, fit_calibration, match_precursors,
+    offset_curve, sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid,
+    MzCalibration, OffsetCurve, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS,
+    REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
+use crate::timstof::mzcal::{frame_temperatures, read_tdf_mz_models, TdfMzModel, TdfMzModels};
 use crate::timstof::ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
     slice_dia_windows, FrameRow, PasefPrecursor,

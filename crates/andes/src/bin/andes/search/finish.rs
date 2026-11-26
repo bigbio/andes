@@ -1085,6 +1085,7 @@ pub(super) fn post_search(
             report_base,
             spectrum_paths,
             run_ends,
+            acquisition,
             t_total,
         )?;
         return Ok(None);

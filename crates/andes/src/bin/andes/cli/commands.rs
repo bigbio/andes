@@ -271,6 +271,11 @@ pub(crate) struct CohortXlFdrArgs {
     /// another protein are estimated apart (inter_ambiguous) and inter-links are rescored
     #[arg(long, value_name = "FASTA")]
     pub(crate) database: Option<PathBuf>,
+    /// Seed of the rescoring models' cross-validation folds, to measure how much the q-values
+    /// depend on the split
+    #[arg(long, value_name = "N", default_value_t = 42, hide = true,
+          value_parser = clap::value_parser!(u64).range(1..=20000))]
+    pub(crate) rescore_seed: u64,
 }
 
 #[derive(clap::Args, Debug)]

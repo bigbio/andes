@@ -783,7 +783,9 @@ pub(crate) struct SearchArgs {
     ///
     /// Predicted retention times are calibrated to the observed ones per input file.
     /// peptdeep-ms2, peptdeep-rt and deeplc-rt load exported ONNX models from
-    /// --predictor-models and fail at start-up when a model file is missing.
+    /// --predictor-models and fail at start-up when a model file is missing. With --xl and an
+    /// MS-cleavable linker, ms2 adds to <base>.xl.pin the andes-ms2 similarity of each
+    /// peptide's fragments that do not carry the link; the other features do not apply.
     #[arg(long, value_name = "FEATURES", value_delimiter = ',', default_value = "rt",
           hide_short_help = true, help_heading = H_PREDICTION)]
     pub(crate) predict: Vec<PredictFeature>,

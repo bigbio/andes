@@ -47,6 +47,16 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
+fn peak_intensity(peaks: &[(f64, f32)], tol: FragmentTolerance, mz: f64) -> f64 {
+    let w = tol.window(mz);
+    let lo = peaks.partition_point(|(m, _)| *m < mz - w);
+    peaks[lo..]
+        .iter()
+        .take_while(|(m, _)| *m <= mz + w)
+        .map(|(_, i)| *i as f64)
+        .fold(0.0, f64::max)
+}
+
 pub fn ms2_features(
     pred: &[f32],
     ions: &[Ion],
@@ -56,13 +66,7 @@ pub fn ms2_features(
     tol: FragmentTolerance,
 ) -> [f64; 8] {
     ms2_features_with(pred, ions, mass, charge, |_, mz| {
-        let w = tol.window(mz);
-        let lo = peaks.partition_point(|(m, _)| *m < mz - w);
-        peaks[lo..]
-            .iter()
-            .take_while(|(m, _)| *m <= mz + w)
-            .map(|(_, i)| *i as f64)
-            .fold(0.0, f64::max)
+        peak_intensity(peaks, tol, mz)
     })
 }
 
@@ -74,6 +78,33 @@ pub fn ms2_features_with(
     ions: &[Ion],
     mass: &Mass,
     charge: u8,
+    observed: impl FnMut(usize, f64) -> f64,
+) -> [f64; 8] {
+    features(pred, ions, mass, charge, &|_, _| true, observed)
+}
+
+/// [`ms2_features`] over the fragments `keep` accepts: it is given the cleavage index (the b ion
+/// holds residues `0..=i`, the y ion the rest) and whether the ion is a b ion.
+pub fn ms2_features_where(
+    pred: &[f32],
+    ions: &[Ion],
+    mass: &Mass,
+    charge: u8,
+    peaks: &[(f64, f32)],
+    tol: FragmentTolerance,
+    keep: &dyn Fn(usize, bool) -> bool,
+) -> [f64; 8] {
+    features(pred, ions, mass, charge, keep, |_, mz| {
+        peak_intensity(peaks, tol, mz)
+    })
+}
+
+fn features(
+    pred: &[f32],
+    ions: &[Ion],
+    mass: &Mass,
+    charge: u8,
+    keep: &dyn Fn(usize, bool) -> bool,
     mut observed: impl FnMut(usize, f64) -> f64,
 ) -> [f64; 8] {
     let n = mass.res.len();
@@ -85,7 +116,7 @@ pub fn ms2_features_with(
     for i in 0..n.saturating_sub(1) {
         prefix += mass.res[i];
         for (k, &(bion, z)) in ions.iter().enumerate() {
-            if z > charge {
+            if z > charge || !keep(i, bion) {
                 continue;
             }
             let neutral = if bion { prefix } else { total - prefix + H2O };
@@ -192,6 +223,30 @@ mod tests {
         assert_eq!(f[5], 0.0);
         assert_eq!(f[6], 0.0);
         assert_eq!(f[7], 0.0);
+    }
+
+    #[test]
+    fn masked_out_ions_do_not_count() {
+        let (_, mass) = parse_peptide("K.PEPTIDEK.R").unwrap();
+        let pred: Vec<f32> = (0..14).map(|i| 1.0 + (i % 5) as f32).collect();
+        let mut peaks = ideal_peaks(&pred, &mass);
+        let b5 = mass.nterm + mass.res[..6].iter().sum::<f64>() + PROTON;
+        for p in &mut peaks {
+            if (p.0 - b5).abs() < 1e-6 {
+                p.1 = 500.0;
+            }
+        }
+        let tol = FragmentTolerance::Ppm(20.0);
+        let all = ms2_features(&pred, &BY1, &mass, 2, &peaks, tol);
+        assert!(
+            all[6] < 0.9,
+            "the corrupted ion lowers the angle: {}",
+            all[6]
+        );
+        let kept = ms2_features_where(&pred, &BY1, &mass, 2, &peaks, tol, &|i, b| !(b && i == 5));
+        assert!((kept[6] - 1.0).abs() < 1e-6, "spectral angle {}", kept[6]);
+        let same = ms2_features_where(&pred, &BY1, &mass, 2, &peaks, tol, &|_, _| true);
+        assert_eq!(same, all);
     }
 
     #[test]

@@ -129,6 +129,98 @@ impl Store {
     }
 }
 
+/// A spilled store's columns, one file per feature, written in one pass over the store so
+/// that a column can be read without reading every feature.
+pub(crate) struct Columns {
+    paths: Vec<PathBuf>,
+    nrows: usize,
+}
+
+impl Columns {
+    /// Calls `f` with every value of column `j`, in row order.
+    pub(crate) fn for_each_value(&self, j: usize, mut f: impl FnMut(f32)) -> Result<(), String> {
+        let path = &self.paths[j];
+        let err = |e: std::io::Error| format!("read column file {}: {e}", path.display());
+        let mut file = File::open(path).map_err(err)?;
+        let mut bytes = vec![0u8; BLOCK_BYTES];
+        let mut left = self.nrows * 4;
+        while left > 0 {
+            let len = left.min(BLOCK_BYTES);
+            file.read_exact(&mut bytes[..len]).map_err(err)?;
+            for c in bytes[..len].chunks_exact(4) {
+                f(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            }
+            left -= len;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Columns {
+    fn drop(&mut self) {
+        for p in &self.paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+impl Store {
+    /// Writes every feature column to its own file in the spill directory, in one pass.
+    pub(crate) fn columns(&self) -> Result<Columns, String> {
+        let nf = self.nfeat;
+        let k = SPILL_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut cols = Columns {
+            paths: Vec::with_capacity(nf),
+            nrows: self.nrows,
+        };
+        let mut sinks: Vec<(BufWriter<File>, Vec<u8>)> = Vec::with_capacity(nf);
+        for j in 0..nf {
+            let path = self
+                .budget
+                .spill_dir()
+                .join(format!("rescore-{}-{k}.col{j}", std::process::id()));
+            let file = File::create(&path)
+                .map_err(|e| format!("create column file {}: {e}", path.display()))?;
+            cols.paths.push(path);
+            sinks.push((BufWriter::with_capacity(1 << 20, file), Vec::new()));
+        }
+        let mut failed: Option<String> = None;
+        self.for_each_block(|_, block| {
+            if failed.is_some() || nf == 0 {
+                return;
+            }
+            failed = sinks
+                .par_iter_mut()
+                .enumerate()
+                .filter_map(|(j, (w, buf))| {
+                    buf.clear();
+                    for row in block.chunks_exact(nf) {
+                        buf.extend_from_slice(&row[j].to_le_bytes());
+                    }
+                    w.write_all(buf).err().map(|e| (j, e))
+                })
+                .min_by_key(|(j, _)| *j)
+                .map(|(j, e)| format!("write column file {}: {e}", cols.paths[j].display()));
+        });
+        for (j, (w, _)) in sinks.iter_mut().enumerate() {
+            if failed.is_some() {
+                break;
+            }
+            if let Err(e) = w.flush() {
+                failed = Some(format!(
+                    "write column file {}: {e}",
+                    cols.paths[j].display()
+                ));
+            }
+        }
+        drop(sinks);
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(cols),
+        }
+    }
+}
+
 impl Drop for Store {
     fn drop(&mut self) {
         if let Data::Spill(p) = &self.data {
@@ -290,6 +382,21 @@ mod tests {
         assert_eq!(collect(&spill), b);
         drop(spill);
         assert_eq!(std::fs::read_dir(spill_dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn column_files_hold_each_feature_in_row_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = build(1, dir.path(), 10, 4);
+        let cols = spill.columns().unwrap();
+        for j in 0..4 {
+            let mut got = Vec::new();
+            cols.for_each_value(j, |x| got.push(x)).unwrap();
+            let want: Vec<f32> = (0..10).map(|r| (r * 100 + j) as f32 + 0.5).collect();
+            assert_eq!(got, want);
+        }
+        drop(cols);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     fn block_sums(s: &Store, threads: usize, live: &AtomicU64, peak: &AtomicU64) -> Vec<u64> {

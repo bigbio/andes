@@ -8,10 +8,15 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
    e.g. a container exec; ``--converter-args``: the argument template) into
    --work-dir;
 3. stream the mzML, keeping only the selected scans; read NCE and activation
-   from the scan's filter string (``ms2_common.parse_filter_v2``: HCD/CID, ETD,
-   EThcD), the instrument model from the file header (or --instrument-fallback);
+   from the scan's filter string (``ms2_common.scan_activation``: HCD/CID, ETD,
+   EThcD, UVPD), the instrument model from the file header (or --instrument-fallback);
    a scan without a filter string on a time-of-flight instrument (timsTOF / TOF,
-   e.g. timsconvert mzML) is HCD-TOF with NCE nan, as in the MsNet extractor;
+   e.g. timsconvert mzML) is HCD-TOF with NCE nan, as in the MsNet extractor.
+   Every scan of a run is UVPD when --sdrf declares the run's dissociation method
+   ultraviolet photodissociation, or the scan's activation terms name it: a UVPD
+   laser in a Q Exactive HCD cell is recorded as ``@hcd1.00`` with the beam-type
+   CID term, so neither the filter nor the CV term shows it (PXD003109). UVPD is a
+   shard-only activation (``ms2_common.SHARD_ONLY_ACTIVATIONS``);
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
    --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES_V2`` channels at the
    analyser's tolerance and normalise;
@@ -52,8 +57,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import (INSTRUMENTS, ION_TYPES_V2, activation_index, annotate, instrument_class, parse_filter_v2,  # noqa: E402
-                        parse_proforma, precursor_mz, shard_table)
+from ms2_common import (INSTRUMENTS, ION_TYPES_V2, activation_index, annotate, instrument_class, is_uvpd,  # noqa: E402
+                        parse_proforma, precursor_mz, scan_activation, sdrf_dissociation, shard_table)
 from ms2_select import annotate_rows  # noqa: E402
 from mzml_reader import instrument_name, read_scans  # noqa: E402
 
@@ -111,7 +116,8 @@ def prec_ok(seq, mods, z, mz_obs, tol_ppm) -> bool:
     return any(abs(mz_obs - (theo + k * 1.0033548378 / z)) <= tol_ppm * 1e-6 * theo for k in range(-1, 4))
 
 
-def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]:
+def process_run(mzml: str, psms, dataset: str, run: str, a, stats, declared: str | None = None) -> list[dict]:
+    """Annotated rows of the run's selected scans; ``declared`` = the run's dissociation method from --sdrf."""
     want = {int(s): r for s, r in zip(psms.scan, psms.itertuples(index=False))}
     instr = instrument_name(mzml) or a.instrument_fallback or ""
     # Only time-of-flight instruments take the no-filter path; a Thermo scan without a filter stays unknown.
@@ -121,17 +127,17 @@ def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]
     for spec in read_scans(mzml, set(want)):
         r = want[spec["scan"]]
         stats["found"] += 1
-        if spec["filter"]:
-            act, nce = parse_filter_v2(spec["filter"])
-        else:
-            # No Thermo filter string (e.g. timsconvert mzML of a Bruker .d): a time-of-flight instrument is
-            # HCD-TOF with no NCE, as in ms2_extract_msnet.
-            act, nce = no_filter_act, float("nan")
+        # No Thermo filter string (e.g. timsconvert mzML of a Bruker .d): a time-of-flight instrument is
+        # HCD-TOF with no NCE, as in ms2_extract_msnet.
+        act, nce = scan_activation(spec["filter"], spec["dissociation"], declared, no_filter_act)
+        if not spec["filter"]:
             stats["no_filter"] += 1
+        if act == "UVPD":
+            stats["uvpd"] += 1
         if act == "unknown":
             stats["activation_skipped"] += 1
             continue
-        if act != "HCD-TOF" and not np.isfinite(nce) and np.isfinite(spec["collision_energy"]):
+        if act not in ("HCD-TOF", "UVPD") and not np.isfinite(nce) and np.isfinite(spec["collision_energy"]):
             nce = spec["collision_energy"]
         seq, mods = parse_proforma(r.peptidoform)
         if not prec_ok(seq, mods, int(r.charge), spec["precursor_mz"], a.prec_tol_ppm):
@@ -180,6 +186,8 @@ def main():
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--instrument-fallback", help="instrument model when the mzML header names none that "
                    "ms2_common.instrument_class knows (e.g. 'timsTOF' for timsconvert mzML)")
+    p.add_argument("--sdrf", help="SDRF whose comment[dissociation method] declares each run's activation; only an "
+                   "ultraviolet photodissociation entry is used (it makes every scan of that run UVPD)")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--source-engine", default="unknown",
                    help="engine that produced the selected identifications (andes, comet, msfragger or other)")
@@ -199,6 +207,7 @@ def main():
         print(f"{summary} marks the task complete; skipping")
         return
     runs = task["runs"].split("|")
+    declared = sdrf_dissociation(a.sdrf) if a.sdrf else {}
     sel = pq.read_table(task["selected"], filters=[("run", "in", runs)]).to_pandas()
     work = os.path.join(a.work_dir, f"ms2-{ds}-{a.task_index}-{os.getpid()}")
     os.makedirs(work, exist_ok=True)
@@ -206,7 +215,9 @@ def main():
     rows, log = [], []
     try:
         for run, psms in sel.groupby("run", sort=True):
-            st = {"run": run, "selected": len(psms), "found": 0, "no_filter": 0, "activation_skipped": 0,
+            dec = declared.get(str(run).lower())
+            st = {"run": run, "declared_dissociation": dec, "selected": len(psms), "found": 0, "no_filter": 0,
+                  "uvpd": 0, "activation_skipped": 0,
                   "precursor_mismatch": 0, "too_few_ions": 0, "kept": 0, "not_in_file": 0}
             t1 = time.time()
             try:
@@ -219,7 +230,7 @@ def main():
                     if raw is None:
                         raise FileNotFoundError(f"no raw file for {run} under {task['raw_dir']}")
                     mzml = convert(raw, work, a)
-                rows += process_run(mzml, psms, ds, run, a, st)
+                rows += process_run(mzml, psms, ds, run, a, st, dec if is_uvpd(dec) else None)
                 if not a.mzml_dir and not a.keep_mzml:
                     os.remove(mzml)
             except (FileNotFoundError, subprocess.SubprocessError, ValueError, OSError) as e:
@@ -233,7 +244,7 @@ def main():
         else:
             shutil.rmtree(work, ignore_errors=True)
     tot = {k: sum(s.get(k, 0) for s in log) for k in
-           ("selected", "found", "activation_skipped", "precursor_mismatch", "too_few_ions", "kept")}
+           ("selected", "found", "uvpd", "activation_skipped", "precursor_mismatch", "too_few_ions", "kept")}
     tot["runs"], tot["runs_failed"] = len(log), sum("error" in s for s in log)
     complete = tot["runs_failed"] == 0
     rows = annotate_rows(rows, a.source_engine)

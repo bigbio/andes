@@ -84,6 +84,10 @@ ELECTRON_SERIES = ("c", "z")
 # Activation = dissociation + MS2 analyser; index 0 = unknown. v2 entries only after the v1 ones.
 ACTIVATIONS = ["unknown", "HCD-FTMS", "HCD-ITMS", "CID-ITMS", "CID-FTMS", "HCD-ASTMS", "ETD", "EThcD", "HCD-TOF"]
 ELECTRON_ACTIVATIONS = ("ETD", "EThcD")
+# Activations a shard row may record that have no model row (not in ACTIVATIONS, nor in ``ms2_native::ACTIVATIONS``):
+# ultraviolet photodissociation fragments unlike HCD, so its spectra are kept apart; ``ms2_train`` drops such rows
+# until the model carries the class. activation_index() maps them to 0, so no c / z-dot channel is valid for them.
+SHARD_ONLY_ACTIVATIONS = ("UVPD",)
 # Instrument family; index 0 = unknown. v2 entries only after the v1 ones.
 INSTRUMENTS = ["unknown", "QExactive", "Exploris", "Tribrid", "VelosElite", "Astral", "LTQ", "timsTOF", "TOF"]
 # Rows of the activation / instrument embeddings in a v1 (AMS20001) model.
@@ -359,11 +363,14 @@ def parse_filter_v2(filt: str | None):
     """Thermo filter string -> (v2 activation name, NCE or nan).
 
     As ``parse_filter`` for one HCD/CID step; ``@etd..@hcd..`` (or ``@cid``) is ``EThcD`` with the
-    supplemental collision energy as NCE, ``@etd..`` alone is ``ETD`` with NCE nan."""
+    supplemental collision energy as NCE, ``@etd..`` alone is ``ETD`` with NCE nan; any ``@uvpd..`` step
+    is ``UVPD`` with the collision energy of an HCD/CID step as NCE (nan without one)."""
     if not filt:
         return "unknown", float("nan")
     acts = re.findall(r"@([a-z]+)(\d+(?:\.\d+)?)", filt.strip())
     kinds = [k for k, _ in acts]
+    if "uvpd" in kinds:
+        return "UVPD", next((float(e) for k, e in acts if k in ("hcd", "cid")), float("nan"))
     if kinds and kinds[0] == "etd":
         if len(acts) == 1:
             return "ETD", float("nan")
@@ -378,9 +385,12 @@ def v2_activation(dissociation, analyser, instrument_cls: str | None) -> str:
 
     Collisional activation on a time-of-flight analyser is HCD-TOF; an Orbitrap Astral MS2 is HCD-ASTMS;
     Q Exactive and Exploris have only HCD with Orbitrap detection (HCD-FTMS) and timsTOF only beam-type
-    collisional activation (HCD-TOF), whatever the label says. 'unknown' when it cannot be decided."""
+    collisional activation (HCD-TOF), whatever the label says; ultraviolet photodissociation is UVPD
+    (``SHARD_ONLY_ACTIVATIONS``) on any analyser. 'unknown' when it cannot be decided."""
     d = str(dissociation or "").upper().replace("-", "").replace(" ", "")
     an = str(analyser or "").upper().replace("-", "")
+    if "UVPD" in d or "ULTRAVIOLET" in d:
+        return "UVPD"
     if "ETHCD" in d or "ETCID" in d:
         return "EThcD"
     if "ETD" in d or "ELECTRONTRANSFER" in d:
@@ -403,6 +413,51 @@ def v2_activation(dissociation, analyser, instrument_cls: str | None) -> str:
     if an in ("FTMS", "ITMS"):
         return f"{'HCD' if hcd else 'CID'}-{an}"
     return "unknown"
+
+
+def is_uvpd(dissociation: str | None) -> bool:
+    """Whether a dissociation method (PSI-MS name, accession or SDRF ``NT=..;AC=..`` value) is ultraviolet
+    photodissociation."""
+    d = str(dissociation or "").upper().replace("-", "").replace(" ", "")
+    return "UVPD" in d or "ULTRAVIOLET" in d or "MS:1003246" in d
+
+
+def scan_activation(filt: str | None, dissociation=(), declared: str | None = None,
+                    no_filter: str = "unknown") -> tuple[str, float]:
+    """(v2 activation name, NCE or nan) of one MS2 scan.
+
+    UVPD when the run's declared dissociation method (e.g. the SDRF ``comment[dissociation method]``) or the
+    scan's activation terms (``mzml_reader.DISSOCIATION`` names) say ultraviolet photodissociation, whatever
+    the filter string says: a UVPD laser in the HCD cell of a Q Exactive leaves the scan recorded as
+    ``@hcd1.00`` with the beam-type CID term (PXD003109). NCE is then the filter's HCD/CID energy, the
+    collisional activation that accompanies the laser. Otherwise ``parse_filter_v2`` of the filter string,
+    and ``(no_filter, nan)`` for a scan without one."""
+    if is_uvpd(declared) or any(is_uvpd(d) or d == "photodissociation" for d in dissociation):
+        return "UVPD", (parse_filter_v2(filt)[1] if filt else float("nan"))
+    if filt:
+        return parse_filter_v2(filt)
+    return no_filter, float("nan")
+
+
+def sdrf_dissociation(path: str) -> dict:
+    """``{run name, lower case and without extension: comment[dissociation method]}`` from an SDRF; the first
+    value wins for a file listed on several rows. Empty when the SDRF has no such column."""
+    import csv
+
+    with open(path, newline="") as fh:
+        rows = list(csv.reader(fh, delimiter="\t"))
+    if not rows:
+        return {}
+    head = [h.strip().lower() for h in rows[0]]
+    if "comment[data file]" not in head or "comment[dissociation method]" not in head:
+        return {}
+    fi, di = head.index("comment[data file]"), head.index("comment[dissociation method]")
+    out = {}
+    for r in rows[1:]:
+        if len(r) > max(fi, di) and r[fi].strip():
+            stem = re.sub(r"\.(raw|mzml|mzml\.gz|mgf|d|wiff)$", "", os.path.basename(r[fi].strip()), flags=re.I)
+            out.setdefault(stem.lower(), r[di].strip())
+    return out
 
 
 def label_of_mods(mods) -> str:

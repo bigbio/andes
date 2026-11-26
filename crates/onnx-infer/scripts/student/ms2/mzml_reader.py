@@ -1,8 +1,9 @@
 """Streaming mzML reader for selected MS2 scans (standard library + numpy only).
 
 Yields one dict per wanted scan: ``scan``, ``ms_level``, ``filter``,
-``collision_energy``, ``precursor_mz``, ``mz`` (sorted float64), ``intensity``
-(float64). Binary arrays are decoded only for the requested scans. Handles
+``collision_energy``, ``precursor_mz``, ``dissociation`` (the PSI-MS dissociation
+terms of the scan's activation, ``DISSOCIATION`` names in file order),
+``mz`` (sorted float64), ``intensity`` (float64). Binary arrays are decoded only for the requested scans. Handles
 plain and gzip-compressed (``.mzML.gz``) files, 32/64-bit floats, zlib or no
 compression (numpress is rejected).
 """
@@ -23,6 +24,17 @@ _ACC = {
     "MS:1000045": "collision_energy",
     "MS:1000744": "precursor_mz",
     "MS:1000041": "precursor_charge",
+}
+
+# PSI-MS dissociation method terms (children of MS:1000044) the extractors read.
+DISSOCIATION = {
+    "MS:1000133": "CID",
+    "MS:1000422": "HCD",
+    "MS:1002481": "HCD",  # higher energy beam-type collision-induced dissociation
+    "MS:1000598": "ETD",
+    "MS:1002631": "EThcD",
+    "MS:1003246": "UVPD",
+    "MS:1000435": "photodissociation",
 }
 
 
@@ -97,14 +109,17 @@ def read_scans(path: str, wanted: set[int] | None = None):
             scan = int(m.group(1)) if m else int(el.get("index", "-1")) + 1
             if wanted is None or scan in wanted:
                 rec = {"scan": scan, "ms_level": None, "filter": None, "collision_energy": None,
-                       "precursor_mz": None, "precursor_charge": None}
+                       "precursor_mz": None, "precursor_charge": None, "dissociation": []}
                 arrays = {}
                 for sub in el.iter():
                     st = _local(sub.tag)
                     if st == "cvParam":
-                        key = _ACC.get(sub.get("accession"))
+                        acc = sub.get("accession")
+                        key = _ACC.get(acc)
                         if key and rec[key] is None:
                             rec[key] = sub.get("value")
+                        elif acc in DISSOCIATION:
+                            rec["dissociation"].append(DISSOCIATION[acc])
                     elif st == "binaryDataArray":
                         kind, arr = _decode(sub)
                         if kind:

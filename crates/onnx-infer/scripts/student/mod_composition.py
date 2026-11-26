@@ -48,6 +48,9 @@ UNIMOD = {
     122: ("Formyl", "C O", "K^"),
     188: ("Label:13C(6)", "13C6 C-6", "KR"),
     199: ("Dimethyl:2H(4)", "2H4 C2", "KR^"),
+    # Not in ``rt_native::mods`` yet: Rust encodes ADP-ribosylated peptides as unsupported until a model trained
+    # with this entry ships with the Rust table entry.
+    213: ("ADP-Ribosyl", "H21 C15 N5 O13 P2", "CDEKNRS"),
     214: ("iTRAQ4plex", "H12 C4 13C3 N 15N O", "K^Y"),
     259: ("Label:13C(6)15N(2)", "13C6 C-6 15N2 N-2", "K"),
     262: ("Label:2H(3)", "2H3 H-3", "L"),
@@ -134,10 +137,11 @@ def split_nterm_residue(delta: float, residue: str, tol: float = 2e-3):
 if __name__ == "__main__":
     ref = {1: 42.010565, 4: 57.021464, 7: 0.984016, 21: 79.966331, 27: -18.010565, 28: -17.026549,
            35: 15.994915, 121: 114.042927, 214: 144.102063, 354: 44.985078, 730: 304.205360,
-           737: 229.162932, 2016: 304.207146, 259: 8.014199, 739: 224.152478, 30: 21.981943, 738: 225.155833}
+           737: 229.162932, 2016: 304.207146, 213: 541.061110, 259: 8.014199, 739: 224.152478, 30: 21.981943, 738: 225.155833}
     for k, m in ref.items():
         assert abs(MASSES[k] - m) < 2e-5, (k, MASSES[k], m)
     assert match_mass(79.96633, "S", False) == 21
+    assert match_mass(541.06111, "S", False) == 213 and match_mass(541.06111, "R", False) == 213
     assert match_mass(229.1629, "K", False) == 737 and match_mass(229.1629, "P", True) == 737
     assert match_mass(42.01057, "M", True) == 1
     assert match_mass(-0.98402, None, False, cterm=True) == 2 and match_mass(-0.98402, None, False) is None

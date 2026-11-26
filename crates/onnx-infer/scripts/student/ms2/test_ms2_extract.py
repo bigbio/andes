@@ -358,3 +358,92 @@ def test_tof_mzml_without_filter_is_hcd_tof(tmp_path):
     assert rows[0]["activation"] == "HCD-TOF" and np.isnan(rows[0]["nce"]) and rows[0]["instrument"] == "timsTOF Pro"
     runs = {r["run"]: r for r in json.load(open(shards / "PXD000000" / "part-00001.json"))["runs"]}
     assert runs["run_q"]["activation_skipped"] == 1 and runs["run_t"]["no_filter"] == 1
+
+
+def _extract(tmp_path, spectra_by_run, seq, z, extra=()):
+    """Write one mzML per run (``spectra_by_run``: run -> list of write_mzml tuples), select scan 1 of every run
+    for ``seq``, run ms2_extract_raw.py and return (rows by run, per-run json stats)."""
+    mzml_dir = tmp_path / "mzml"
+    mzml_dir.mkdir()
+    for run, spectra in spectra_by_run.items():
+        write_mzml(mzml_dir / f"{run}.mzML", spectra)
+    runs = sorted(spectra_by_run)
+    selected = tmp_path / "selected.parquet"
+    pq.write_table(pa.table({"run": runs, "scan": [1] * len(runs), "peptidoform": [seq] * len(runs),
+                             "charge": [z] * len(runs), "pep": [0.001] * len(runs)}), selected)
+    tasks = tmp_path / "tasks.tsv"
+    tasks.write_text(f"task\tdataset\truns\tselected\traw_dir\n1\tPXD000000\t{'|'.join(runs)}\t{selected}\t{tmp_path}\n")
+    shards = tmp_path / "shards"
+    run_script("ms2_extract_raw.py", "--tasks", tasks, "--task-index", 1, "--out-dir", shards,
+               "--work-dir", tmp_path / "work", "--mzml-dir", mzml_dir, *extra)
+    rows = {r["run"]: r for r in pq.read_table(shards / "PXD000000" / "part-00001.parquet").to_pylist()}
+    stats = {r["run"]: r for r in json.load(open(shards / "PXD000000" / "part-00001.json"))["runs"]}
+    return rows, stats
+
+
+def test_uvpd_declared_by_sdrf(tmp_path):
+    """PXD003109: a UVPD laser in a Q Exactive HCD cell records '@hcd1.00' with the beam-type CID term. The SDRF's
+    dissociation method makes that run UVPD (NCE = the filter energy); an HCD run of the same SDRF stays HCD-FTMS."""
+    seq, z = "PEPTIDEKAR", 2
+    mz, inten = perfect_spectrum(seq, [], z)
+    pmz = precursor_mz(seq, [], z)
+    filt = f"FTMS + p NSI d Full ms2 {pmz:.2f}@hcd1.00 [100.00-2000.00]"
+    sdrf = tmp_path / "x.sdrf.tsv"
+    sdrf.write_text("source name\tcomment[data file]\tcomment[dissociation method]\n"
+                    "s1\trun_u.raw\tNT=ultraviolet photodissociation;AC=MS:1003246\n"
+                    "s2\trun_h.raw\tNT=beam-type collision-induced dissociation;AC=MS:1000422\n")
+    rows, stats = _extract(tmp_path, {"run_u": [(1, filt, pmz, z, mz, inten)],
+                                      "run_h": [(1, filt.replace("@hcd1.00", "@hcd25.00"), pmz, z, mz, inten)]},
+                           seq, z, ["--sdrf", sdrf])
+    assert rows["run_u"]["activation"] == "UVPD" and rows["run_u"]["nce"] == 1.0
+    assert rows["run_h"]["activation"] == "HCD-FTMS" and rows["run_h"]["nce"] == 25.0
+    assert stats["run_u"]["uvpd"] == 1 and stats["run_h"]["uvpd"] == 0
+    # Without the SDRF the same scan is HCD: the mzML alone cannot show this UVPD.
+    (tmp_path / "nosdrf").mkdir()
+    rows2, _ = _extract(tmp_path / "nosdrf", {"run_u": [(1, filt, pmz, z, mz, inten)]}, seq, z)
+    assert rows2["run_u"]["activation"] == "HCD-FTMS"
+
+
+def test_uvpd_from_scan_metadata(tmp_path):
+    """A '@uvpd' filter step or the MS:1003246 activation term is UVPD on its own."""
+    from ms2_common import ACTIVATIONS, SHARD_ONLY_ACTIVATIONS, activation_index, scan_activation, v2_activation
+    from mzml_reader import read_scans
+    act, nce = scan_activation("FTMS + p NSI d Full ms2 500.00@uvpd25.00 [100.00-1000.00]")
+    assert act == "UVPD" and np.isnan(nce)
+    assert scan_activation("FTMS + p NSI d Full ms2 500.00@hcd28.00 [100.00-1000.00]", ["UVPD"]) == ("UVPD", 28.0)
+    assert scan_activation("FTMS + p NSI d Full ms2 500.00@hcd28.00 [100.00-1000.00]", ["HCD"]) == ("HCD-FTMS", 28.0)
+    assert v2_activation("ultraviolet photodissociation", "FTMS", "Tribrid") == "UVPD"
+    assert "UVPD" in SHARD_ONLY_ACTIVATIONS and "UVPD" not in ACTIVATIONS and activation_index("UVPD") == 0
+    seq, z = "PEPTIDEKAR", 2
+    mz, inten = perfect_spectrum(seq, [], z)
+    p = tmp_path / "u.mzML"
+    write_mzml(p, [(1, "FTMS + p NSI d Full ms2 500.00@hcd1.00 [100.00-1000.00]", 500.0, z, mz, inten)])
+    assert next(read_scans(str(p)))["dissociation"] == ["HCD"]
+    p.write_text(p.read_text().replace('accession="MS:1000422" name="beam-type collision-induced dissociation"',
+                                       'accession="MS:1003246" name="ultraviolet photodissociation"'))
+    assert next(read_scans(str(p)))["dissociation"] == ["UVPD"]
+
+
+def test_adp_ribosyl_supported_and_annotated(tmp_path):
+    """PXD023835: ADP-Ribosyl (UNIMOD:213, +541.06111 on S/R) parses, is supported (ms2_select / the corpus
+    extract.py keep it) and an EThcD scan annotates c / z-dot ions carrying the intact ADP-ribose, as the
+    engines' label peptidoforms do (no ADP-ribose loss channel)."""
+    from ms2_common import MOD_MASS, N_ION_V2, parse_proforma, supported
+    from ms2_select import peptidoform_key
+    assert abs(MOD_MASS[213] - 541.06111) < 1e-5 and abs(MASSES[213] - 541.06111) < 1e-5
+    pf = "SGAALS[UNIMOD:213]KR"
+    seq, mods = parse_proforma(pf)
+    assert (seq, mods) == ("SGAALSKR", [(6, 213)]) and supported(seq, mods) and peptidoform_key(pf) is not None
+    z = 3
+    mz, inten = ethcd_spectrum(seq, mods, z)
+    pmz = precursor_mz(seq, mods, z)
+    assert abs(pmz - precursor_mz(seq, [], z) - 541.06111 / z) < 1e-5
+    rows, stats = _extract(tmp_path, {"run_a": [(1, f"FTMS + p NSI d Full ms2 {pmz:.2f}@etd50.00@hcd20.00 "
+                                                    "[100.00-2000.00]", pmz, z, mz, inten)]}, pf, z)
+    row = rows["run_a"]
+    assert row["activation"] == "EThcD" and row["peptidoform"] == pf
+    v = np.asarray(row["intensities"]).reshape(len(seq) - 1, N_ION_V2)
+    # c ions after the modified S (site index >= 5) and z-dot ions holding it (site index <= 4) carry +541.06.
+    assert (v[5:, 15] > 0).all() and (v[:5, 17] > 0).all()
+    assert (v[:, 4:8] == -1).all(), "ADP-ribosyl S is not a phospho site: no H3PO4 loss channel"
+    assert stats["run_a"]["precursor_mismatch"] == 0

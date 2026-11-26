@@ -35,7 +35,7 @@ import pyarrow.parquet as pq
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
+from ms2_common import ACTIVATIONS, N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
 from ms2_model import Ms2Cnn, config_of, export_weights, make_batch, masked_sa_loss, teacher_kl  # noqa: E402
 from rt_model import encode  # noqa: E402
 
@@ -115,6 +115,9 @@ class Data:
         self.length = np.array([len(p[0]) if p else 0 for p in self.seqmods])[self.form_id]
         ok = np.array([e is not None for e in self.enc])[self.form_id]
         ok &= (self.off[1:] - self.off[:-1]) == (self.length - 1) * N_ION
+        # A shard-only activation (ms2_common.SHARD_ONLY_ACTIVATIONS, e.g. UVPD) has no model row: never train it as
+        # another class.
+        ok &= np.array([x in ACTIVATIONS for x in acts.dictionary.to_pylist()], bool)[acts.indices.to_numpy()]
         self.ok = ok
 
     def batch(self, idx, device):

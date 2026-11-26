@@ -2,7 +2,8 @@ use crate::budget::{Budget, Reservation};
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -60,35 +61,9 @@ impl Store {
                     .enumerate()
                     .for_each(|(i, c)| f(i * rows, c));
             }
-            Data::Spill(_) => {
-                let block = (self.block_rows * self.nfeat * 4) as u64;
-                let threads = rayon::current_num_threads().max(1) as u64;
-                let reader = 2 * block;
-                let batch = if block == 0 {
-                    0
-                } else {
-                    (self.budget.available().saturating_sub(reader) / block).min(threads)
-                };
-                let held = if batch >= 2 {
-                    Reservation::take(&self.budget, reader + batch * block)
-                } else {
-                    None
-                };
-                let Some(_held) = held else {
-                    self.for_each_block(&f);
-                    return;
-                };
-                let batch = batch as usize;
-                let mut pending: Vec<(usize, Vec<f32>)> = Vec::with_capacity(batch);
-                self.for_each_block(|start, block| {
-                    pending.push((start, block.to_vec()));
-                    if pending.len() == batch {
-                        pending.par_iter().for_each(|(s, b)| f(*s, b));
-                        pending.clear();
-                    }
-                });
-                pending.par_iter().for_each(|(s, b)| f(*s, b));
-            }
+            Data::Spill(path) => self.spilled_groups(path, |group| {
+                group.par_iter().for_each(|(s, b)| f(*s, b));
+            }),
         }
     }
 
@@ -108,24 +83,49 @@ impl Store {
                     f(i * rows, chunk);
                 }
             }
-            Data::Spill(path) => {
-                let mut file = File::open(path).expect("open spill file");
-                let mut start = 0usize;
-                let mut bytes = vec![0u8; rows * self.nfeat * 4];
-                let mut vals = vec![0f32; rows * self.nfeat];
-                while start < self.nrows {
-                    let n = rows.min(self.nrows - start);
-                    let len = n * self.nfeat;
-                    file.read_exact(&mut bytes[..len * 4])
-                        .expect("read spill file");
-                    for (o, c) in vals[..len].iter_mut().zip(bytes[..len * 4].chunks_exact(4)) {
-                        *o = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    }
-                    f(start, &vals[..len]);
-                    start += n;
+            Data::Spill(path) => self.spilled_groups(path, |group| {
+                for (s, b) in group {
+                    f(*s, b);
                 }
-            }
+            }),
         }
+    }
+
+    /// Reads a spilled store in groups of consecutive blocks, the blocks of a group read at
+    /// once on the thread pool with positioned reads, and calls `each` with every group in
+    /// file order. A group holds as many blocks as there are threads and the free budget holds
+    /// with their read buffers, at least one.
+    fn spilled_groups(&self, path: &Path, mut each: impl FnMut(&[(usize, Vec<f32>)])) {
+        let rows = self.block_rows;
+        let block = (rows * self.nfeat * 4) as u64;
+        let threads = rayon::current_num_threads().max(1) as u64;
+        let fits = (self.budget.available() / (2 * block).max(1)).min(threads);
+        let held = Reservation::take(&self.budget, fits * 2 * block).filter(|_| fits >= 2);
+        let group = if held.is_some() { fits as usize } else { 1 };
+        let file = File::open(path).expect("open spill file");
+        let nblocks = self.nrows.div_ceil(rows);
+        let read = |b: usize| {
+            let start = b * rows;
+            let len = rows.min(self.nrows - start) * self.nfeat;
+            let mut bytes = vec![0u8; len * 4];
+            file.read_exact_at(&mut bytes, (start * self.nfeat * 4) as u64)
+                .expect("read spill file");
+            let vals: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            (start, vals)
+        };
+        for first in (0..nblocks).step_by(group) {
+            let last = (first + group).min(nblocks);
+            let blocks: Vec<(usize, Vec<f32>)> = if group > 1 {
+                (first..last).into_par_iter().map(read).collect()
+            } else {
+                (first..last).map(read).collect()
+            };
+            each(&blocks);
+        }
+        drop(held);
     }
 }
 
@@ -382,6 +382,21 @@ mod tests {
         assert_eq!(collect(&spill), b);
         drop(spill);
         assert_eq!(std::fs::read_dir(spill_dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spilled_blocks_read_in_groups_come_in_file_order() {
+        let ram_dir = tempfile::tempdir().unwrap();
+        let ram = build(u64::MAX, ram_dir.path(), 10, 4);
+        let dir = tempfile::tempdir().unwrap();
+        let spill = build(200, dir.path(), 10, 4);
+        assert!(spill.is_spilled());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        assert_eq!(pool.install(|| collect(&spill)), collect(&ram));
+        assert_eq!(spill.budget.available(), 200);
     }
 
     #[test]

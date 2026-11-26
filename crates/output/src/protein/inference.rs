@@ -292,6 +292,11 @@ fn group_evidence(
 /// Target PSMs [`group_evidence`] maps in one parallel pass.
 const PSMS_PER_PASS: usize = 1 << 20;
 
+/// PSMs mapped to (peptide, score, families) in one parallel pass before they are merged into
+/// the per-peptide map; a row holds a few hundred bytes, so a pass stays far below one row per
+/// PSM of a study (tens of millions on a 669-run TMT study).
+const ROWS_PER_PASS: usize = 1 << 16;
+
 /// Infers protein groups and their q-values by picked target-decoy competition
 /// [cite:savitski2015_picked_fdr].
 pub fn infer_protein_groups(
@@ -327,40 +332,44 @@ pub fn infer_protein_groups(
     };
     let knockoff = |acc: &str| proteins.get(acc).is_some_and(|p| p.is_knockoff());
     let rows = |map: &HashMap<String, PercolatorPsm>, decoy: bool| {
-        let psms: Vec<&PercolatorPsm> = map.values().collect();
-        let found: Vec<Option<(String, f64, BTreeSet<String>)>> = psms
-            .par_iter()
-            .map(|p| {
-                let score = p.score?;
-                let fams: BTreeSet<String> = p
-                    .proteins
-                    .split(';')
-                    .filter(|a| !a.is_empty())
-                    .filter(|a| decoy || !idx.is_decoy_accession(a))
-                    .map(|a| if decoy { target_of(a) } else { a.to_string() })
-                    .filter(|a| !knockoff(a))
-                    .map(|a| family_of(&a))
-                    .collect();
-                (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
-            })
-            .collect();
         let mut best: HashMap<String, (f64, BTreeSet<String>)> = HashMap::new();
-        for (pep, score, fams) in found.into_iter().flatten() {
-            let e = best
-                .entry(pep)
-                .or_insert_with(|| (f64::NEG_INFINITY, BTreeSet::new()));
-            e.0 = e.0.max(score);
-            e.1.extend(fams);
+        let mut psms = map.values();
+        loop {
+            let chunk: Vec<&PercolatorPsm> = psms.by_ref().take(ROWS_PER_PASS).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            let found: Vec<Option<(String, f64, BTreeSet<String>)>> = chunk
+                .par_iter()
+                .map(|p| {
+                    let score = p.score?;
+                    let fams: BTreeSet<String> = p
+                        .proteins
+                        .split(';')
+                        .filter(|a| !a.is_empty())
+                        .filter(|a| decoy || !idx.is_decoy_accession(a))
+                        .map(|a| if decoy { target_of(a) } else { a.to_string() })
+                        .filter(|a| !knockoff(a))
+                        .map(|a| family_of(&a))
+                        .collect();
+                    (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
+                })
+                .collect();
+            for (pep, score, fams) in found.into_iter().flatten() {
+                let e = best
+                    .entry(pep)
+                    .or_insert_with(|| (f64::NEG_INFINITY, BTreeSet::new()));
+                e.0 = e.0.max(score);
+                e.1.extend(fams);
+            }
         }
         let mut out: Vec<(String, f64, BTreeSet<String>)> =
             best.into_iter().map(|(pep, (s, f))| (pep, s, f)).collect();
         out.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
         out
     };
-    let (target, decoy) = rayon::join(
-        || parsimony(rows(targets, false)),
-        || parsimony(rows(decoys, true)),
-    );
+    let target = parsimony(rows(targets, false));
+    let decoy = parsimony(rows(decoys, true));
     log::debug!(
         target: "inference",
         "parsimony: {} target, {} decoy groups",

@@ -119,6 +119,10 @@ type ClassRows = (Vec<(f64, usize)>, Vec<f64>);
 
 const MIN_GUARD_DECOYS: usize = 20;
 
+/// PSMs classified in one parallel pass, so the transient class labels cover one pass and not
+/// every PSM of the study.
+const CLASS_PER_PASS: usize = 1 << 16;
+
 pub fn apply_class_fdr(
     targets: &mut HashMap<String, PercolatorPsm>,
     decoys: &HashMap<String, PercolatorPsm>,
@@ -131,19 +135,31 @@ pub fn apply_class_fdr(
         .map(|p| (p.accession.as_str(), p.entry_kind()))
         .collect();
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
-    let classes = |rows: &HashMap<String, PercolatorPsm>| -> Vec<(String, f64)> {
-        let psms: Vec<&PercolatorPsm> = rows.values().collect();
-        psms.par_iter()
-            .map(|p| (class_of(&p.proteins, &kinds), rank(p)))
-            .collect()
+    let classes = |rows: &HashMap<String, PercolatorPsm>, sink: &mut dyn FnMut(String, f64)| {
+        let mut psms = rows.values();
+        loop {
+            let chunk: Vec<&PercolatorPsm> = psms.by_ref().take(CLASS_PER_PASS).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            let found: Vec<(String, f64)> = chunk
+                .par_iter()
+                .map(|p| (class_of(&p.proteins, &kinds), rank(p)))
+                .collect();
+            for (class, r) in found {
+                sink(class, r);
+            }
+        }
     };
     let mut by_class: HashMap<String, ClassRows> = HashMap::new();
-    for (i, (class, r)) in classes(targets).into_iter().enumerate() {
+    let mut i = 0;
+    classes(targets, &mut |class, r| {
         by_class.entry(class).or_default().0.push((r, i));
-    }
-    for (class, r) in classes(decoys) {
+        i += 1;
+    });
+    classes(decoys, &mut |class, r| {
         by_class.entry(class).or_default().1.push(r);
-    }
+    });
     let single = by_class.len() < 2;
     let mut pooled: Vec<f64> = decoys.values().map(rank).collect();
     pooled.par_sort_unstable_by(f64::total_cmp);

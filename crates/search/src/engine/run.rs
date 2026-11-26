@@ -578,8 +578,14 @@ impl<'a> PreparedSearch<'a> {
             let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
             for &z in &charges_to_try {
                 let scored_spec = scored_spec_for_charge(z);
-                let iso_errs =
-                    self.precursor_errors(spec, cand, z, params, &dia_windows, &ms1_gate, slice_k0);
+                let iso_errs = self.precursor_errors(
+                    spec,
+                    cand,
+                    z,
+                    params,
+                    &dia_windows,
+                    (&ms1_gate, slice_k0),
+                );
                 if iso_errs.is_empty() {
                     continue;
                 }
@@ -722,7 +728,9 @@ impl<'a> PreparedSearch<'a> {
 
     /// The precursor mass errors at which candidate `cand` matches the spectrum at charge `z`:
     /// under `--dia` inside the charge's isolation window (and an MS1 peak when the MS1 gate is
-    /// on), otherwise at each isotope offset of the range within the precursor tolerance.
+    /// on, within the learned mobility margin of the scan's slice `slice_k0` when the run has
+    /// MS1 mobility), otherwise at each isotope offset of the range within the precursor
+    /// tolerance.
     fn precursor_errors(
         &self,
         spec: &Spectrum,
@@ -730,8 +738,7 @@ impl<'a> PreparedSearch<'a> {
         z: u8,
         params: &SearchParams,
         dia_windows: &DiaWindows,
-        ms1_gate: &Option<std::ops::Range<usize>>,
-        slice_k0: Option<(f32, f32)>,
+        (ms1_gate, slice_k0): (&Option<std::ops::Range<usize>>, Option<(f32, f32)>),
     ) -> SmallVec<[MassError; 4]> {
         let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
         if params.dia {

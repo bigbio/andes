@@ -294,7 +294,11 @@ fn parse_chunk(
 
 const CHUNK_BYTES: usize = 4 << 20;
 
-const PER_ROW_BYTES: u64 = 160;
+/// Bytes each PSM row holds in memory from the read to the end of the run, whatever the
+/// budget: its `RowMeta` and its text offset. They are charged to the storage budget as the
+/// rows are read, so the rest of the budget is memory the stores, training rows and fits can
+/// really use.
+const PER_ROW_BYTES: u64 = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u64>()) as u64;
 
 const IN_FLIGHT_BYTES_PER_CHUNK: u64 = 4 * CHUNK_BYTES as u64;
 
@@ -431,6 +435,14 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         chunks = next?;
     }
     drop(in_flight);
+    log::debug!(
+        target: "rescore",
+        "after reading the PIN: {:.2} GiB of the {:.2} GiB storage budget free, {:.2} GiB charged to {} rows",
+        budget.available() as f64 / (1u64 << 30) as f64,
+        budget.total() as f64 / (1u64 << 30) as f64,
+        per_row.bytes() as f64 / (1u64 << 30) as f64,
+        meta.len()
+    );
     let pin = Pin {
         feature_names,
         file_names,
@@ -549,6 +561,34 @@ mod tests {
         assert!(large > small);
         let stores = 1_000_000 * (PER_ROW_BYTES + 80) + 50_000_000;
         assert!(large >= 2 * stores);
+    }
+
+    #[test]
+    fn reading_charges_each_row_only_what_it_keeps_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pin");
+        let mut text = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tf2\tPeptide\tProteins\n");
+        let rows = 20_000usize;
+        for i in 0..rows {
+            let label = if i % 2 == 0 { 1 } else { -1 };
+            text.push_str(&format!(
+                "s{i}\t{label}\t{i}\t{}.5\t{}\t0.5\tK.PEP{i}.R\tP{i}\n",
+                1000 + i,
+                i % 7
+            ));
+        }
+        std::fs::write(&path, text).unwrap();
+        let limit = MemLimit {
+            bytes: 64 << 20,
+            spill_dir: dir.path().to_path_buf(),
+            sizing: Sizing::Fixed,
+        };
+        let pin = read_pin(&path, limit).unwrap();
+        assert!(!pin.rows.is_spilled() && !pin.texts.is_spilled());
+        let used = pin.budget.total() - pin.budget.available();
+        let stores = (rows * 2 * 4) as u64 + pin.texts.bytes();
+        let kept = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u64>()) as u64;
+        assert_eq!(used, stores + rows as u64 * kept);
     }
 
     #[test]

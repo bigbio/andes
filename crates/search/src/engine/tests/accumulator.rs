@@ -33,6 +33,38 @@ fn sync_resets_the_identity_map() {
 }
 
 #[test]
+fn truncate_forgets_only_the_later_candidates() {
+    let db = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&db, "XXX");
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = SearchParams::default_tryptic(aa_set);
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
+    let prepared = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+    let cands = prepared.candidates_where(|_, _| true);
+    assert!(cands.len() >= 3);
+    {
+        let mut accum = prepared.mmap_accum.lock().unwrap();
+        accum.intern(&cands[0]);
+        accum.intern(&cands[1]);
+        accum.intern(&cands[2]);
+    }
+    prepared.truncate_materialized(1);
+    assert_eq!(prepared.materialized_len(), 1);
+    let mut accum = prepared.mmap_accum.lock().unwrap();
+    assert_eq!(accum.index_of.len(), 1);
+    assert_eq!(accum.intern(&cands[0]), 0);
+    assert_eq!(accum.intern(&cands[2]), 1);
+    assert_eq!(accum.intern(&cands[1]), 2);
+}
+
+#[test]
 fn dia_ms1_gate_reads_neighbouring_survey_scans() {
     let db = ProteinDb {
         proteins: vec![Protein {

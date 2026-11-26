@@ -63,10 +63,13 @@ fn score_mass_ordered(
     if prepared.params.dia {
         prepared.set_dia_rt_prior(None);
     }
+    let materialized = prepared.materialized_len();
     measurer.measure(prepared, pending.iter(), Some(span_da));
     if prepared.params.dia {
         calibrate_dia_rt(prepared, &pending, span_da);
     }
+    prepared.truncate_materialized(materialized);
+    crate::memory::release_free_memory();
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
     log::info!(
         target: "fragment-index",

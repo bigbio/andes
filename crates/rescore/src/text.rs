@@ -1,9 +1,11 @@
 use crate::budget::{Budget, Reservation};
+use rayon::prelude::*;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 static TEXT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -23,14 +25,28 @@ pub struct RowText {
 
 enum Data {
     Ram(Vec<u8>),
-    Spill(PathBuf, Mutex<File>),
+    Spill(PathBuf, File),
 }
 
 pub struct Texts {
     offsets: Vec<u64>,
     data: Data,
+    budget: Arc<Budget>,
     _ram: Reservation,
 }
+
+/// Records of a spilled store at most this many bytes apart are read with one positioned
+/// read, the bytes between them included.
+const TEXT_GAP_BYTES: u64 = 16 << 10;
+
+/// Bytes one positioned read of spilled records reads at most.
+const TEXT_SPAN_BYTES: u64 = 4 << 20;
+
+/// Records one task of `get_many` reads.
+const TEXT_TASK_ROWS: usize = 1 << 14;
+
+/// Bytes a returned record and the output line made from it hold beyond twice its own length.
+const TEXT_ROW_OVERHEAD_BYTES: u64 = 128;
 
 impl Texts {
     /// Bytes of every record together.
@@ -62,7 +78,7 @@ impl Texts {
                 return Err(format!("spill file {}: {e}", path.display()));
             }
         };
-        self.data = Data::Spill(path, Mutex::new(file));
+        self.data = Data::Spill(path, file);
         self._ram = Reservation::none();
         Ok(())
     }
@@ -71,41 +87,74 @@ impl Texts {
         matches!(self.data, Data::Spill(..))
     }
 
-    /// The texts of `rows`, in the order given. A spilled store is read in
-    /// one locked pass in file order through a buffered reader, instead of a
-    /// seek and a read per row.
+    /// How many rows one `get_many` call may ask for: as many as half the free storage budget
+    /// holds with their output lines, at least `min`, and the reservation that holds them.
+    pub(crate) fn batch_rows(&self, min: usize) -> (usize, Reservation) {
+        let per_row = 2 * self.bytes() / self.len().max(1) as u64 + TEXT_ROW_OVERHEAD_BYTES;
+        let mut held = Reservation::none();
+        held.grow_up_to(&self.budget, self.budget.available() / 2);
+        let rows = (held.bytes() / per_row) as usize;
+        (rows.max(min), held)
+    }
+
+    /// The texts of `rows`, in the order given. A spilled store is read in file order by
+    /// several threads, each with positioned reads that take nearby records together.
     pub(crate) fn get_many(&self, rows: &[usize]) -> Result<Vec<RowText>, String> {
         let Data::Spill(path, file) = &self.data else {
             return rows.iter().map(|&i| self.get(i)).collect();
         };
-        let err = |e: std::io::Error| format!("read {}: {e}", path.display());
         let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_unstable_by_key(|&k| rows[k]);
+        order.par_sort_unstable_by_key(|&k| rows[k]);
+        let parts: Vec<Result<Vec<RowText>, String>> = order
+            .par_chunks(TEXT_TASK_ROWS)
+            .map(|ks| {
+                self.read_spans(file, rows, ks)
+                    .map_err(|e| format!("read {}: {e}", path.display()))
+            })
+            .collect();
         let mut out: Vec<Option<RowText>> = (0..rows.len()).map(|_| None).collect();
-        let mut f = file
-            .lock()
-            .map_err(|_| "text spill file lock".to_string())?;
-        let mut r = BufReader::with_capacity(1 << 20, &mut *f);
-        let mut pos: Option<u64> = None;
-        let mut buf = Vec::new();
-        for &k in &order {
-            let i = rows[k];
-            let (a, b) = (self.offsets[i], self.offsets[i + 1]);
-            match pos {
-                Some(p) if a >= p => r.seek_relative((a - p) as i64).map_err(err)?,
-                _ => {
-                    r.seek(SeekFrom::Start(a)).map_err(err)?;
-                }
+        for (ks, part) in order.chunks(TEXT_TASK_ROWS).zip(parts) {
+            for (&k, t) in ks.iter().zip(part?) {
+                out[k] = Some(t);
             }
-            buf.resize((b - a) as usize, 0);
-            r.read_exact(&mut buf).map_err(err)?;
-            pos = Some(b);
-            out[k] = Some(split_record(&buf));
         }
         Ok(out
             .into_iter()
             .map(|t| t.expect("every row read"))
             .collect())
+    }
+
+    /// The records of `rows[k]` for each `k` of `ks`, whose rows must not decrease.
+    fn read_spans(
+        &self,
+        file: &File,
+        rows: &[usize],
+        ks: &[usize],
+    ) -> std::io::Result<Vec<RowText>> {
+        let span = |k: usize| (self.offsets[rows[k]], self.offsets[rows[k] + 1]);
+        let mut out = Vec::with_capacity(ks.len());
+        let mut buf = Vec::new();
+        let mut a = 0usize;
+        while a < ks.len() {
+            let (lo, mut hi) = span(ks[a]);
+            let mut b = a + 1;
+            while b < ks.len() {
+                let (s, e) = span(ks[b]);
+                if s > hi + TEXT_GAP_BYTES || e - lo > TEXT_SPAN_BYTES {
+                    break;
+                }
+                hi = hi.max(e);
+                b += 1;
+            }
+            buf.resize((hi - lo) as usize, 0);
+            file.read_exact_at(&mut buf, lo)?;
+            for &k in &ks[a..b] {
+                let (s, e) = span(k);
+                out.push(split_record(&buf[(s - lo) as usize..(e - lo) as usize]));
+            }
+            a = b;
+        }
+        Ok(out)
     }
 
     pub fn get(&self, i: usize) -> Result<RowText, String> {
@@ -114,11 +163,7 @@ impl Texts {
             Data::Ram(v) => v[a as usize..b as usize].to_vec(),
             Data::Spill(path, file) => {
                 let mut buf = vec![0u8; (b - a) as usize];
-                let mut f = file
-                    .lock()
-                    .map_err(|_| "text spill file lock".to_string())?;
-                f.seek(SeekFrom::Start(a))
-                    .and_then(|_| f.read_exact(&mut buf))
+                file.read_exact_at(&mut buf, a)
                     .map_err(|e| format!("read {}: {e}", path.display()))?;
                 buf
             }
@@ -215,12 +260,13 @@ impl TextsBuilder {
                         return Err(format!("spill file {}: {e}", path.display()));
                     }
                 };
-                Data::Spill(path, Mutex::new(file))
+                Data::Spill(path, file)
             }
         };
         Ok(Texts {
             offsets,
             data,
+            budget: self.budget.clone(),
             _ram: ram,
         })
     }
@@ -231,5 +277,47 @@ impl Drop for TextsBuilder {
         if let Sink::Spill(p, _) = &self.sink {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(budget_bytes: u64, dir: &std::path::Path, n: usize) -> Texts {
+        let budget = Budget::new(budget_bytes, dir);
+        let mut b = TextsBuilder::new(&budget);
+        for i in 0..n {
+            let mut rec = Vec::new();
+            let pad = "P".repeat(i % 37);
+            append_record(&mut rec, &format!("psm{i}"), &format!("K.{pad}R.A"), "p1\tp2");
+            b.push_record(&rec).unwrap();
+        }
+        b.finish().unwrap()
+    }
+
+    #[test]
+    fn spilled_batch_reads_equal_single_reads_in_any_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = 50_000;
+        let ram = texts(1 << 30, dir.path(), n);
+        let spilled = texts(0, dir.path(), n);
+        assert!(!ram.is_spilled() && spilled.is_spilled());
+        let mut rows: Vec<usize> = (0..n).map(|i| (i * 7919) % n).collect();
+        rows.extend([3, 3, n - 1, 0, 40_000, 3]);
+        let sparse: Vec<usize> = (0..n).rev().step_by(997).collect();
+        assert_eq!(spilled.get_many(&sparse).unwrap()[1].psm_id, format!("psm{}", n - 998));
+        let got = spilled.get_many(&rows).unwrap();
+        assert_eq!(got.len(), rows.len());
+        for (&i, t) in rows.iter().zip(&got) {
+            let want = ram.get(i).unwrap();
+            assert_eq!(
+                (&t.psm_id, &t.peptide, &t.proteins),
+                (&want.psm_id, &want.peptide, &want.proteins)
+            );
+            assert_eq!(spilled.get(i).unwrap().psm_id, want.psm_id);
+        }
+        let (k, held) = spilled.batch_rows(10);
+        assert_eq!((k, held.bytes()), (10, 0));
     }
 }

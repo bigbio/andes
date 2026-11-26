@@ -15,7 +15,7 @@ use model::scan::{Ms1Scan, ScanContext};
 use crate::timstof::ms1::{
     centroid_frame, centroid_profile, fit_beats_base, fit_calibration, frame_temperatures,
     match_precursors, offset_curve, read_tdf_mz_models, sum_over_mobility, CalibrationFit,
-    FrameConditions, MobilityCentroid, MzCalibration, OffsetCurve, TdfMzModels,
+    FrameConditions, MobilityCentroid, MzCalibration, OffsetCurve, TdfMzModel, TdfMzModels,
     MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::timstof::ms2::{
@@ -352,6 +352,7 @@ impl Ms1Frames {
                     &peaks[id],
                     *cond,
                     &self.calibration_for(calibration, *id),
+                    &self.calibration_for(base, *id),
                     offset,
                     window,
                     &mut points,
@@ -465,6 +466,29 @@ struct Ms2Source {
     im: Scan2ImConverter,
 }
 
+/// The selections of one precursor that share an MzCalibration row.
+struct Ms2Pool {
+    model: Option<TdfMzModel>,
+    tof: Vec<u32>,
+    intensity: Vec<u32>,
+    t: [f64; 2],
+    rt: f64,
+    n: usize,
+}
+
+impl Ms2Pool {
+    fn new(model: Option<TdfMzModel>) -> Self {
+        Self {
+            model,
+            tof: Vec::new(),
+            intensity: Vec::new(),
+            t: [0.0; 2],
+            rt: 0.0,
+            n: 0,
+        }
+    }
+}
+
 impl Ms2Source {
     fn open(dir: &Path) -> Result<Self, TimsTofParseError> {
         let open_err = |source: FrameReaderError| {
@@ -544,36 +568,43 @@ impl Ms2Source {
         decoded: &HashMap<usize, Result<timsrust::Frame, String>>,
         calibration: &MzCalibration,
     ) -> Option<Result<Ms2Item, TimsTofParseError>> {
-        let mut tof = Vec::new();
-        let mut intensity = Vec::new();
+        // Selections are pooled per MzCalibration row: TOFs on different rows do not map to
+        // the same m/z, so each pool is centroided and converted with its own row.
+        let mut pools: Vec<Ms2Pool> = Vec::new();
         let mut n_frames = 0usize;
-        let (mut t, mut rt) = ([0.0f64; 2], 0.0f64);
         let mut error: Option<String> = None;
-        let mut frame_model = None;
         for s in &p.selections {
             let Some(result) = decoded.get(&s.frame_id) else {
                 continue;
             };
             match result {
                 Ok(frame) => {
+                    let model = self.models.for_frame(s.frame_id);
+                    let k = match pools.iter().position(|g| g.model == model) {
+                        Some(k) => k,
+                        None => {
+                            pools.push(Ms2Pool::new(model));
+                            pools.len() - 1
+                        }
+                    };
+                    let g = &mut pools[k];
                     push_scans(
                         &frame.scan_offsets,
                         &frame.tof_indices,
                         &frame.intensities,
                         s.scan_begin,
                         s.scan_end,
-                        &mut tof,
-                        &mut intensity,
+                        &mut g.tof,
+                        &mut g.intensity,
                     );
-                    let model = self.models.for_frame(s.frame_id);
                     let ft = frame_temperatures(
                         self.rows.get(&s.frame_id).map_or([None; 2], |r| r.t),
                         model.as_ref(),
                     );
-                    t[0] += ft[0];
-                    t[1] += ft[1];
-                    frame_model.get_or_insert(model);
-                    rt += frame.rt_in_seconds;
+                    g.t[0] += ft[0];
+                    g.t[1] += ft[1];
+                    g.rt += frame.rt_in_seconds;
+                    g.n += 1;
                     n_frames += 1;
                 }
                 Err(message) => {
@@ -596,18 +627,21 @@ impl Ms2Source {
             .map(|r| r.time)
             .filter(|t| t.is_finite());
         let peaks = if n_frames > 0 {
-            let n = n_frames as f64;
-            let cond = FrameConditions {
-                t: [t[0] / n, t[1] / n],
-                rt_s: rt / n,
-            };
-            ms2_peaks(
-                &tof,
-                &intensity,
-                &calibration.for_frame(frame_model.flatten()),
-                cond,
-                n_frames,
-            )
+            let pooled = pools.iter().flat_map(|g| {
+                let n = g.n as f64;
+                let cond = FrameConditions {
+                    t: [g.t[0] / n, g.t[1] / n],
+                    rt_s: g.rt / n,
+                };
+                ms2_peaks(
+                    &g.tof,
+                    &g.intensity,
+                    &calibration.for_frame(g.model),
+                    cond,
+                    g.n,
+                )
+            });
+            finite_sorted_peaks(pooled)
         } else {
             Vec::new()
         };

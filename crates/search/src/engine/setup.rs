@@ -165,6 +165,25 @@ impl<'a> PreparedSearch<'a> {
         self.candidates = materialized;
     }
 
+    /// Number of candidates materialised so far; the global index the next new one gets.
+    pub fn materialized_len(&self) -> usize {
+        self.mmap_accum.lock().unwrap().candidates.len()
+    }
+
+    /// Forgets the candidates materialised after the first `len`, and returns their memory.
+    /// Only for a calibration search whose queues are dropped: a PSM that still holds one of
+    /// these global indices would read another candidate.
+    pub fn truncate_materialized(&self, len: usize) {
+        let mut accum = self.mmap_accum.lock().unwrap();
+        if accum.candidates.len() <= len {
+            return;
+        }
+        accum.candidates.truncate(len);
+        accum.candidates.shrink_to_fit();
+        accum.index_of.retain(|_, idx| (*idx as usize) < len);
+        accum.index_of.shrink_to_fit();
+    }
+
     pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {
         self.target_bare_seqs =
             build_target_bare_seqs_where(&self.mmap_index, self.idx, self.params, &keep);

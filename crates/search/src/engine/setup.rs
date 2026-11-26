@@ -167,14 +167,21 @@ impl<'a> PreparedSearch<'a> {
 
     /// Number of candidates materialised so far; the global index the next new one gets.
     pub fn materialized_len(&self) -> usize {
-        self.mmap_accum.lock().unwrap().candidates.len()
+        self.mmap_accum
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .candidates
+            .len()
     }
 
     /// Forgets the candidates materialised after the first `len`, and returns their memory.
     /// Only for a calibration search whose queues are dropped: a PSM that still holds one of
     /// these global indices would read another candidate.
     pub fn truncate_materialized(&self, len: usize) {
-        let mut accum = self.mmap_accum.lock().unwrap();
+        let mut accum = self
+            .mmap_accum
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if accum.candidates.len() <= len {
             return;
         }

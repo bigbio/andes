@@ -1048,7 +1048,7 @@ pub(crate) fn refine_rt(
             v[AA.len() + 1] = f
                 .mods
                 .iter()
-                .filter(|(_, m)| matches!(m, onnx_infer::predictors::form::Mod::Oxidation))
+                .filter(|(_, m)| *m == onnx_infer::predictors::form::Mod::OXIDATION)
                 .count() as f32;
             v
         })

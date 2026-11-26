@@ -4,7 +4,7 @@ use crate::store::Store;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -184,7 +184,9 @@ impl Rows {
             .map_err(|e| format!("create spill file {}: {e}", path.display()))?;
         file.set_len(bytes)
             .map_err(|e| format!("size spill file {}: {e}", path.display()))?;
-        let mut file = file;
+        let mut file = BufWriter::with_capacity(8 << 20, file);
+        let width = (stride * 4) as u64;
+        let mut at = 0u64;
         let mut bytes_row = vec![0u8; stride * 4];
         let mut failed = None;
         fill(store, norm, idx, |p, row| {
@@ -194,14 +196,19 @@ impl Rows {
             for (c, v) in bytes_row.chunks_exact_mut(4).zip(row) {
                 c.copy_from_slice(&v.to_le_bytes());
             }
-            let res = file
-                .seek(SeekFrom::Start((p * stride * 4) as u64))
-                .and_then(|_| file.write_all(&bytes_row));
+            let to = p as u64 * width;
+            let res = if to == at {
+                Ok(0)
+            } else {
+                file.seek(SeekFrom::Start(to))
+            }
+            .and_then(|_| file.write_all(&bytes_row));
+            at = to + width;
             if let Err(e) = res {
                 failed = Some(e);
             }
         });
-        if let Some(e) = failed {
+        if let Some(e) = failed.or_else(|| file.flush().err()) {
             return Err(format!("write spill file {}: {e}", path.display()));
         }
         Ok(rows)
@@ -239,6 +246,7 @@ impl Rows {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn scan(&self, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
         match &self.data {
             RowData::Ram(_) => {
@@ -248,30 +256,52 @@ impl Rows {
             }
             RowData::Spill(path) => {
                 let file = File::open(path).expect("open rows spill file");
-                let mut r = BufReader::with_capacity(8 << 20, file);
-                let width = self.stride * 4;
-                let mut bytes = vec![0u8; width];
-                let mut vals = vec![0.0f32; self.stride];
-                let mut cur = 0usize;
-                for (k, &i) in ids.iter().enumerate() {
-                    if i + 1 == cur {
-                        f(k, &vals);
-                        continue;
-                    }
-                    assert!(i >= cur, "Rows::scan: ids must not decrease");
-                    if i > cur {
-                        r.seek_relative(((i - cur) * width) as i64)
-                            .expect("seek rows spill file");
-                    }
-                    r.read_exact(&mut bytes).expect("read rows spill file");
-                    for (v, c) in vals.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    }
-                    f(k, &vals);
-                    cur = i + 1;
-                }
+                read_rows(&file, self.stride, ids, f);
             }
         }
+    }
+}
+
+/// Rows at most this many bytes apart are read with one `pread`, the bytes between them
+/// included: reading them costs less than another call.
+const READ_GAP_BYTES: usize = 64 << 10;
+
+/// Bytes one `pread` of spilled rows reads at most.
+const READ_SPAN_BYTES: usize = 4 << 20;
+
+/// Calls `f(j, row)` for each row `ids[j]` of a spilled row file, in order. `ids` must not
+/// decrease; nearby rows are read together with positioned reads, so several threads can read
+/// one file at once.
+fn read_rows(file: &File, stride: usize, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
+    use std::os::unix::fs::FileExt;
+    let width = stride * 4;
+    let span_rows = (READ_SPAN_BYTES / width).max(1);
+    let gap_rows = (READ_GAP_BYTES / width).max(1);
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut vals = vec![0.0f32; stride];
+    let mut a = 0usize;
+    while a < ids.len() {
+        let lo = ids[a];
+        let mut b = a + 1;
+        while b < ids.len() {
+            assert!(ids[b] >= ids[b - 1], "Rows::pass: ids must not decrease");
+            if ids[b] - ids[b - 1] > gap_rows || ids[b] - lo >= span_rows {
+                break;
+            }
+            b += 1;
+        }
+        let hi = ids[b - 1] + 1;
+        bytes.resize((hi - lo) * width, 0);
+        file.read_exact_at(&mut bytes, (lo * width) as u64)
+            .expect("read rows spill file");
+        for (j, &i) in ids.iter().enumerate().take(b).skip(a) {
+            let src = &bytes[(i - lo) * width..(i - lo + 1) * width];
+            for (v, c) in vals.iter_mut().zip(src.chunks_exact(4)) {
+                *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            }
+            f(j, &vals);
+        }
+        a = b;
     }
 }
 
@@ -389,17 +419,22 @@ impl Train<'_> {
                 init,
                 body,
             ),
-            RowData::Spill(_) => {
+            RowData::Spill(path) => {
                 let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
-                let mut parts: Vec<P> = Vec::with_capacity(subset.len().div_ceil(CHUNK));
-                self.x.scan(&ids, |k, row| {
-                    if k % CHUNK == 0 {
-                        parts.push(init());
-                    }
-                    let part = parts.last_mut().expect("chunk partial");
-                    body(part, k, row, &mut out[k]);
-                });
-                parts
+                let file = File::open(path).expect("open rows spill file");
+                let stride = self.x.stride;
+                out[..subset.len()]
+                    .par_chunks_mut(CHUNK)
+                    .enumerate()
+                    .map(|(c, outs)| {
+                        let mut part = init();
+                        let first = c * CHUNK;
+                        read_rows(&file, stride, &ids[first..first + outs.len()], |j, row| {
+                            body(&mut part, first + j, row, &mut outs[j]);
+                        });
+                        part
+                    })
+                    .collect()
             }
         }
     }
@@ -1183,6 +1218,64 @@ mod tests {
         };
         assert_eq!(collect(&spilled), collect(&ram));
         assert_eq!(collect(&ram).len(), ids.len());
+    }
+
+    #[test]
+    fn a_spilled_pass_gives_the_ram_pass_partials_and_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let unlimited = Budget::new(u64::MAX, dir.path());
+        let nf = 5;
+        let mut b = crate::store::StoreBuilder::new(nf, &unlimited);
+        let n = 3 * CHUNK + 1234;
+        for r in 0..n {
+            let row: Vec<f32> = (0..nf)
+                .map(|c| ((r * 7919 + c * 104_729) % 1000) as f32 * 0.37 - 150.0)
+                .collect();
+            b.push_row(&row).unwrap();
+        }
+        let store = b.finish().unwrap();
+        let norm = Norm {
+            mean: vec![1.5; nf],
+            inv_sd: vec![0.25; nf],
+        };
+        let all: Vec<usize> = (0..n).collect();
+        let ram = Rows::gather(&store, &norm, &all);
+        let spilled =
+            Rows::gather_within(&store, &norm, &all, &Budget::new(0, dir.path())).unwrap();
+        assert!(spilled.is_spilled());
+        let rows: Vec<usize> = (0..n).filter(|r| r % 3 != 1 || r % 41 == 0).collect();
+        let pos: Vec<bool> = rows.iter().map(|r| r % 5 == 0).collect();
+        let subset: Vec<usize> = (0..rows.len())
+            .filter(|k| ((k / 2500) % 2 == 0 && k % 97 < 60) || k % 1777 == 0)
+            .collect();
+        let w: Vec<f64> = (0..ram.stride).map(|j| 0.1 * j as f64 - 0.3).collect();
+        let run = |x: &Rows| {
+            let t = Train {
+                x,
+                rows: &rows,
+                pos: &pos,
+                cpos: 1.0,
+                cneg: 1.0,
+            };
+            let mut out = vec![0.0f64; subset.len()];
+            let parts = t.pass(
+                &subset,
+                &mut out,
+                || (0.0f64, Vec::new()),
+                |p, k, row, o| {
+                    *o = dot_row(row, &w);
+                    p.0 += *o;
+                    p.1.push(k);
+                },
+            );
+            let parts: Vec<(u64, Vec<usize>)> =
+                parts.into_iter().map(|(a, ks)| (a.to_bits(), ks)).collect();
+            let out: Vec<u64> = out.iter().map(|v| v.to_bits()).collect();
+            (parts, out)
+        };
+        let (a, b) = (run(&ram), run(&spilled));
+        assert_eq!(a.0.len(), subset.len().div_ceil(CHUNK));
+        assert!(a == b, "spilled pass differs from the RAM pass");
     }
 
     #[test]

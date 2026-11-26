@@ -499,3 +499,60 @@ fn ms2_features_from_the_centre_trace_equal_a_search_of_the_scan() {
         }
     }
 }
+
+#[test]
+fn shared_traces_equal_the_traces_of_each_rows_own_neighbours() {
+    let (_, mass) = parse_peptide("K.PEPTIDEKLRAGM.A").unwrap();
+    let ions = [(true, 1u8), (false, 1u8), (true, 2u8), (false, 2u8)];
+    let n = mass.res.len() - 1;
+    let pred: Vec<f32> = (0..n * ions.len())
+        .map(|i| ((i * 37) % 11) as f32)
+        .collect();
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let spectra: Vec<Spectrum> = (0..40)
+        .map(|i| {
+            let mut peaks: Vec<(f64, f32)> = (0..500)
+                .map(|_| (100.0 + 1400.0 * next(), (1e4 * next()) as f32))
+                .collect();
+            peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            Spectrum {
+                rt_seconds: Some(i as f64),
+                isolation_target_mz: Some(if i % 2 == 0 { 500.0 } else { 600.0 }),
+                peaks,
+                ..Default::default()
+            }
+        })
+        .collect();
+    let (slot, windows) = windows(&spectra, &[spectra.len()]);
+    let tol = FragmentTolerance::Ppm(20.0);
+    let mut shared = SharedTraces::default();
+    let mut got = Vec::new();
+    for (z, rows) in [
+        (2u8, vec![0usize, 4, 6, 18, 1, 3, 39]),
+        (3, vec![10, 12, 10, 37]),
+    ] {
+        shared.reset(&pred, &ions, &mass, z);
+        for &spec in &rows {
+            let (ns, center) = shared.row(&spectra, &slot, &windows, spec, tol, &mut got);
+            let (ids, want_center) = neighbours(&slot, &windows, spec);
+            let scans: Vec<&[(f64, f32)]> = ids
+                .iter()
+                .map(|&i| spectra[i as usize].peaks.as_slice())
+                .collect();
+            let (frags, want) = fragment_evidence(&pred, &ions, &mass, z, &scans, tol);
+            assert_eq!((ns, center), (scans.len(), want_center));
+            assert_eq!(shared.frags(), frags.as_slice());
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "z {z} spec {spec}"
+            );
+        }
+    }
+}

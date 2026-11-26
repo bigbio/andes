@@ -109,6 +109,13 @@ fn dda_and_dia_reporting_write_versioned_entrapment_curves() {
         let file = std::fs::File::open(base.with_extension("entrapment.parquet")).unwrap();
         let reader =
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        assert!(reader
+            .schema()
+            .field_with_name("pair")
+            .unwrap()
+            .is_nullable());
+        assert!(reader.schema().field_with_name("pair_below_cut").is_ok());
+        assert!(reader.schema().field_with_name("pair_lower").is_ok());
         assert_eq!(reader.metadata().file_metadata().num_rows(), 6);
         assert!(reader
             .metadata()

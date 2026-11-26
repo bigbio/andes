@@ -226,16 +226,21 @@ pub struct Level<'a> {
 /// Writes the entrapment table `path` (`andes.entrapment.schema`): one row per discovery of
 /// each level, best first, with `level`, `key`, `entrapment`, `score`, `q_value` and, down to
 /// that row, `targets`, `entrapment_discoveries`, `lower_bound_fdp`, `combined_fdp` and
-/// `paired_fdp`. The metadata holds the seed and the ratio of each level (`r_<level>`).
+/// `paired_fdp`. Nullable `pair`, `pair_below_cut` and `pair_lower` preserve the pairing
+/// inputs and counts for independent reproduction. The metadata holds the seed and the
+/// ratio of each level (`r_<level>`).
 pub fn write_curve(path: &Path, levels: &[Level<'_>], seed: u64) -> Result<(), String> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("level", DataType::Utf8, false),
         Field::new("key", DataType::Utf8, false),
+        Field::new("pair", DataType::Utf8, true),
         Field::new("entrapment", DataType::Boolean, false),
         Field::new("score", DataType::Float64, false),
         Field::new("q_value", DataType::Float64, false),
         Field::new("targets", DataType::UInt64, false),
         Field::new("entrapment_discoveries", DataType::UInt64, false),
+        Field::new("pair_below_cut", DataType::UInt64, false),
+        Field::new("pair_lower", DataType::UInt64, false),
         Field::new("lower_bound_fdp", DataType::Float64, false),
         Field::new("combined_fdp", DataType::Float64, false),
         Field::new("paired_fdp", DataType::Float64, false),
@@ -246,6 +251,9 @@ pub fn write_curve(path: &Path, levels: &[Level<'_>], seed: u64) -> Result<(), S
             Arc::new(StringArray::from(vec![l.name; n])),
             Arc::new(StringArray::from_iter_values(
                 l.rows.iter().map(|d| d.key.as_str()),
+            )),
+            Arc::new(StringArray::from_iter(
+                l.rows.iter().map(|d| d.pair.as_deref()),
             )),
             Arc::new(BooleanArray::from_iter(
                 l.rows.iter().map(|d| Some(d.entrapment)),
@@ -261,6 +269,12 @@ pub fn write_curve(path: &Path, levels: &[Level<'_>], seed: u64) -> Result<(), S
             )),
             Arc::new(UInt64Array::from_iter_values(
                 l.curve.iter().map(|c| c.entrapment as u64),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                l.curve.iter().map(|c| c.pair_below_cut as u64),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                l.curve.iter().map(|c| c.pair_lower as u64),
             )),
             Arc::new(Float64Array::from_iter_values(
                 l.curve.iter().map(|c| c.lower_bound),

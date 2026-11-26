@@ -68,7 +68,6 @@ const HIDDEN: &[&str] = &[
     "max_spectra",
     "no_search_gbdt",
     "no_search_rich_ion",
-    "dia_ms1_mobility_margin",
     "precursor_mono_dump",
     "glyco_scans",
     "debug_glyco",

@@ -62,10 +62,6 @@ pub struct SearchParams {
     pub chimeric: bool,
     pub dia: bool,
     pub dia_ms1_tol_ppm: f64,
-    /// diaPASEF MS1 gate in mobility: the matching MS1 peak must lie within this many 1/K0
-    /// units of the scan's mobility slice (`None`: any mobility). A negative value asks for
-    /// the margin learned from the run's RT calibration anchors.
-    pub dia_ms1_mobility_margin: Option<f64>,
     pub dia_vote_filter: Option<(f64, usize)>,
     pub chimeric_isolation_halfwidth_da: f64,
     pub chimeric_max_coisolated: usize,
@@ -100,7 +96,6 @@ impl SearchParams {
             chimeric: false,
             dia: false,
             dia_ms1_tol_ppm: 5.0,
-            dia_ms1_mobility_margin: None,
             dia_vote_filter: None,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 4,

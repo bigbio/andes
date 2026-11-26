@@ -533,7 +533,7 @@ impl<'a> PreparedSearch<'a> {
             None
         };
         let slice_k0 = if params.dia {
-            self.dia_slice_mobility(spec, params.dia_ms1_mobility_margin)
+            self.dia_slice_mobility(spec)
         } else {
             None
         };

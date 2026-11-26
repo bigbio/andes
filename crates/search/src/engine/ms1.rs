@@ -14,17 +14,14 @@ impl<'a> PreparedSearch<'a> {
         self.dia_scan_mobility = k0;
     }
 
-    /// Whether the search asks for the MS1 gate's mobility margin learned from the run, and
-    /// the gate's ppm tolerance.
-    pub fn wants_learned_mobility_margin(&self) -> Option<f64> {
-        self.params
-            .dia_ms1_mobility_margin
-            .is_some_and(|m| m < 0.0)
-            .then_some(self.params.dia_ms1_tol_ppm)
+    /// The DIA MS1 gate's ppm tolerance, for learning the gate's mobility margin (`None`
+    /// outside DIA).
+    pub fn dia_ms1_gate_tol_ppm(&self) -> Option<f64> {
+        self.params.dia.then_some(self.params.dia_ms1_tol_ppm)
     }
 
-    /// Installs the mobility margin learned from the calibration anchors (used when the
-    /// search parameters ask for the learned margin).
+    /// Installs the mobility margin learned from the calibration anchors; `None` keeps the
+    /// MS1 gate on m/z alone.
     pub fn set_dia_mobility_margin(&self, margin: Option<f32>) {
         if let Ok(mut m) = self.dia_mobility_margin.write() {
             *m = margin;
@@ -66,18 +63,10 @@ impl<'a> PreparedSearch<'a> {
             .min_by(f32::total_cmp)
     }
 
-    /// The 1/K0 range of `spec`'s mobility slice widened by `margin` on each side (a negative
-    /// `margin`: the learned one, none until it is learned), when the run has a scan mobility
-    /// table and the MS1 scans carry per-peak mobility.
-    pub(super) fn dia_slice_mobility(
-        &self,
-        spec: &model::Spectrum,
-        margin: Option<f64>,
-    ) -> Option<(f32, f32)> {
-        let margin = match margin? {
-            m if m < 0.0 => self.dia_mobility_margin.read().ok().and_then(|g| *g)?,
-            m => m as f32,
-        };
+    /// The 1/K0 range of `spec`'s mobility slice widened on each side by the learned margin,
+    /// once a margin is learned and when the run has a scan mobility table.
+    pub(super) fn dia_slice_mobility(&self, spec: &model::Spectrum) -> Option<(f32, f32)> {
+        let margin = self.dia_mobility_margin.read().ok().and_then(|g| *g)?;
         let (a, b) = spec.mobility_window?;
         let ka = *self.dia_scan_mobility.get(a as usize)?;
         let kb = *self.dia_scan_mobility.get(b as usize)?;

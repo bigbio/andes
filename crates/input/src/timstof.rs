@@ -790,28 +790,31 @@ impl TimsTofReader {
         self
     }
 
-    /// 1/K0 of every TIMS scan number up to the last scan a DIA window selects; empty without
-    /// DIA windows. Index `s` is scan `s` of a frame.
-    pub fn dia_scan_mobility(&self) -> Vec<f32> {
-        let last = self
+    /// 1/K0 tables for DIA windows, indexed by precursor scan ID and then TIMS scan number.
+    /// Missing entries mean that the corresponding precursor is not a DIA window.
+    pub fn dia_scan_mobility(&self) -> Vec<Option<Vec<f32>>> {
+        let Some(max_id) = self
             .ms2
             .precursors
             .iter()
             .filter(|p| p.dia)
-            .flat_map(|p| p.selections.iter().map(|s| s.scan_end))
-            .max();
-        let frame = self
-            .ms2
-            .precursors
-            .iter()
-            .find(|p| p.dia)
-            .and_then(|p| p.selections.first())
-            .map(|s| s.frame_id)
-            .unwrap_or_default();
-        let im = self.ms2.im.for_frame(frame);
-        last.map_or_else(Vec::new, |n| {
-            (0..=n).map(|s| im.convert(s as f64) as f32).collect()
-        })
+            .map(|p| p.id)
+            .max()
+        else {
+            return Vec::new();
+        };
+        let mut tables = vec![None; max_id + 1];
+        for p in self.ms2.precursors.iter().filter(|p| p.dia) {
+            let Some(selection) = p.selections.first() else {
+                continue;
+            };
+            let Some(last) = p.selections.iter().map(|s| s.scan_end).max() else {
+                continue;
+            };
+            let im = self.ms2.im.for_frame(selection.frame_id);
+            tables[p.id] = Some((0..=last).map(|s| im.convert(s as f64) as f32).collect());
+        }
+        tables
     }
 
     pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {

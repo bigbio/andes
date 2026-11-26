@@ -1,6 +1,6 @@
 //! The DIA MS1 scans a `PreparedSearch` keeps for its MS1 gate, and the precursor checks on them.
 
-use super::{PreparedSearch, DIA_MS1_GATE_SCANS};
+use super::{DIA_MS1_GATE_SCANS, PreparedSearch};
 
 impl<'a> PreparedSearch<'a> {
     pub fn set_dia_ms1(&mut self, mut scans: Vec<model::scan::Ms1Scan>) {
@@ -9,8 +9,8 @@ impl<'a> PreparedSearch<'a> {
         self.dia_ms1 = scans;
     }
 
-    /// Installs the 1/K0 of every TIMS scan number, for the mobility term of the MS1 gate.
-    pub fn set_dia_scan_mobility(&mut self, k0: Vec<f32>) {
+    /// Installs per-DIA-window 1/K0 tables for the mobility term of the MS1 gate.
+    pub fn set_dia_scan_mobility(&mut self, k0: Vec<Option<Vec<f32>>>) {
         self.dia_scan_mobility = k0;
     }
 
@@ -28,13 +28,9 @@ impl<'a> PreparedSearch<'a> {
         }
     }
 
-    /// The 1/K0 range of `spec`'s mobility slice (no margin), when the run has a scan
-    /// mobility table.
+    /// The 1/K0 range of `spec`'s mobility slice (no margin), when the run has a mobility table.
     fn slice_k0(&self, spec: &model::Spectrum) -> Option<(f32, f32)> {
-        let (a, b) = spec.mobility_window?;
-        let ka = *self.dia_scan_mobility.get(a as usize)?;
-        let kb = *self.dia_scan_mobility.get(b as usize)?;
-        Some((ka.min(kb), ka.max(kb)))
+        dia_scan_mobility_range(&self.dia_scan_mobility, spec)
     }
 
     /// For a calibration anchor at precursor m/z `mz` in `spec`: the 1/K0 distance between
@@ -64,13 +60,11 @@ impl<'a> PreparedSearch<'a> {
     }
 
     /// The 1/K0 range of `spec`'s mobility slice widened on each side by the learned margin,
-    /// once a margin is learned and when the run has a scan mobility table.
+    /// once a margin is learned and when the run has a mobility table.
     pub(super) fn dia_slice_mobility(&self, spec: &model::Spectrum) -> Option<(f32, f32)> {
         let margin = self.dia_mobility_margin.read().ok().and_then(|g| *g)?;
-        let (a, b) = spec.mobility_window?;
-        let ka = *self.dia_scan_mobility.get(a as usize)?;
-        let kb = *self.dia_scan_mobility.get(b as usize)?;
-        Some((ka.min(kb) - margin, ka.max(kb) + margin))
+        let (lo, hi) = dia_scan_mobility_range(&self.dia_scan_mobility, spec)?;
+        Some((lo - margin, hi + margin))
     }
 
     /// [`Self::dia_ms1_has`] with the matching peak's mobility inside `k0` when given (scans
@@ -158,5 +152,50 @@ impl<'a> PreparedSearch<'a> {
             near.saturating_sub(DIA_MS1_GATE_SCANS)
                 ..(near + DIA_MS1_GATE_SCANS + 1).min(self.dia_ms1.len()),
         )
+    }
+}
+
+fn dia_scan_mobility_range(
+    tables: &[Option<Vec<f32>>],
+    spec: &model::Spectrum,
+) -> Option<(f32, f32)> {
+    let (a, b) = spec.mobility_window?;
+    let scan = usize::try_from(spec.scan?).ok()?;
+    let table = tables.get(scan)?.as_ref()?;
+    let ka = *table.get(a as usize)?;
+    let kb = *table.get(b as usize)?;
+    Some((ka.min(kb), ka.max(kb)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dia_scan_mobility_range;
+    use model::Spectrum;
+
+    fn spectrum(scan: i32) -> Spectrum {
+        Spectrum {
+            scan: Some(scan),
+            mobility_window: Some((1, 3)),
+            ..Spectrum::default()
+        }
+    }
+
+    #[test]
+    fn dia_mobility_uses_the_spectrum_scan_table() {
+        let tables = vec![
+            None,
+            Some(vec![0.0, 1.0, 2.0, 3.0]),
+            Some(vec![0.0, 10.0, 20.0, 30.0]),
+        ];
+        assert_eq!(
+            dia_scan_mobility_range(&tables, &spectrum(1)),
+            Some((1.0, 3.0))
+        );
+        assert_eq!(
+            dia_scan_mobility_range(&tables, &spectrum(2)),
+            Some((10.0, 30.0))
+        );
+        assert_eq!(dia_scan_mobility_range(&tables, &spectrum(0)), None);
+        assert_eq!(dia_scan_mobility_range(&tables, &spectrum(3)), None);
     }
 }

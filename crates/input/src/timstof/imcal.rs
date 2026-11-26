@@ -93,7 +93,6 @@ impl TimsImModels {
             .get(&frame)
             .and_then(|id| self.rows.get(id.as_ref()?))
             .copied()
-            .or_else(|| self.main())
             .unwrap_or(self.linear)
     }
 
@@ -240,8 +239,7 @@ pub(crate) fn log_tims_im_calibration(models: &TimsImModels) {
             }
             if let Some(summary) = models.unusable_summary() {
                 log::warn!(
-                    "TimsCalibration rows this reader cannot use: {summary}. They use row {}, the row most frames use",
-                    models.main_id().unwrap_or_default()
+                    "TimsCalibration rows this reader cannot use: {summary}. Those frames use the acquisition-range model"
                 );
             }
             log::info!("1/K0 from the instrument TimsCalibration rational model (ModelType 2)");
@@ -403,8 +401,9 @@ mod tests {
         let models = read_tims_im_models(&db(), linear());
         assert_eq!(models.main_id(), Some(1));
         assert!(matches!(models.for_frame(10), TimsImModel::Rational { .. }));
-        assert_eq!(models.for_frame(11), models.for_frame(12));
-        assert_eq!(models.for_frame(99), models.main().unwrap());
+        assert_eq!(models.for_frame(11), linear());
+        assert_eq!(models.for_frame(12), linear());
+        assert_eq!(models.for_frame(99), linear());
         assert_eq!(models.rows_in_use(), 1);
         assert_eq!(
             models.unusable_summary().as_deref(),

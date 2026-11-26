@@ -261,6 +261,19 @@ fn with_entrapment(
     if !cli.add_entrapment {
         return Ok(target_db);
     }
+    if let Some(p) = target_db.proteins.iter().find(|p| {
+        search::decoy::is_decoy_accession_affix(
+            &p.accession,
+            &cli.db.decoy_prefix,
+            cli.db.decoy_suffix.as_deref(),
+        )
+    }) {
+        return Err(format!(
+            "--add-entrapment needs a target-only database: {} is a decoy entry. \
+             Remove prebuilt decoys so target and entrapment decoys are generated together",
+            p.accession
+        ));
+    }
     if let Some(p) = target_db
         .proteins
         .iter()

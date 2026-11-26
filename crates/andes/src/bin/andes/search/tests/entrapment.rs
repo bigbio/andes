@@ -20,6 +20,25 @@ fn psm(id: &str, peptide: &str, proteins: &str) -> output::PercolatorPsm {
 }
 
 #[test]
+fn entrapment_rejects_disabled_decoys_and_prebuilt_decoy_entries() {
+    let cli = Args::try_parse_from(["andes", "--add-entrapment", "--decoy-strategy", "none"])
+        .unwrap()
+        .search;
+    assert!(super::super::resolve::check_flag_combinations(&cli)
+        .unwrap_err()
+        .contains("--decoy-strategy none"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("decoys.fasta");
+    std::fs::write(&path, ">P1\nMAGLEVTDPLSK\n>XXX_P1\nMPLGAVDTELSK\n").unwrap();
+    let cli = Args::try_parse_from(["andes", "--add-entrapment"])
+        .unwrap()
+        .search;
+    let result = super::super::resolve::load_search_database(&cli, &path);
+    let message = result.err().expect("prebuilt decoys rejected").to_string();
+    assert!(message.contains("target-only database"), "{message}");
+}
+
+#[test]
 fn precursor_keys_ignore_flanks_but_keep_modifications() {
     assert_eq!(peptidoform("K.PEPTIM+15.99492K.G"), "PEPTLM+15.99492K");
     assert_eq!(peptidoform("R.PEPTIM+15.99492K.A"), "PEPTLM+15.99492K");
@@ -69,7 +88,9 @@ fn dda_and_dia_reporting_write_versioned_entrapment_curves() {
             cli: &cli,
             index: &index,
             params: &search::SearchParams::default_tryptic(
-                model::amino_acid::set::AminoAcidSetBuilder::new_standard().build().unwrap(),
+                model::amino_acid::set::AminoAcidSetBuilder::new_standard()
+                    .build()
+                    .unwrap(),
             ),
             rows: Some(&rows),
             groups: None,

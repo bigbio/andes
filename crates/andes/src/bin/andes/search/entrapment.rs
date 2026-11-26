@@ -9,6 +9,9 @@ use search::decoy::entrapment::{is_entrapment_accession, EntrapmentLookup};
 
 use crate::cli::Cli;
 
+/// Percentage points per unit fraction in the diagnostic summary.
+const PERCENT_PER_FRACTION: f64 = 100.0;
+
 struct OwnedLevel {
     name: &'static str,
     r: f64,
@@ -173,7 +176,7 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
     entrapment::write_curve(&path, &borrowed, cli.entrapment_seed)?;
     log::info!(target: "output", "Wrote entrapment diagnostics: {}", path.display());
     let q = cli.psm_fdr();
-    let mut summary = format!("Entrapment  experimental diagnostics at q <= {q}\n");
+    let mut summary = format!("Entrapment  experimental q-only diagnostics at q <= {q}\n");
     for level in &levels {
         let e = entrapment::at_q(&level.rows, &level.curve, q);
         summary.push_str(&format!(
@@ -183,13 +186,14 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
             output::statistics::thousands(e.targets),
             output::statistics::thousands(e.entrapment),
             level.r,
-            e.lower_bound * 100.0,
-            e.combined * 100.0,
-            e.paired * 100.0,
+            e.lower_bound * PERCENT_PER_FRACTION,
+            e.combined * PERCENT_PER_FRACTION,
+            e.paired * PERCENT_PER_FRACTION,
         ));
     }
     summary.push_str(
         "  Peptide/precursor counts use PSM q, not independent level FDR.\n\
+         \x20 Counts do not apply the additional --pep or --protein-fdr report filters.\n\
                         \x20 PSM/precursor combined FDP uses the digest peptide ratio as a proxy.\n\
                         \x20 NaN paired FDP means pairing is unavailable, not zero error.\n",
     );

@@ -1068,6 +1068,30 @@ pub(crate) struct SearchArgs {
           help_heading = ADVANCED_FDR)]
     pub(crate) proteoform_fdr: Option<f64>,
 
+    /// Add experimental shuffled entrapment proteins for diagnostic FDP estimates [default: off]
+    ///
+    /// Each reference target protein gets an ENTRAP_<accession> protein whose every peptide is a
+    /// shuffle of the target peptide at the same place (cleavage residues and C-terminus
+    /// fixed, I and L folded collisions redrawn). The entrapment proteins are searched as
+    /// targets and get decoys of their own. With --rescore, the run summary and
+    /// <stem>.entrapment.parquet report diagnostic lower-bound, combined and paired FDP
+    /// estimates of PSMs, precursors, peptides and protein groups at --psm-fdr. Peptide
+    /// and precursor counts inherit best-PSM q-values, not independent level FDR. The
+    /// digest peptide ratio is a proxy for PSM/precursor combined FDP. Paired FDP is
+    /// unavailable (NaN) without an unambiguous one-to-one peptide pairing, including
+    /// PSM, precursor and protein-group levels. Use a target-only database and generated
+    /// decoys: prebuilt databases, existing decoys and --decoy-strategy none are rejected.
+    /// These estimates have not been validated as a calibration of FDR control.
+    /// The target database can be twice as large and identifications can change: use this for
+    /// diagnostics, not as evidence that the reported q-values are calibrated.
+    #[arg(long, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) add_entrapment: bool,
+
+    /// Unitless seed of the experimental --add-entrapment shuffle; use several seeds for a range
+    #[arg(long, value_name = "N", default_value_t = search::decoy::entrapment::DEFAULT_ENTRAPMENT_SEED,
+          hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) entrapment_seed: u64,
+
     /// Precursor q-value threshold of a match-between-runs library donor [default: inherits --psm-fdr]
     ///
     /// The best-PSM target/decoy q-value of the precursor.

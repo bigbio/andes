@@ -56,11 +56,15 @@ pub(crate) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
             (cli.glyco, "--glyco"),
             (cli.xl.is_some(), "--xl"),
             (cli.open_search, "--open-search"),
+            (
+                cli.decoy_strategy == search::decoy::DecoyStrategy::None,
+                "--decoy-strategy none",
+            ),
         ]);
         if !unsupported.is_empty() {
             return Err(format!(
                 "--add-entrapment is not combined with {}: these modes write their own results \
-                 and FDR, which the entrapment estimate does not read",
+                 and FDR, or omit the generated decoys required for entrapment rescoring",
                 unsupported.join(", ")
             ));
         }

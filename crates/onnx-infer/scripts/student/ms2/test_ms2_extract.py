@@ -331,3 +331,30 @@ def test_filter_v2_electron_activations():
     act, nce = parse_filter_v2("ITMS + c NSI d Full ms2 445.12@etd70.00 [110.00-905.00]")
     assert act == "ETD" and np.isnan(nce)
     assert parse_filter_v2("FTMS + p NSI d Full ms2 500.00@hcd28.00 [100.00-1000.00]") == ("HCD-FTMS", 28.0)
+
+
+def test_tof_mzml_without_filter_is_hcd_tof(tmp_path):
+    """A timsconvert-style mzML (no filter string, timsTOF header) is HCD-TOF with NCE nan; a Q Exactive
+    scan without a filter string is still skipped (Thermo behaviour unchanged)."""
+    seq, z = "PEPTIDEKAR", 2
+    mz, inten = perfect_spectrum(seq, [], z)
+    pmz = precursor_mz(seq, [], z)
+    mzml_dir = tmp_path / "mzml"
+    mzml_dir.mkdir()
+    write_mzml(mzml_dir / "run_t.mzML", [(7, "", pmz, z, mz, inten)])
+    p = mzml_dir / "run_t.mzML"
+    p.write_text(p.read_text().replace('accession="MS:1001911" name="Q Exactive"', 'accession="MS:1003005" name="timsTOF Pro"'))
+    write_mzml(mzml_dir / "run_q.mzML", [(7, "", pmz, z, mz, inten)])
+    selected = tmp_path / "selected.parquet"
+    pq.write_table(pa.table({"run": ["run_t", "run_q"], "scan": [7, 7], "peptidoform": [seq, seq], "charge": [z, z],
+                             "pep": [0.001, 0.001]}), selected)
+    tasks = tmp_path / "tasks.tsv"
+    tasks.write_text(f"task\tdataset\truns\tselected\traw_dir\n1\tPXD000000\trun_t|run_q\t{selected}\t{tmp_path}\n")
+    shards = tmp_path / "shards"
+    run_script("ms2_extract_raw.py", "--tasks", tasks, "--task-index", 1, "--out-dir", shards,
+               "--work-dir", tmp_path / "work", "--mzml-dir", mzml_dir)
+    rows = pq.read_table(shards / "PXD000000" / "part-00001.parquet").to_pylist()
+    assert [r["run"] for r in rows] == ["run_t"]
+    assert rows[0]["activation"] == "HCD-TOF" and np.isnan(rows[0]["nce"]) and rows[0]["instrument"] == "timsTOF Pro"
+    runs = {r["run"]: r for r in json.load(open(shards / "PXD000000" / "part-00001.json"))["runs"]}
+    assert runs["run_q"]["activation_skipped"] == 1 and runs["run_t"]["no_filter"] == 1

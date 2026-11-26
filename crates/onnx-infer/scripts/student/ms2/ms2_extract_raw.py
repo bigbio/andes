@@ -9,7 +9,9 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
    --work-dir;
 3. stream the mzML, keeping only the selected scans; read NCE and activation
    from the scan's filter string (``ms2_common.parse_filter_v2``: HCD/CID, ETD,
-   EThcD), the instrument model from the file header;
+   EThcD), the instrument model from the file header (or --instrument-fallback);
+   a scan without a filter string on a time-of-flight instrument (timsTOF / TOF,
+   e.g. timsconvert mzML) is HCD-TOF with NCE nan, as in the MsNet extractor;
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
    --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES_V2`` channels at the
    analyser's tolerance and normalise;
@@ -50,7 +52,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import ION_TYPES_V2, activation_index, annotate, parse_filter_v2, parse_proforma, precursor_mz, shard_table  # noqa: E402
+from ms2_common import (INSTRUMENTS, ION_TYPES_V2, activation_index, annotate, instrument_class, parse_filter_v2,  # noqa: E402
+                        parse_proforma, precursor_mz, shard_table)
 from ms2_select import annotate_rows  # noqa: E402
 from mzml_reader import instrument_name, read_scans  # noqa: E402
 
@@ -110,16 +113,25 @@ def prec_ok(seq, mods, z, mz_obs, tol_ppm) -> bool:
 
 def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]:
     want = {int(s): r for s, r in zip(psms.scan, psms.itertuples(index=False))}
-    instr = instrument_name(mzml) or ""
+    instr = instrument_name(mzml) or a.instrument_fallback or ""
+    # Only time-of-flight instruments take the no-filter path; a Thermo scan without a filter stays unknown.
+    tof = INSTRUMENTS[instrument_class(instr)] in ("timsTOF", "TOF")
+    no_filter_act = "HCD-TOF" if tof else "unknown"
     out = []
     for spec in read_scans(mzml, set(want)):
         r = want[spec["scan"]]
         stats["found"] += 1
-        act, nce = parse_filter_v2(spec["filter"])
+        if spec["filter"]:
+            act, nce = parse_filter_v2(spec["filter"])
+        else:
+            # No Thermo filter string (e.g. timsconvert mzML of a Bruker .d): a time-of-flight instrument is
+            # HCD-TOF with no NCE, as in ms2_extract_msnet.
+            act, nce = no_filter_act, float("nan")
+            stats["no_filter"] += 1
         if act == "unknown":
             stats["activation_skipped"] += 1
             continue
-        if not np.isfinite(nce) and np.isfinite(spec["collision_energy"]):
+        if act != "HCD-TOF" and not np.isfinite(nce) and np.isfinite(spec["collision_energy"]):
             nce = spec["collision_energy"]
         seq, mods = parse_proforma(r.peptidoform)
         if not prec_ok(seq, mods, int(r.charge), spec["precursor_mz"], a.prec_tol_ppm):
@@ -166,6 +178,8 @@ def main():
     p.add_argument("--itms-tol-da", type=float, default=0.5)
     p.add_argument("--prec-tol-ppm", type=float, default=20.0)
     p.add_argument("--min-matched", type=int, default=4)
+    p.add_argument("--instrument-fallback", help="instrument model when the mzML header names none that "
+                   "ms2_common.instrument_class knows (e.g. 'timsTOF' for timsconvert mzML)")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--source-engine", default="unknown",
                    help="engine that produced the selected identifications (andes, comet, msfragger or other)")
@@ -192,7 +206,7 @@ def main():
     rows, log = [], []
     try:
         for run, psms in sel.groupby("run", sort=True):
-            st = {"run": run, "selected": len(psms), "found": 0, "activation_skipped": 0,
+            st = {"run": run, "selected": len(psms), "found": 0, "no_filter": 0, "activation_skipped": 0,
                   "precursor_mismatch": 0, "too_few_ions": 0, "kept": 0, "not_in_file": 0}
             t1 = time.time()
             try:

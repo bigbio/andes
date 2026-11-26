@@ -180,8 +180,8 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
             "  {}: targets {}  entrapment {}  r {:.3}\n\
              \x20 FDP lower {:.3}%  combined {:.3}%  paired {:.3}%\n",
             level.name,
-            e.targets,
-            e.entrapment,
+            output::statistics::thousands(e.targets),
+            output::statistics::thousands(e.entrapment),
             level.r,
             e.lower_bound * 100.0,
             e.combined * 100.0,

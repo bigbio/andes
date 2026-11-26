@@ -275,15 +275,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     } = state;
     let spectrum_paths = &cli.spectrum;
 
-    store_dia_run(
-        dia_pass2.take(),
-        cli.quant_dir.as_deref(),
-        &spectrum_path,
-        &output_pin_path,
-    )?;
-    if cli.dia {
-        crate::memory::release_free_memory();
-    }
+    store_dia_run(dia_pass2.take(), &cli, &spectrum_path, &output_pin_path)?;
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
@@ -490,12 +482,15 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
 
 fn store_dia_run(
     table: Option<output::dia::pass2::Pass2Table>,
-    dir: Option<&Path>,
+    cli: &Cli,
     spectrum: &Path,
     pin: &Path,
 ) -> Result<(), String> {
-    if let (Some(table), Some(dir)) = (table, dir) {
+    if let (Some(table), Some(dir)) = (table, cli.quant_dir.as_deref()) {
         crate::dia::study::store_run(dir, spectrum, pin, &table, None, &Default::default())?;
+    }
+    if cli.dia {
+        crate::memory::release_free_memory();
     }
     Ok(())
 }

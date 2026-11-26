@@ -275,16 +275,12 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     } = state;
     let spectrum_paths = &cli.spectrum;
 
-    if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
-        crate::dia::study::store_run(
-            dir,
-            &spectrum_path,
-            &output_pin_path,
-            &t,
-            None,
-            &Default::default(),
-        )?;
-    }
+    store_dia_run(
+        dia_pass2.take(),
+        cli.quant_dir.as_deref(),
+        &spectrum_path,
+        &output_pin_path,
+    )?;
     if cli.dia {
         crate::memory::release_free_memory();
     }
@@ -416,6 +412,16 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         )
     });
     if let Some(summary) = id_summary.as_mut() {
+        summary.entrapment = entrapment_report(super::entrapment::Inputs {
+            cli: &cli,
+            index: &pin_index,
+            params: &params,
+            rows: rescore_map.as_ref(),
+            groups: protein_groups.as_ref(),
+            base: &report_base,
+            pin: &output_pin_path,
+            precursor_pin: !dia_precursor_ids.is_empty(),
+        })?;
         summary.open_search = open_search_summary.take();
     }
     log::info!(target: "summary", "{}", run_stats.render_with(id_summary.as_ref()));
@@ -482,6 +488,28 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     })
 }
 
+fn store_dia_run(
+    table: Option<output::dia::pass2::Pass2Table>,
+    dir: Option<&Path>,
+    spectrum: &Path,
+    pin: &Path,
+) -> Result<(), String> {
+    if let (Some(table), Some(dir)) = (table, dir) {
+        crate::dia::study::store_run(dir, spectrum, pin, &table, None, &Default::default())?;
+    }
+    Ok(())
+}
+
+fn entrapment_report(input: super::entrapment::Inputs<'_>) -> Result<Option<String>, String> {
+    let precursor_path = crate::dia::score::precursor_pin_path(input.pin);
+    let pin = if input.precursor_pin {
+        &precursor_path
+    } else {
+        input.pin
+    };
+    super::entrapment::report(super::entrapment::Inputs { pin, ..input })
+}
+
 /// What the filtered TSV and the open-search offsets read.
 struct Filtered<'a> {
     cli: &'a Cli,
@@ -502,7 +530,10 @@ struct Filtered<'a> {
 fn write_filtered<'m>(
     rescore_map: Option<&'m HashMap<String, output::PercolatorPsm>>,
     f: &Filtered<'_>,
-) -> (Option<(Vec<&'m output::PercolatorPsm>, String)>, Option<String>) {
+) -> (
+    Option<(Vec<&'m output::PercolatorPsm>, String)>,
+    Option<String>,
+) {
     let (Some(map), Some(cutoffs)) = (rescore_map, f.cutoffs) else {
         return (None, None);
     };

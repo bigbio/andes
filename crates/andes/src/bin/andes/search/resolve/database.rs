@@ -120,6 +120,15 @@ pub(crate) fn load_search_database(
         },
     )?;
     if let Some(settings) = prebuilt {
+        if cli.add_entrapment {
+            return Err(format!(
+                "--add-entrapment cannot be used with {}, a database written by andes database: \
+                 its decoys were built without the entrapment proteins. Search the target FASTA \
+                 instead.",
+                database_path.display()
+            )
+            .into());
+        }
         if !cli.db.annotations.is_empty() {
             return Err(format!(
                 "--annotations cannot be used with {}, a database written by andes database:                  annotated sites change the decoys. Search the target FASTA instead.",
@@ -195,6 +204,7 @@ pub(crate) fn load_search_database(
         );
     }
     let mut decoy_key = None;
+    let target_db = with_entrapment(cli, target_db, &proteases)?;
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
             warn_search(&warning);
@@ -237,6 +247,56 @@ pub(crate) fn load_search_database(
         decoy_strategy,
         decoy_key,
     })
+}
+
+/// The target database with one shuffled entrapment protein per target appended under
+/// `--add-entrapment` (`search::decoy::entrapment`), logged with its size and redraws; the
+/// database itself otherwise.
+fn with_entrapment(
+    cli: &Cli,
+    mut target_db: model::ProteinDb,
+    proteases: &search::decoy::Proteases,
+) -> Result<model::ProteinDb, String> {
+    use search::decoy::entrapment;
+    if !cli.add_entrapment {
+        return Ok(target_db);
+    }
+    if let Some(p) = target_db
+        .proteins
+        .iter()
+        .find(|p| entrapment::is_entrapment_accession(&p.accession))
+    {
+        return Err(format!(
+            "--add-entrapment: the database already holds entrapment entries ({}); give the \
+             target proteins only",
+            p.accession
+        ));
+    }
+    let t0 = std::time::Instant::now();
+    let Some(built) = entrapment::entrapment_db(&target_db, cli.entrapment_seed, proteases) else {
+        return Err(
+            "--add-entrapment needs a specific digest: a non-specific search has no cleavage \
+             sites to keep, so its shuffles have no paired target peptide"
+                .into(),
+        );
+    };
+    let s = built.stats;
+    log::info!(target: "database",
+        "{} entrapment proteins (seed {}; {} variant, isoform, chain or knockoff entries have \
+         none); {} entrapment peptides against {} target peptides (r = {:.3}); {} equalled a \
+         target peptide and were redrawn, {} still do; {:.2} s",
+        output::statistics::thousands(s.proteins),
+        cli.entrapment_seed,
+        output::statistics::thousands(s.skipped),
+        output::statistics::thousands(s.entrapment_peptides),
+        output::statistics::thousands(s.target_peptides),
+        s.peptide_ratio(),
+        output::statistics::thousands(s.redrawn),
+        output::statistics::thousands(s.left),
+        t0.elapsed().as_secs_f64()
+    );
+    target_db.proteins.extend(built.proteins.proteins);
+    Ok(target_db)
 }
 
 fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {

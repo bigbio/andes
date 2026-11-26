@@ -238,6 +238,8 @@ pub const PARAMS: &[ParamSpec] = &[
     with_example(row("predictor_instrument", Section::Rescoring, "predictor_instrument", Unit::None, None, Unset::Auto("from the instrument"), None), "QE"),
     row("predictor_batch", Section::Rescoring, "predictor_batch", Unit::Count, None, Unset::ClapDefault, None),
     with_example(row("proteoform_fdr", Section::Rescoring, "proteoform_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("the larger of --psm-fdr and 0.05"), None), "0.05"),
+    row("add_entrapment", Section::Rescoring, "add_entrapment", Unit::None, None, Unset::Off, None),
+    row("entrapment_seed", Section::Rescoring, "entrapment_seed", Unit::Count, None, Unset::ClapDefault, None),
     row("glyco", Section::Glyco, "enabled", Unit::None, None, Unset::Off, None),
     with_example(row("glyco_species", Section::Glyco, "species", Unit::None, None, Unset::Off, None), "human"),
     with_example(row("glyco_glycan_gdb", Section::Glyco, "glycan_gdb", Unit::Path, None, Unset::Off, None), "glycans.gdb"),

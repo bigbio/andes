@@ -22,3 +22,9 @@
   year: 2015
   journal: Molecular & Cellular Proteomics
   doi: 10.1074/mcp.M114.046995
+- key: wen2025_entrapment
+  authors: Wen B, Freestone J, Riffle M, MacCoss MJ, Noble WS, Keich U
+  title: Assessment of false discovery rate control in tandem mass spectrometry analysis using entrapment
+  year: 2025
+  journal: Nature Methods
+  doi: 10.1038/s41592-025-02719-x

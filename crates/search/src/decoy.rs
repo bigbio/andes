@@ -17,6 +17,7 @@ pub const DEFAULT_DECOY_SEED: u64 = 42;
 const MAX_REDRAWS: u64 = 20;
 
 mod collisions;
+pub mod entrapment;
 
 pub use collisions::LengthOverlap;
 

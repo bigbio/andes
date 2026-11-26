@@ -130,6 +130,8 @@ pub struct RescoringCfg {
     pub psm_fdr: Option<f64>,
     pub proteoform_fdr: Option<f64>,
     pub protein_fdr: Option<f64>,
+    pub add_entrapment: Option<bool>,
+    pub entrapment_seed: Option<u64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,

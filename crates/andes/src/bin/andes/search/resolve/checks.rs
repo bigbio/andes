@@ -51,6 +51,26 @@ pub(crate) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
             return Err("--dia and --xl cannot be combined: the cross-link search has no isolation-window or MS1 gate".into());
         }
     }
+    if cli.add_entrapment {
+        let unsupported = set_flags(&[
+            (cli.glyco, "--glyco"),
+            (cli.xl.is_some(), "--xl"),
+            (cli.open_search, "--open-search"),
+        ]);
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "--add-entrapment is not combined with {}: these modes write their own results \
+                 and FDR, which the entrapment estimate does not read",
+                unsupported.join(", ")
+            ));
+        }
+        if !cli.rescore {
+            log::warn!(target: "entrapment",
+                "--add-entrapment without --rescore: the entrapment proteins are searched and \
+                 written to the PIN, but no FDP is estimated (it needs the rescored q-values)"
+            );
+        }
+    }
     if cli.glyco_index_sequon_only && !cli.glyco {
         return Err(
             "--glyco-index-sequon-only requires --glyco (the standard peptide \

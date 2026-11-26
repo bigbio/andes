@@ -295,6 +295,8 @@ fn apply_rescoring(rescoring: RescoringCfg, c: &mut ConfigApply<'_>) -> Result<(
         rescoring.proteoform_fdr
     );
     set_opt!(c, "protein_fdr", protein_fdr, rescoring.protein_fdr);
+    set!(c, "add_entrapment", add_entrapment, rescoring.add_entrapment);
+    set!(c, "entrapment_seed", entrapment_seed, rescoring.entrapment_seed);
     set_opt!(c, "pep", pep, rescoring.pep);
     set_opt!(
         c,

@@ -608,37 +608,35 @@ impl Predictors {
             } else {
                 0
             };
-        let prediction_features =
-            |prediction: &[f32],
-             rows: &[u32],
-             shared: &mut crate::dia::SharedTraces,
-             traces: &mut Vec<f64>,
-             done: &mut Vec<(u32, Vec<f64>)>| {
-                let Some(first) = rows.first() else {
-                    return;
-                };
-                let r = &table.rows[*first as usize];
-                let (charge, (_, mass)) = (r.charge, &forms[r.form as usize]);
-                let Some((slot, windows)) = &dia else {
-                    for &row in rows {
-                        let peaks = &spectra[table.rows[row as usize].spec as usize].peaks;
-                        let v = ms2_features(prediction, pred.ions(), mass, charge, peaks, tol);
-                        done.push((row, v.to_vec()));
-                    }
-                    return;
-                };
-                shared.reset(prediction, pred.ions(), mass, charge);
-                for &row in rows {
-                    let spec = table.rows[row as usize].spec as usize;
-                    let (ns, center) = shared.row(spectra, slot, windows, spec, tol, traces);
-                    let mut v = ms2_features_with(prediction, pred.ions(), mass, charge, |k, _| {
-                        traces[k * ns + center]
-                    })
-                    .to_vec();
-                    v.extend(crate::dia::evidence_of(shared.frags(), traces, ns, center));
-                    done.push((row, v));
-                }
+        let prediction_features = |prediction: &[f32],
+                                   rows: &[u32],
+                                   shared: &mut crate::dia::SharedTraces,
+                                   done: &mut Vec<f64>| {
+            let Some(first) = rows.first() else {
+                return;
             };
+            let r = &table.rows[*first as usize];
+            let (charge, (_, mass)) = (r.charge, &forms[r.form as usize]);
+            let Some((slot, windows)) = &dia else {
+                for &row in rows {
+                    let peaks = &spectra[table.rows[row as usize].spec as usize].peaks;
+                    let v = ms2_features(prediction, pred.ions(), mass, charge, peaks, tol);
+                    done.extend_from_slice(&v);
+                }
+                return;
+            };
+            shared.reset(prediction, pred.ions(), mass, charge);
+            for &row in rows {
+                let spec = table.rows[row as usize].spec as usize;
+                let (ns, center) = shared.row(spectra, slot, windows, spec, tol);
+                let traces = shared.traces();
+                let v = ms2_features_with(prediction, pred.ions(), mass, charge, |k, _| {
+                    traces[k * ns + center]
+                });
+                done.extend_from_slice(&v);
+                done.extend_from_slice(&shared.evidence(ns, center));
+            }
+        };
         let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
         let kept_pred: Option<Mutex<Vec<Vec<f32>>>> =
             keep.is_some().then(|| Mutex::new(vec![Vec::new(); fz.len()]));
@@ -651,16 +649,17 @@ impl Predictors {
             let v = pred
                 .ms2(s, &items)
                 .map_err(|e| format!("{} MS2: {e}", pred.prefix()))?;
-            let mut done: Vec<(u32, Vec<f64>)> = Vec::new();
+            let mut done_rows: Vec<u32> = Vec::new();
+            let mut done: Vec<f64> = Vec::new();
             let mut shared = crate::dia::SharedTraces::default();
-            let mut traces = Vec::new();
             for (&i, x) in job.iter().zip(&v) {
                 let rows = &rows_of_fz[row_start[i] as usize..row_start[i + 1] as usize];
-                prediction_features(x, rows, &mut shared, &mut traces, &mut done);
+                done_rows.extend_from_slice(rows);
+                prediction_features(x, rows, &mut shared, &mut done);
             }
             let mut g = out.lock().expect("MS2 output lock");
-            for (row, f) in done {
-                for (c, x) in g.iter_mut().zip(f) {
+            for (&row, f) in done_rows.iter().zip(done.chunks_exact(width)) {
+                for (c, &x) in g.iter_mut().zip(f) {
                     c[row as usize] = x;
                 }
             }

@@ -532,14 +532,14 @@ fn shared_traces_equal_the_traces_of_each_rows_own_neighbours() {
     let (slot, windows) = windows(&spectra, &[spectra.len()]);
     let tol = FragmentTolerance::Ppm(20.0);
     let mut shared = SharedTraces::default();
-    let mut got = Vec::new();
     for (z, rows) in [
         (2u8, vec![0usize, 4, 6, 18, 1, 3, 39]),
         (3, vec![10, 12, 10, 37]),
     ] {
         shared.reset(&pred, &ions, &mass, z);
         for &spec in &rows {
-            let (ns, center) = shared.row(&spectra, &slot, &windows, spec, tol, &mut got);
+            let (ns, center) = shared.row(&spectra, &slot, &windows, spec, tol);
+            let got = shared.traces();
             let (ids, want_center) = neighbours(&slot, &windows, spec);
             let scans: Vec<&[(f64, f32)]> = ids
                 .iter()
@@ -552,6 +552,11 @@ fn shared_traces_equal_the_traces_of_each_rows_own_neighbours() {
                 got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "z {z} spec {spec}"
+            );
+            let want = evidence(&pred, &ions, &mass, z, &scans, center, tol);
+            assert_eq!(
+                shared.evidence(ns, center).map(f64::to_bits),
+                want.map(f64::to_bits)
             );
         }
     }

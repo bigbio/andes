@@ -582,7 +582,8 @@ pub(crate) fn evidence(
     tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
     let (frags, traces) = fragment_evidence(pred, ions, mass, charge, scans, tol);
-    evidence_of(&frags, &traces, scans.len(), center)
+    let mut e = EvidenceScratch::default();
+    evidence_of(&frags, &traces, scans.len(), center, &mut e)
 }
 
 /// The predicted fragments of a row and their [`fragment_traces`] over `scans`.
@@ -638,6 +639,8 @@ pub(crate) struct SharedTraces {
     order: Vec<usize>,
     scan_of: rustc_hash::FxHashMap<u32, usize>,
     values: Vec<f64>,
+    row: Vec<f64>,
+    evidence: EvidenceScratch,
 }
 
 impl SharedTraces {
@@ -650,12 +653,14 @@ impl SharedTraces {
     }
 
     /// The prediction's fragments, in the order of its traces.
+    #[cfg(test)]
     pub(crate) fn frags(&self) -> &[(f64, f64)] {
         &self.frags
     }
 
-    /// Fills `out` with the `fragment_traces` of the row on spectrum `spec` over its
-    /// [`neighbours`] and returns their number and the row's own position among them.
+    /// Makes the row on spectrum `spec` the current row: [`Self::traces`] become its
+    /// `fragment_traces` over its [`neighbours`]. Returns their number and the row's own position
+    /// among them.
     pub(crate) fn row(
         &mut self,
         spectra: &[Spectrum],
@@ -663,10 +668,10 @@ impl SharedTraces {
         windows: &[Vec<u32>],
         spec: usize,
         tol: FragmentTolerance,
-        out: &mut Vec<f64>,
     ) -> (usize, usize) {
         let (ids, center) = neighbours(slot, windows, spec);
         let (nf, ns) = (self.frags.len(), ids.len());
+        let out = &mut self.row;
         out.clear();
         out.resize(nf * ns, 0.0);
         for (s, &id) in ids.iter().enumerate() {
@@ -689,6 +694,30 @@ impl SharedTraces {
         }
         (ns, center)
     }
+
+    /// The traces of the current row, fragment-major.
+    pub(crate) fn traces(&self) -> &[f64] {
+        &self.row
+    }
+
+    /// The [`evidence_of`] of the current row, of `ns` scans with its own at `center`.
+    pub(crate) fn evidence(&mut self, ns: usize, center: usize) -> [f64; EVIDENCE_COLUMNS.len()] {
+        evidence_of(&self.frags, &self.row, ns, center, &mut self.evidence)
+    }
+}
+
+/// The buffers of [`evidence_of`], kept across rows.
+#[derive(Default)]
+pub(crate) struct EvidenceScratch {
+    p: Vec<f64>,
+    sum3: Vec<f64>,
+    top: Vec<usize>,
+    norm: Vec<f64>,
+    v: Vec<f64>,
+    profile: Vec<f64>,
+    corrs: Vec<f64>,
+    proj: Vec<f64>,
+    ptop: Vec<f64>,
 }
 
 /// The `EVIDENCE_COLUMNS` of a row from its fragments and their traces: `ns` scans per fragment
@@ -698,9 +727,13 @@ pub(crate) fn evidence_of(
     traces: &[f64],
     ns: usize,
     center: usize,
+    e: &mut EvidenceScratch,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
     let trace = |k: usize| &traces[k * ns..(k + 1) * ns];
-    let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
+    let p = &mut e.p;
+    p.clear();
+    p.extend(frags.iter().map(|f| f.1));
+    let p = &*p;
     let lo = center.saturating_sub(1);
     let hi = (center + 2).min(ns);
     let apex = (lo..hi)
@@ -712,14 +745,15 @@ pub(crate) fn evidence_of(
         })
         .unwrap_or(center);
     let (a, b) = (apex.saturating_sub(1), (apex + 2).min(ns));
-    let sum3: Vec<f64> = (0..frags.len())
-        .map(|k| trace(k)[a..b].iter().sum())
-        .collect();
+    e.sum3.clear();
+    e.sum3
+        .extend((0..frags.len()).map(|k| trace(k)[a..b].iter().sum::<f64>()));
+    let sum3 = &e.sum3;
     let sp: f64 = p.iter().sum();
-    let sum3_angle = angle(&p, &sum3);
+    let sum3_angle = angle(p, sum3);
     let sum3_explained = if sp > 0.0 {
         p.iter()
-            .zip(&sum3)
+            .zip(sum3)
             .filter(|(_, o)| **o > 0.0)
             .map(|(v, _)| v)
             .sum::<f64>()
@@ -728,62 +762,64 @@ pub(crate) fn evidence_of(
         0.0
     };
 
-    let mut top: Vec<usize> = (0..frags.len()).collect();
+    let top = &mut e.top;
+    top.clear();
+    top.extend(0..frags.len());
     top.sort_by(|&x, &y| p[y].total_cmp(&p[x]));
     top.truncate(EVIDENCE_TOP);
-    let norm: Vec<Vec<f64>> = top
-        .iter()
-        .map(|&k| {
-            let m = trace(k).iter().cloned().fold(0.0, f64::max);
-            trace(k)
-                .iter()
-                .map(|v| if m > 0.0 { v / m } else { 0.0 })
-                .collect()
-        })
-        .collect();
-    let mut v: Vec<f64> = Vec::with_capacity(norm.len());
-    let profile: Vec<f64> = (0..ns)
-        .map(|s| {
-            v.clear();
-            v.extend(norm.iter().map(|t| t[s]));
-            v.sort_by(f64::total_cmp);
-            match v.len() {
-                0 => 0.0,
-                n if n % 2 == 1 => v[n / 2],
-                n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
-            }
-        })
-        .collect();
+    let top = &*top;
+    e.norm.clear();
+    for &k in top {
+        let m = trace(k).iter().cloned().fold(0.0, f64::max);
+        e.norm
+            .extend(trace(k).iter().map(|v| if m > 0.0 { v / m } else { 0.0 }));
+    }
+    let norm = &e.norm;
+    let v = &mut e.v;
+    e.profile.clear();
+    e.profile.extend((0..ns).map(|s| {
+        v.clear();
+        v.extend((0..top.len()).map(|t| norm[t * ns + s]));
+        v.sort_by(f64::total_cmp);
+        match v.len() {
+            0 => 0.0,
+            n if n % 2 == 1 => v[n / 2],
+            n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+        }
+    }));
+    let profile = &e.profile;
     let pn = profile.len().max(1) as f64;
     let pm = profile.iter().sum::<f64>() / pn;
     let pvar: f64 = profile.iter().map(|v| (v - pm) * (v - pm)).sum();
-    let corrs: Vec<f64> = top.iter().map(|&k| pearson(trace(k), &profile)).collect();
+    e.corrs.clear();
+    e.corrs
+        .extend(top.iter().map(|&k| pearson(trace(k), profile)));
+    let corrs = &e.corrs;
     let pf_corr = corrs.iter().sum::<f64>() / corrs.len().max(1) as f64;
     let pf_clean =
         corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64 / top.len().max(1) as f64;
-    let proj: Vec<f64> = top
-        .iter()
-        .map(|&k| {
-            let tm = trace(k).iter().sum::<f64>() / pn;
-            let cov: f64 = trace(k)
-                .iter()
-                .zip(&profile)
-                .map(|(x, y)| (x - tm) * (y - pm))
-                .sum();
-            if pvar > 0.0 {
-                (cov / pvar).max(0.0)
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let ptop: Vec<f64> = top.iter().map(|&k| p[k]).collect();
+    e.proj.clear();
+    e.proj.extend(top.iter().map(|&k| {
+        let tm = trace(k).iter().sum::<f64>() / pn;
+        let cov: f64 = trace(k)
+            .iter()
+            .zip(profile)
+            .map(|(x, y)| (x - tm) * (y - pm))
+            .sum();
+        if pvar > 0.0 {
+            (cov / pvar).max(0.0)
+        } else {
+            0.0
+        }
+    }));
+    e.ptop.clear();
+    e.ptop.extend(top.iter().map(|&k| p[k]));
     [
         sum3_angle,
         sum3_explained,
         pf_corr,
         pf_clean,
-        angle(&ptop, &proj),
+        angle(&e.ptop, &e.proj),
     ]
 }
 

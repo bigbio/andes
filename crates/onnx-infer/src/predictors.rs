@@ -110,9 +110,8 @@ const MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
 
 pub struct NativeMs2 {
     model: Ms2Model,
-    nce: Option<f32>,
-    activation: String,
-    instrument: String,
+    /// The run's conditions at charge 0; [`Self::conditions`] sets the charge.
+    run: Ms2Conditions,
 }
 
 impl NativeMs2 {
@@ -126,14 +125,12 @@ impl NativeMs2 {
             .map_err(|e| Error::InvalidArg(format!("andes-ms2 weights: {e}")))?;
         Ok(Self {
             model,
-            nce,
-            activation: activation.to_string(),
-            instrument: instrument.to_string(),
+            run: Ms2Conditions::new(0, nce, activation, instrument),
         })
     }
 
     fn conditions(&self, charge: u8) -> Ms2Conditions {
-        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument)
+        Ms2Conditions { charge, ..self.run }
     }
 }
 
@@ -173,10 +170,11 @@ impl Predictor for NativeMs2 {
                     .ok_or_else(|| {
                         Error::Inference("andes-ms2 could not encode a peptidoform".into())
                     })?;
-                Ok(full
-                    .chunks_exact(N_ION)
-                    .flat_map(|site| site[..N_BASE_ION].to_vec())
-                    .collect())
+                let mut base = Vec::with_capacity(full.len() / N_ION * N_BASE_ION);
+                for site in full.chunks_exact(N_ION) {
+                    base.extend_from_slice(&site[..N_BASE_ION]);
+                }
+                Ok(base)
             })
             .collect()
     }

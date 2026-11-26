@@ -11,7 +11,7 @@ fn d(key: &str, pair: Option<&str>, entrapment: bool, score: f64) -> Discovery {
 }
 
 #[test]
-fn unmatched_counterparts_disable_paired_but_preserve_lower_and_combined_counts() {
+fn known_unobserved_counterparts_are_counted_below_the_cut() {
     let mut rows = vec![
         d("T1", Some("A"), false, 10.0),
         d("E1", Some("A"), true, 9.0),
@@ -26,7 +26,8 @@ fn unmatched_counterparts_disable_paired_but_preserve_lower_and_combined_counts(
     assert_eq!((last.pair_below_cut, last.pair_lower), (1, 1));
     assert!((last.lower_bound - 0.5).abs() < 1e-12);
     assert!((last.combined - 1.0).abs() < 1e-12);
-    assert!(last.paired.is_nan());
+    assert_eq!(last.paired, 1.0);
+    assert_eq!(at_q(&rows, &c, 0.01).paired, 1.0);
     let at_e2 = c[2];
     assert_eq!((at_e2.pair_below_cut, at_e2.pair_lower), (1, 0));
 }
@@ -95,7 +96,6 @@ fn at_q_counts_only_accepted_rows_and_accepted_pairs() {
 fn ambiguous_missing_and_many_to_one_pairs_make_only_paired_unavailable() {
     for mut rows in [
         vec![d("E", None, true, 5.0), d("T", Some("A"), false, 4.0)],
-        vec![d("E", Some("A"), true, 5.0)],
         vec![
             d("E", Some("A"), true, 5.0),
             d("F", Some("A"), true, 4.0),
@@ -193,4 +193,30 @@ fn empty_pair_identifiers_and_nonfinite_scores_cannot_validate_pairing() {
         assert!(c.iter().all(|estimate| estimate.paired.is_nan()));
         assert!(c.iter().all(|estimate| estimate.combined.is_finite()));
     }
+}
+
+#[test]
+fn a_known_unobserved_pair_is_distinct_from_an_unknown_pair_identity() {
+    let mut known = vec![d("E", Some("source"), true, 5.0)];
+    let known_curve = curve(&mut known, 1.0);
+    assert_eq!(known_curve[0].pair_below_cut, 1);
+    assert_eq!(known_curve[0].paired, 2.0);
+    assert_eq!(at_q(&known, &known_curve, 0.01).paired, 2.0);
+    let mut unknown = vec![d("E", None, true, 5.0)];
+    let unknown_curve = curve(&mut unknown, 1.0);
+    assert!(unknown_curve[0].paired.is_nan());
+    assert!(at_q(&unknown, &unknown_curve, 0.01).paired.is_nan());
+    assert_eq!(known_curve[0].lower_bound, unknown_curve[0].lower_bound);
+    assert_eq!(known_curve[0].combined, unknown_curve[0].combined);
+}
+
+#[test]
+fn repeated_entrapment_pairs_remain_ambiguous_even_without_observed_targets() {
+    let mut rows = vec![
+        d("E", Some("source"), true, 5.0),
+        d("F", Some("source"), true, 4.0),
+    ];
+    let c = curve(&mut rows, 1.0);
+    assert!(c.iter().all(|estimate| estimate.paired.is_nan()));
+    assert!(at_q(&rows, &c, 0.01).paired.is_nan());
 }

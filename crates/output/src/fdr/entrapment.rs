@@ -9,10 +9,14 @@
 //! `r` the entrapment to target ratio, and the paired estimate
 //! `(N_E + N_{E>=s>T} + 2 N_{E>T>=s}) / (N_T + N_E)`, which counts each entrapment discovery
 //! against the target it was shuffled from: once more when that target is below the cut and
-//! twice more when it is above the cut with a lower score. The lower bound can show a failure to
-//! control the FDR; the combined and the (tighter) paired estimates are upper bounds that can
-//! show control. The levels are PSMs, precursors (best PSM per peptidoform and charge), peptides
-//! (best PSM per bare sequence) and protein groups.
+//! twice more when it is above the cut with a lower score. A known but unobserved target is
+//! below the cut. A missing pair identity is different and makes the paired estimate unavailable.
+//! The lower bound can show a failure to control the FDR. Upper-bound interpretations of the
+//! combined and paired estimates require the method's assumptions, including exchangeability
+//! of incorrect target and entrapment matches, an appropriate database ratio and, for pairing,
+//! genuine one-to-one source pairs. Finite estimates alone do not establish those assumptions
+//! or prove FDR control for an arbitrary acceptance rule. The levels are PSMs, precursors
+//! (best PSM per peptidoform and charge), peptides (best PSM per bare sequence) and protein groups.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -39,7 +43,8 @@ pub struct Discovery {
     /// group lead.
     pub key: String,
     /// The pairing key: for a target, its own; for an entrapment discovery, that of the target it
-    /// was shuffled from. `None` for an entrapment discovery without a target pair.
+    /// was shuffled from, even when that target has no observed discovery. `None` means the
+    /// pairing identity is unknown or ambiguous, not that its target is merely unobserved.
     pub pair: Option<String>,
     pub entrapment: bool,
     /// The rescorer's score, larger is better.
@@ -86,8 +91,10 @@ impl Estimate {
 
 /// Sorts `rows` best first (score descending, then q-value, then key) and returns the estimates
 /// down to each rank, with `r` the entrapment to target ratio. Paired estimates are NaN unless
-/// all rows have finite scores and unambiguous one-to-one pair keys, and every entrapment has
-/// an observed target counterpart. Unobserved counterparts do not affect lower/combined estimates.
+/// all rows have finite scores and unambiguous one-to-one pair keys. A known pair key whose
+/// target has no observed discovery is treated as below the cut, not as missing pairing.
+/// Callers must supply the true source pairing and ensure that omitted targets are unobserved,
+/// rather than removed by an unrelated filter.
 pub fn curve(rows: &mut [Discovery], r: f64) -> Vec<Estimate> {
     rows.sort_by(|a, b| {
         b.score
@@ -204,7 +211,6 @@ fn pairing(rows: &[Discovery]) -> (HashMap<&str, f64>, bool) {
             applicable = false;
         }
     }
-    applicable &= entrapments.iter().all(|pair| targets.contains_key(pair));
     (targets, applicable)
 }
 

@@ -421,21 +421,14 @@ pub(crate) fn windows(
     (slot, windows)
 }
 
-pub(crate) fn neighbours<'a>(
-    spectra: &'a [Spectrum],
-    slot: &[(u32, u32)],
-    windows: &[Vec<u32>],
-    spec: usize,
-) -> (Vec<&'a [(f64, f32)]>, usize) {
+/// The scans of `spec`'s isolation window within [`HALF_CYCLES`] of it, as spectrum indices in
+/// retention-time order, and the position of `spec` among them.
+fn neighbours<'a>(slot: &[(u32, u32)], windows: &'a [Vec<u32>], spec: usize) -> (&'a [u32], usize) {
     let (w, p) = slot[spec];
     let win = &windows[w as usize];
     let (p, lo) = (p as usize, (p as usize).saturating_sub(HALF_CYCLES));
     let hi = (p + HALF_CYCLES + 1).min(win.len());
-    let scans = win[lo..hi]
-        .iter()
-        .map(|&i| spectra[i as usize].peaks.as_slice())
-        .collect();
-    (scans, p - lo)
+    (&win[lo..hi], p - lo)
 }
 
 /// Adds the co-elution `COLUMNS` to every row of the PIN; `ms1` is [`ms1_indexes`] of the run's
@@ -589,12 +582,12 @@ pub(crate) fn evidence(
     tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
     let (frags, traces) = fragment_evidence(pred, ions, mass, charge, scans, tol);
-    evidence_of(&frags, &traces, scans.len(), center)
+    let mut e = EvidenceScratch::default();
+    evidence_of(&frags, &traces, scans.len(), center, &mut e)
 }
 
-/// The predicted fragments of a row (`(m/z, predicted intensity)`, in the order of
-/// [`onnx_infer::predictors::spectral::ms2_features_with`]) and their [`fragment_traces`] over
-/// `scans`.
+/// The predicted fragments of a row and their [`fragment_traces`] over `scans`.
+#[cfg(test)]
 pub(crate) fn fragment_evidence(
     pred: &[f32],
     ions: &[(bool, u8)],
@@ -603,9 +596,24 @@ pub(crate) fn fragment_evidence(
     scans: &[&[(f64, f32)]],
     tol: FragmentTolerance,
 ) -> (Vec<(f64, f64)>, Vec<f64>) {
+    let mut frags = Vec::new();
+    fragments(pred, ions, mass, charge, &mut frags);
+    let traces = fragment_traces(&frags, scans, tol);
+    (frags, traces)
+}
+
+/// Fills `frags` with the predicted fragments of a row (`(m/z, predicted intensity)`, in the
+/// order of [`onnx_infer::predictors::spectral::ms2_features_with`]).
+fn fragments(
+    pred: &[f32],
+    ions: &[(bool, u8)],
+    mass: &Mass,
+    charge: u8,
+    frags: &mut Vec<(f64, f64)>,
+) {
+    frags.clear();
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-    let mut frags: Vec<(f64, f64)> = Vec::new();
     let mut prefix = mass.nterm;
     for i in 0..n.saturating_sub(1) {
         prefix += mass.res[i];
@@ -618,20 +626,114 @@ pub(crate) fn fragment_evidence(
             frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
         }
     }
-    let traces = fragment_traces(&frags, scans, tol);
-    (frags, traces)
 }
 
-/// The `EVIDENCE_COLUMNS` of a row from its [`fragment_evidence`]: `ns` scans per fragment
+/// The fragments of one prediction (a peptidoform at a charge) and their trace values in each
+/// scan that one of its rows has used so far. Rows of the same prediction whose neighbour scans
+/// overlap search each shared scan once: a scan's values depend only on the fragments and that
+/// scan's peaks, so every row gets the `fragment_traces` of its own [`neighbours`]. One value
+/// is reused across predictions, which keeps its buffers.
+#[derive(Default)]
+pub(crate) struct SharedTraces {
+    frags: Vec<(f64, f64)>,
+    order: Vec<usize>,
+    scan_of: rustc_hash::FxHashMap<u32, usize>,
+    values: Vec<f64>,
+    row: Vec<f64>,
+    evidence: EvidenceScratch,
+}
+
+impl SharedTraces {
+    /// Starts the prediction `pred` of a peptidoform of `mass` at `charge`.
+    pub(crate) fn reset(&mut self, pred: &[f32], ions: &[(bool, u8)], mass: &Mass, charge: u8) {
+        fragments(pred, ions, mass, charge, &mut self.frags);
+        mz_order(&self.frags, &mut self.order);
+        self.scan_of.clear();
+        self.values.clear();
+    }
+
+    /// The prediction's fragments, in the order of its traces.
+    #[cfg(test)]
+    pub(crate) fn frags(&self) -> &[(f64, f64)] {
+        &self.frags
+    }
+
+    /// Makes the row on spectrum `spec` the current row: [`Self::traces`] become its
+    /// `fragment_traces` over its [`neighbours`]. Returns their number and the row's own position
+    /// among them.
+    pub(crate) fn row(
+        &mut self,
+        spectra: &[Spectrum],
+        slot: &[(u32, u32)],
+        windows: &[Vec<u32>],
+        spec: usize,
+        tol: FragmentTolerance,
+    ) -> (usize, usize) {
+        let (ids, center) = neighbours(slot, windows, spec);
+        let (nf, ns) = (self.frags.len(), ids.len());
+        let out = &mut self.row;
+        out.clear();
+        out.resize(nf * ns, 0.0);
+        for (s, &id) in ids.iter().enumerate() {
+            let next = self.scan_of.len();
+            let at = *self.scan_of.entry(id).or_insert(next);
+            if at == next {
+                self.values.resize((at + 1) * nf, 0.0);
+                scan_trace(
+                    &self.frags,
+                    &self.order,
+                    spectra[id as usize].peaks.as_slice(),
+                    tol,
+                    &mut self.values[at * nf..],
+                    1,
+                );
+            }
+            for (k, &v) in self.values[at * nf..(at + 1) * nf].iter().enumerate() {
+                out[k * ns + s] = v;
+            }
+        }
+        (ns, center)
+    }
+
+    /// The traces of the current row, fragment-major.
+    pub(crate) fn traces(&self) -> &[f64] {
+        &self.row
+    }
+
+    /// The [`evidence_of`] of the current row, of `ns` scans with its own at `center`.
+    pub(crate) fn evidence(&mut self, ns: usize, center: usize) -> [f64; EVIDENCE_COLUMNS.len()] {
+        evidence_of(&self.frags, &self.row, ns, center, &mut self.evidence)
+    }
+}
+
+/// The buffers of [`evidence_of`], kept across rows.
+#[derive(Default)]
+pub(crate) struct EvidenceScratch {
+    p: Vec<f64>,
+    sum3: Vec<f64>,
+    top: Vec<usize>,
+    norm: Vec<f64>,
+    v: Vec<f64>,
+    profile: Vec<f64>,
+    corrs: Vec<f64>,
+    proj: Vec<f64>,
+    ptop: Vec<f64>,
+}
+
+/// The `EVIDENCE_COLUMNS` of a row from its fragments and their traces: `ns` scans per fragment
 /// trace, the row's own scan at `center`.
 pub(crate) fn evidence_of(
     frags: &[(f64, f64)],
     traces: &[f64],
     ns: usize,
     center: usize,
+    e: &mut EvidenceScratch,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
     let trace = |k: usize| &traces[k * ns..(k + 1) * ns];
-    let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
+    let p = &mut e.p;
+    p.clear();
+    p.extend(frags.iter().map(|f| f.1));
+    let p = &*p;
     let lo = center.saturating_sub(1);
     let hi = (center + 2).min(ns);
     let apex = (lo..hi)
@@ -643,14 +745,15 @@ pub(crate) fn evidence_of(
         })
         .unwrap_or(center);
     let (a, b) = (apex.saturating_sub(1), (apex + 2).min(ns));
-    let sum3: Vec<f64> = (0..frags.len())
-        .map(|k| trace(k)[a..b].iter().sum())
-        .collect();
+    e.sum3.clear();
+    e.sum3
+        .extend((0..frags.len()).map(|k| trace(k)[a..b].iter().sum::<f64>()));
+    let sum3 = &e.sum3;
     let sp: f64 = p.iter().sum();
-    let sum3_angle = angle(&p, &sum3);
+    let sum3_angle = angle(p, sum3);
     let sum3_explained = if sp > 0.0 {
         p.iter()
-            .zip(&sum3)
+            .zip(sum3)
             .filter(|(_, o)| **o > 0.0)
             .map(|(v, _)| v)
             .sum::<f64>()
@@ -659,62 +762,64 @@ pub(crate) fn evidence_of(
         0.0
     };
 
-    let mut top: Vec<usize> = (0..frags.len()).collect();
+    let top = &mut e.top;
+    top.clear();
+    top.extend(0..frags.len());
     top.sort_by(|&x, &y| p[y].total_cmp(&p[x]));
     top.truncate(EVIDENCE_TOP);
-    let norm: Vec<Vec<f64>> = top
-        .iter()
-        .map(|&k| {
-            let m = trace(k).iter().cloned().fold(0.0, f64::max);
-            trace(k)
-                .iter()
-                .map(|v| if m > 0.0 { v / m } else { 0.0 })
-                .collect()
-        })
-        .collect();
-    let mut v: Vec<f64> = Vec::with_capacity(norm.len());
-    let profile: Vec<f64> = (0..ns)
-        .map(|s| {
-            v.clear();
-            v.extend(norm.iter().map(|t| t[s]));
-            v.sort_by(f64::total_cmp);
-            match v.len() {
-                0 => 0.0,
-                n if n % 2 == 1 => v[n / 2],
-                n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
-            }
-        })
-        .collect();
+    let top = &*top;
+    e.norm.clear();
+    for &k in top {
+        let m = trace(k).iter().cloned().fold(0.0, f64::max);
+        e.norm
+            .extend(trace(k).iter().map(|v| if m > 0.0 { v / m } else { 0.0 }));
+    }
+    let norm = &e.norm;
+    let v = &mut e.v;
+    e.profile.clear();
+    e.profile.extend((0..ns).map(|s| {
+        v.clear();
+        v.extend((0..top.len()).map(|t| norm[t * ns + s]));
+        v.sort_by(f64::total_cmp);
+        match v.len() {
+            0 => 0.0,
+            n if n % 2 == 1 => v[n / 2],
+            n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+        }
+    }));
+    let profile = &e.profile;
     let pn = profile.len().max(1) as f64;
     let pm = profile.iter().sum::<f64>() / pn;
     let pvar: f64 = profile.iter().map(|v| (v - pm) * (v - pm)).sum();
-    let corrs: Vec<f64> = top.iter().map(|&k| pearson(trace(k), &profile)).collect();
+    e.corrs.clear();
+    e.corrs
+        .extend(top.iter().map(|&k| pearson(trace(k), profile)));
+    let corrs = &e.corrs;
     let pf_corr = corrs.iter().sum::<f64>() / corrs.len().max(1) as f64;
     let pf_clean =
         corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64 / top.len().max(1) as f64;
-    let proj: Vec<f64> = top
-        .iter()
-        .map(|&k| {
-            let tm = trace(k).iter().sum::<f64>() / pn;
-            let cov: f64 = trace(k)
-                .iter()
-                .zip(&profile)
-                .map(|(x, y)| (x - tm) * (y - pm))
-                .sum();
-            if pvar > 0.0 {
-                (cov / pvar).max(0.0)
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let ptop: Vec<f64> = top.iter().map(|&k| p[k]).collect();
+    e.proj.clear();
+    e.proj.extend(top.iter().map(|&k| {
+        let tm = trace(k).iter().sum::<f64>() / pn;
+        let cov: f64 = trace(k)
+            .iter()
+            .zip(profile)
+            .map(|(x, y)| (x - tm) * (y - pm))
+            .sum();
+        if pvar > 0.0 {
+            (cov / pvar).max(0.0)
+        } else {
+            0.0
+        }
+    }));
+    e.ptop.clear();
+    e.ptop.extend(top.iter().map(|&k| p[k]));
     [
         sum3_angle,
         sum3_explained,
         pf_corr,
         pf_clean,
-        angle(&ptop, &proj),
+        angle(&e.ptop, &e.proj),
     ]
 }
 
@@ -723,37 +828,58 @@ pub(crate) fn evidence_of(
 /// once, in the fragments' m/z order, instead of a binary search per fragment; a window whose
 /// lower edge falls below the previous one is searched afresh, so every fragment sees the peaks
 /// a binary search would give it.
+#[cfg(test)]
 fn fragment_traces(
     frags: &[(f64, f64)],
     scans: &[&[(f64, f32)]],
     tol: FragmentTolerance,
 ) -> Vec<f64> {
     let ns = scans.len();
-    let mut order: Vec<usize> = (0..frags.len()).collect();
-    order.sort_by(|&a, &b| frags[a].0.total_cmp(&frags[b].0));
+    let mut order = Vec::new();
+    mz_order(frags, &mut order);
     let mut out = vec![0.0f64; frags.len() * ns];
     for (s, peaks) in scans.iter().enumerate() {
-        let mut lo = 0usize;
-        let mut prev = f64::NEG_INFINITY;
-        for &k in &order {
-            let mz = frags[k].0;
-            let w = tol.window(mz);
-            let edge = mz - w;
-            if edge >= prev {
-                while lo < peaks.len() && peaks[lo].0 < edge {
-                    lo += 1;
-                }
-            } else {
-                lo = peaks.partition_point(|p| p.0 < edge);
-            }
-            prev = edge;
-            out[k * ns + s] = peaks[lo..]
-                .iter()
-                .take_while(|p| p.0 <= mz + w)
-                .fold(0.0, |m, p| f64::max(m, p.1 as f64));
-        }
+        scan_trace(frags, &order, peaks, tol, &mut out[s..], ns);
     }
     out
+}
+
+/// Fills `order` with the fragment indices in m/z order.
+fn mz_order(frags: &[(f64, f64)], order: &mut Vec<usize>) {
+    order.clear();
+    order.extend(0..frags.len());
+    order.sort_by(|&a, &b| frags[a].0.total_cmp(&frags[b].0));
+}
+
+/// The `fragment_traces` values of one scan: fragment `k`'s highest peak within `tol` goes
+/// to `out[k * stride]`. `order` is [`mz_order`] of `frags`.
+fn scan_trace(
+    frags: &[(f64, f64)],
+    order: &[usize],
+    peaks: &[(f64, f32)],
+    tol: FragmentTolerance,
+    out: &mut [f64],
+    stride: usize,
+) {
+    let mut lo = 0usize;
+    let mut prev = f64::NEG_INFINITY;
+    for &k in order {
+        let mz = frags[k].0;
+        let w = tol.window(mz);
+        let edge = mz - w;
+        if edge >= prev {
+            while lo < peaks.len() && peaks[lo].0 < edge {
+                lo += 1;
+            }
+        } else {
+            lo = peaks.partition_point(|p| p.0 < edge);
+        }
+        prev = edge;
+        out[k * stride] = peaks[lo..]
+            .iter()
+            .take_while(|p| p.0 <= mz + w)
+            .fold(0.0, |m, p| f64::max(m, p.1 as f64));
+    }
 }
 
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {

@@ -503,10 +503,10 @@ impl Ms2Model {
             }
         }
 
-        self.head1.apply(&s.x, np, &mut s.h);
+        self.head1.apply_rows(&s.x, np, 2..n + 1, &mut s.h);
         s.site.clear();
         for j in 0..n - 1 {
-            let row = &s.h[(j + 2) * ch..(j + 3) * ch];
+            let row = &s.h[j * ch..(j + 1) * ch];
             s.site.extend(row.iter().zip(hc).map(|(a, b)| silu(a + b)));
         }
         let mut out = vec![0.0f32; (n - 1) * N_ION];

@@ -1,4 +1,6 @@
 use model::stats::{median_mad, Even, MAD_TO_SD};
+
+use crate::timstof::mzcal::TdfMzModel;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TofCentroid {
     pub tof: f64,
@@ -357,6 +359,7 @@ pub(crate) struct MzCalibration {
     poly: [f64; 4],
     cond: [f64; 5],
     c_ref: Conditions,
+    tdf: Option<TdfMzModel>,
 }
 
 impl MzCalibration {
@@ -366,10 +369,37 @@ impl MzCalibration {
             poly: [intercept, slope * scale, 0.0, 0.0],
             cond: [0.0; 5],
             c_ref: [0.0; 5],
+            tdf: None,
+        }
+    }
+
+    pub fn tdf(model: TdfMzModel, scale: f64) -> Self {
+        Self {
+            tdf: Some(model),
+            ..Self::linear(0.0, 0.0, scale)
+        }
+    }
+
+    pub fn is_tdf(&self) -> bool {
+        self.tdf.is_some()
+    }
+
+    /// This calibration with a frame's own TDF row in place of the run's main row. A linear
+    /// or fitted calibration is returned unchanged.
+    pub fn for_frame(&self, model: Option<TdfMzModel>) -> Self {
+        match (self.tdf, model) {
+            (Some(_), Some(m)) => Self {
+                tdf: Some(m),
+                ..self.clone()
+            },
+            _ => self.clone(),
         }
     }
 
     pub fn mz(&self, tof: f64, c: Conditions) -> f64 {
+        if let Some(model) = &self.tdf {
+            return model.mz(tof, [c[0], c[1]]);
+        }
         let x = tof / self.scale;
         let p = &self.poly;
         let terms: f64 = (0..5).map(|k| self.cond[k] * (c[k] - self.c_ref[k])).sum();
@@ -383,6 +413,21 @@ pub(crate) struct CalibrationPoint {
     pub tof: f64,
     pub mz: f64,
     pub t: Conditions,
+    /// The base calibration's m/z for this point, from its own frame's MzCalibration row.
+    /// Base residuals use it, so a point on another row is not charged with the row
+    /// difference. `NaN` means "evaluate the run base" (points built without a frame).
+    pub base_mz: f64,
+}
+
+impl CalibrationPoint {
+    fn base_ppm(&self, base: &MzCalibration) -> f64 {
+        let m = if self.base_mz.is_finite() {
+            self.base_mz
+        } else {
+            base.mz(self.tof, self.t)
+        };
+        (m - self.mz) / self.mz * 1e6
+    }
 }
 
 pub(crate) const WIDE_WINDOW_PPM: f64 = 200.0;
@@ -392,11 +437,16 @@ const OUTLIER_SIGMAS: f64 = 4.0;
 
 const MATCH_MARGIN_PPM: f64 = 50.0;
 
+/// Match each vendor m/z to the most intense centroid inside the window. `calibration` places
+/// the centroids, and `base` (the run base with this frame's MzCalibration row) gives each
+/// point's `base_mz`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn match_precursors(
     centroids: &[TofCentroid],
     vendor_mz: &[f64],
     frame: FrameConditions,
     calibration: &MzCalibration,
+    base: &MzCalibration,
     offset: &OffsetCurve,
     window_ppm: f64,
     out: &mut Vec<CalibrationPoint>,
@@ -423,6 +473,7 @@ pub(crate) fn match_precursors(
                 tof: c.tof,
                 mz,
                 t: cond,
+                base_mz: base.mz(c.tof, cond),
             });
         }
     }
@@ -441,7 +492,7 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
     let half = (WIDE_WINDOW_PPM / OFFSET_BIN_PPM).ceil() as i64;
     let mut hist = vec![0.0f64; (2 * half + 1) as usize];
     for p in points {
-        let ppm = (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6;
+        let ppm = p.base_ppm(base);
         let k = (ppm / OFFSET_BIN_PPM).round() as i64 + half;
         if let Some(h) = usize::try_from(k).ok().and_then(|k| hist.get_mut(k)) {
             *h += 1.0;
@@ -456,7 +507,7 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
     let centre = (k as i64 - half) as f64 * OFFSET_BIN_PPM;
     let near: Vec<f64> = points
         .iter()
-        .map(|p| (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6)
+        .map(|p| p.base_ppm(base))
         .filter(|ppm| (ppm - centre).abs() <= 1.5 * OFFSET_BIN_PPM)
         .collect();
     Some(near.iter().sum::<f64>() / near.len().max(1) as f64)
@@ -550,6 +601,19 @@ fn residual_stats(ppm: &[f64]) -> (f64, f64) {
     (med, MAD_TO_SD * mad)
 }
 
+/// Fraction of the base model's residual (offset and spread together) that a precursor-peak
+/// fit must stay under to replace an instrument (TDF) calibration.
+const FIT_OVER_TDF: f64 = 0.8;
+
+/// Whether a precursor-peak fit is clearly closer to the vendor m/z than its base model. The
+/// vendor m/z come from the same instrument calibration, so on a TDF base the fit should only
+/// win when the calibration does not describe the frames (for example an unusable row).
+pub(crate) fn fit_beats_base(fit: &CalibrationFit) -> bool {
+    let fit_err = fit.median_ppm.hypot(fit.sigma_ppm);
+    let base_err = fit.base_median_ppm.hypot(fit.base_sigma_ppm);
+    fit_err < FIT_OVER_TDF * base_err
+}
+
 pub(crate) fn fit_calibration(
     points: &[CalibrationPoint],
     base: &MzCalibration,
@@ -579,10 +643,7 @@ pub(crate) fn fit_calibration(
         }
         f
     };
-    let base_ppm: Vec<f64> = points
-        .iter()
-        .map(|p| (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6)
-        .collect();
+    let base_ppm: Vec<f64> = points.iter().map(|p| p.base_ppm(base)).collect();
     let (base_median_ppm, base_sigma_ppm) = residual_stats(&base_ppm);
     let mut keep: Vec<bool> = vec![true; points.len()];
     let mut result: Option<CalibrationFit> = None;
@@ -623,6 +684,7 @@ pub(crate) fn fit_calibration(
             poly: [coef[0], coef[1], coef[2], coef[3]],
             cond: temp,
             c_ref: t_ref,
+            tdf: None,
         };
         let ppm: Vec<f64> = points
             .iter()
@@ -851,6 +913,7 @@ mod tests {
                 tof,
                 mz: truth(tof, t),
                 t,
+                base_mz: f64::NAN,
             });
         }
         let fit = fit_calibration(&points, &base).expect("enough pairs");
@@ -877,6 +940,7 @@ mod tests {
                     tof,
                     mz: truth(tof, t),
                     t,
+                    base_mz: f64::NAN,
                 }
             })
             .collect();
@@ -895,7 +959,8 @@ mod tests {
             CalibrationPoint {
                 tof: 1.0,
                 mz: 100.0,
-                t: [0.0; 5]
+                t: [0.0; 5],
+                base_mz: f64::NAN,
             };
             MIN_CALIBRATION_POINTS - 1
         ];
@@ -923,6 +988,7 @@ mod tests {
             &[target],
             t,
             &base,
+            &base,
             &OffsetCurve::constant(0.0),
             20.0,
             &mut out,
@@ -934,6 +1000,7 @@ mod tests {
             &centroids,
             &[target],
             t,
+            &base,
             &base,
             &OffsetCurve::constant(500.0),
             0.001,
@@ -959,6 +1026,7 @@ mod tests {
                 tof,
                 mz: m / (1.0 + ppm * 1e-6),
                 t,
+                base_mz: f64::NAN,
             });
         }
         let off = mode_offset_ppm(&points, &base).unwrap();
@@ -984,6 +1052,7 @@ mod tests {
                 tof,
                 mz: m / (1.0 + ppm * 1e-6),
                 t,
+                base_mz: f64::NAN,
             });
         }
         let curve = offset_curve(&points, &base).unwrap();
@@ -991,5 +1060,53 @@ mod tests {
             assert!((curve.at(m) - truth(m)).abs() < 3.0, "{m}: {}", curve.at(m));
         }
         assert_eq!(OffsetCurve::constant(4.0).at(123.0), 4.0);
+    }
+
+    #[test]
+    fn base_residuals_use_each_points_own_row() {
+        let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
+        let t = [25.7, 27.0, 5.0, 1.0, 1.0];
+        let own = |tof: f64| base.mz(tof, t) * (1.0 + 40e-6);
+        let points: Vec<CalibrationPoint> = (0..400)
+            .map(|i| {
+                let tof = 20_000.0 + (i as f64) * 900.0;
+                CalibrationPoint {
+                    tof,
+                    mz: own(tof),
+                    t,
+                    base_mz: own(tof),
+                }
+            })
+            .collect();
+        assert!(mode_offset_ppm(&points, &base).unwrap().abs() < 1e-6);
+        let fit = fit_calibration(&points, &base).unwrap();
+        assert!(fit.base_median_ppm.abs() < 1e-6, "{fit:?}");
+        assert!(!fit_beats_base(&fit));
+        let run_base: Vec<CalibrationPoint> = points
+            .iter()
+            .map(|p| CalibrationPoint {
+                base_mz: f64::NAN,
+                ..*p
+            })
+            .collect();
+        assert!((mode_offset_ppm(&run_base, &base).unwrap() + 40.0).abs() < 0.5);
+    }
+
+    fn fit_with(median: f64, sigma: f64, base_median: f64, base_sigma: f64) -> CalibrationFit {
+        CalibrationFit {
+            calibration: MzCalibration::linear(10.0, 1e-4, 1.0),
+            n_used: 1000,
+            median_ppm: median,
+            sigma_ppm: sigma,
+            base_median_ppm: base_median,
+            base_sigma_ppm: base_sigma,
+        }
+    }
+
+    #[test]
+    fn a_fit_replaces_the_tdf_model_only_when_clearly_closer() {
+        assert!(!fit_beats_base(&fit_with(-0.1, 2.0, 0.1, 2.1)));
+        assert!(!fit_beats_base(&fit_with(0.0, 1.8, 0.3, 2.0)));
+        assert!(fit_beats_base(&fit_with(-0.18, 2.07, 16.78, 7.63)));
     }
 }

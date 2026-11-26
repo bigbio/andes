@@ -29,7 +29,8 @@ pub(crate) struct PasefPrecursor {
 pub(crate) struct FrameRow {
     pub time: f64,
     pub num_peaks: u64,
-    pub t: [f64; 2],
+    /// T1 and T2; `None` when the column or the value is missing.
+    pub t: [Option<f64>; 2],
 }
 
 pub(crate) fn read_frame_rows(
@@ -48,10 +49,7 @@ pub(crate) fn read_frame_rows(
             FrameRow {
                 time: r.get::<_, Option<f64>>(1)?.unwrap_or(f64::NAN),
                 num_peaks: r.get::<_, Option<i64>>(2)?.unwrap_or(0).max(0) as u64,
-                t: [
-                    r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
-                ],
+                t: [r.get::<_, Option<f64>>(3)?, r.get::<_, Option<f64>>(4)?],
             },
         ))
     })?;
@@ -385,7 +383,7 @@ mod tests {
         let frames = read_frame_rows(&conn).unwrap();
         assert_eq!(frames[&1].num_peaks, 100);
         assert_eq!(frames[&2].num_peaks, 0);
-        assert_eq!(frames[&2].t, [25.0, 26.0]);
+        assert_eq!(frames[&2].t, [Some(25.0), Some(26.0)]);
     }
 
     #[test]

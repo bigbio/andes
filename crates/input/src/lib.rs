@@ -44,6 +44,14 @@ pub use uniprot::{
     UniProtXmlReader,
 };
 
+#[derive(Debug, Default)]
+pub struct DiaScanMobility {
+    /// Shared 1/K0 tables, each indexed by TIMS scan number.
+    pub tables: Vec<Vec<f32>>,
+    /// Table index for each DIA precursor scan ID.
+    pub table_for_scan: Vec<Option<usize>>,
+}
+
 pub fn open_buf_maybe_gz(
     path: &std::path::Path,
 ) -> std::io::Result<Box<dyn std::io::BufRead + Send>> {

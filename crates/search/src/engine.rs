@@ -200,7 +200,7 @@ pub struct PreparedSearch<'a> {
     pub aa_set_for_scoring: AminoAcidSet,
     pub ms1_link: Option<Ms1Link>,
     pub dia_ms1: Vec<model::scan::Ms1Scan>,
-    dia_scan_mobility: Vec<Option<Vec<f32>>>,
+    dia_scan_mobility: input::DiaScanMobility,
     dia_mobility_margin: RwLock<Option<f32>>,
     target_bare_seqs: FoldedSet,
     candidate_filter: Option<CandidateFilter>,

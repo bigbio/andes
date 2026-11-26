@@ -148,7 +148,7 @@ fn parse_streamed(settings: StreamSettings, tx: SyncSender<Vec<Spectrum>>) -> St
             ms1: reader.take_run_ms1(),
             ms3: reader.take_product_scans(),
             contexts: reader.take_scan_contexts(),
-            scan_mobility: Vec::new(),
+            scan_mobility: input::DiaScanMobility::default(),
         };
         Ok((stats, scans))
     } else if file_is_raw {
@@ -167,7 +167,7 @@ fn parse_streamed(settings: StreamSettings, tx: SyncSender<Vec<Spectrum>>) -> St
                 ms1: reader.take_run_ms1(),
                 ms3: reader.take_product_scans(),
                 contexts: reader.take_scan_contexts(),
-                scan_mobility: Vec::new(),
+                scan_mobility: input::DiaScanMobility::default(),
             };
             Ok((stats, scans))
         }

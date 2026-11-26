@@ -10,7 +10,7 @@ impl<'a> PreparedSearch<'a> {
     }
 
     /// Installs per-DIA-window 1/K0 tables for the mobility term of the MS1 gate.
-    pub fn set_dia_scan_mobility(&mut self, k0: Vec<Option<Vec<f32>>>) {
+    pub fn set_dia_scan_mobility(&mut self, k0: input::DiaScanMobility) {
         self.dia_scan_mobility = k0;
     }
 
@@ -156,12 +156,13 @@ impl<'a> PreparedSearch<'a> {
 }
 
 fn dia_scan_mobility_range(
-    tables: &[Option<Vec<f32>>],
+    mobility: &input::DiaScanMobility,
     spec: &model::Spectrum,
 ) -> Option<(f32, f32)> {
     let (a, b) = spec.mobility_window?;
     let scan = usize::try_from(spec.scan?).ok()?;
-    let table = tables.get(scan)?.as_ref()?;
+    let table_index = mobility.table_for_scan.get(scan)?.as_ref()?;
+    let table = mobility.tables.get(*table_index)?;
     let ka = *table.get(a as usize)?;
     let kb = *table.get(b as usize)?;
     Some((ka.min(kb), ka.max(kb)))
@@ -182,20 +183,19 @@ mod tests {
 
     #[test]
     fn dia_mobility_uses_the_spectrum_scan_table() {
-        let tables = vec![
-            None,
-            Some(vec![0.0, 1.0, 2.0, 3.0]),
-            Some(vec![0.0, 10.0, 20.0, 30.0]),
-        ];
+        let mobility = input::DiaScanMobility {
+            tables: vec![vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 10.0, 20.0, 30.0]],
+            table_for_scan: vec![None, Some(0), Some(1)],
+        };
         assert_eq!(
-            dia_scan_mobility_range(&tables, &spectrum(1)),
+            dia_scan_mobility_range(&mobility, &spectrum(1)),
             Some((1.0, 3.0))
         );
         assert_eq!(
-            dia_scan_mobility_range(&tables, &spectrum(2)),
+            dia_scan_mobility_range(&mobility, &spectrum(2)),
             Some((10.0, 30.0))
         );
-        assert_eq!(dia_scan_mobility_range(&tables, &spectrum(0)), None);
-        assert_eq!(dia_scan_mobility_range(&tables, &spectrum(3)), None);
+        assert_eq!(dia_scan_mobility_range(&mobility, &spectrum(0)), None);
+        assert_eq!(dia_scan_mobility_range(&mobility, &spectrum(3)), None);
     }
 }

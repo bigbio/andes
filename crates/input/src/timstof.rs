@@ -744,6 +744,28 @@ pub struct TimsTofReader {
     ms1_mobility: bool,
 }
 
+fn shared_table_index(
+    models: &mut Vec<(TimsImModel, Vec<f32>)>,
+    model: TimsImModel,
+    last: usize,
+) -> usize {
+    let n_scans = last + 1;
+    match models
+        .iter()
+        .position(|(existing, values)| *existing == model && values.len() == n_scans)
+    {
+        Some(index) => index,
+        None => {
+            let index = models.len();
+            models.push((
+                model,
+                (0..=last).map(|s| model.convert(s as f64) as f32).collect(),
+            ));
+            index
+        }
+    }
+}
+
 impl TimsTofReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, TimsTofParseError> {
         let p = path.as_ref();
@@ -790,9 +812,8 @@ impl TimsTofReader {
         self
     }
 
-    /// 1/K0 tables for DIA windows, indexed by precursor scan ID and then TIMS scan number.
-    /// Missing entries mean that the corresponding precursor is not a DIA window.
-    pub fn dia_scan_mobility(&self) -> Vec<Option<Vec<f32>>> {
+    /// Shared 1/K0 tables and their per-DIA-window table indices.
+    pub fn dia_scan_mobility(&self) -> crate::DiaScanMobility {
         let Some(max_id) = self
             .ms2
             .precursors
@@ -801,9 +822,10 @@ impl TimsTofReader {
             .map(|p| p.id)
             .max()
         else {
-            return Vec::new();
+            return crate::DiaScanMobility::default();
         };
-        let mut tables = vec![None; max_id + 1];
+        let mut table_for_scan = vec![None; max_id + 1];
+        let mut models = Vec::<(TimsImModel, Vec<f32>)>::new();
         for p in self.ms2.precursors.iter().filter(|p| p.dia) {
             let Some(selection) = p.selections.first() else {
                 continue;
@@ -812,9 +834,13 @@ impl TimsTofReader {
                 continue;
             };
             let im = self.ms2.im.for_frame(selection.frame_id);
-            tables[p.id] = Some((0..=last).map(|s| im.convert(s as f64) as f32).collect());
+            let table = shared_table_index(&mut models, im, last);
+            table_for_scan[p.id] = Some(table);
         }
-        tables
+        crate::DiaScanMobility {
+            tables: models.into_iter().map(|(_, values)| values).collect(),
+            table_for_scan,
+        }
     }
 
     pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
@@ -1084,6 +1110,19 @@ mod tests {
             }],
             dia: false,
         }
+    }
+
+    #[test]
+    fn dia_mobility_tables_share_identical_models_and_lengths() {
+        let model = TimsImModel::Linear {
+            intercept: 1.0,
+            slope: -0.001,
+        };
+        let mut models = Vec::new();
+        assert_eq!(shared_table_index(&mut models, model, 3), 0);
+        assert_eq!(shared_table_index(&mut models, model, 3), 0);
+        assert_eq!(shared_table_index(&mut models, model, 4), 1);
+        assert_eq!(models.len(), 2);
     }
 
     #[test]

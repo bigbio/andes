@@ -26,7 +26,9 @@ impl<'a> PreparedSearch<'a> {
     /// Installs the mobility margin learned from the calibration anchors (used when the
     /// search parameters ask for the learned margin).
     pub fn set_dia_mobility_margin(&self, margin: Option<f32>) {
-        *self.dia_mobility_margin.write().expect("margin lock") = margin;
+        if let Ok(mut m) = self.dia_mobility_margin.write() {
+            *m = margin;
+        }
     }
 
     /// The 1/K0 range of `spec`'s mobility slice (no margin), when the run has a scan
@@ -73,7 +75,7 @@ impl<'a> PreparedSearch<'a> {
         margin: Option<f64>,
     ) -> Option<(f32, f32)> {
         let margin = match margin? {
-            m if m < 0.0 => (*self.dia_mobility_margin.read().expect("margin lock"))?,
+            m if m < 0.0 => self.dia_mobility_margin.read().ok().and_then(|g| *g)?,
             m => m as f32,
         };
         let (a, b) = spec.mobility_window?;

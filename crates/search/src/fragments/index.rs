@@ -818,9 +818,8 @@ pub(crate) fn select_top_k_kept_by(
     let mut best: std::collections::BinaryHeap<std::cmp::Reverse<Ranked>> =
         std::collections::BinaryHeap::with_capacity(top_k + 1);
     for &e in sel.iter() {
-        if best.len() == top_k {
-            let worst = best.peek().expect("full heap").0 .0;
-            if f64::from(e.1) < worst {
+        if let Some(worst) = best.peek().filter(|_| best.len() == top_k) {
+            if f64::from(e.1) < worst.0 .0 {
                 break;
             }
         }
@@ -830,7 +829,7 @@ pub(crate) fn select_top_k_kept_by(
         let r = Ranked(key(e.0, e.1), e);
         if best.len() < top_k {
             best.push(std::cmp::Reverse(r));
-        } else if r > best.peek().expect("full heap").0 {
+        } else if best.peek().is_some_and(|w| r > w.0) {
             best.pop();
             best.push(std::cmp::Reverse(r));
         }

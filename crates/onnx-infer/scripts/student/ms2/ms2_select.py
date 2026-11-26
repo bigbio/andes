@@ -115,6 +115,22 @@ def load_votes(path: str | None, dataset: str | None = None) -> dict | None:
     return {(r, int(sc)): pf for r, sc, pf in zip(runs, t["scan"].to_pylist(), t["peptidoform"].to_pylist())}
 
 
+def explained_cuts(groups, explained) -> dict:
+    """``{group: HARD_EXPLAINED_QUANTILE quantile of explained}`` over the rows of each group (an activation, or an
+    (extraction unit, activation) pair when one cut spans several runs)."""
+    by: dict = {}
+    for g, e in zip(groups, explained):
+        by.setdefault(g, []).append(e)
+    return {g: float(np.quantile(np.asarray(v, np.float64), HARD_EXPLAINED_QUANTILE)) for g, v in by.items()}
+
+
+def is_hard(sequence: str, explained: float, mods, cut: float) -> bool:
+    """The hard-example rule: at most HARD_MAX_LENGTH residues, explained below the unit's cut, or a modification
+    outside COMMON_MODS (``mods`` as ``parse_proforma`` returns them)."""
+    return (len(sequence) <= HARD_MAX_LENGTH or explained < cut
+            or any(uid not in COMMON_MODS for _, uid in mods))
+
+
 def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
     """Candidate stage: set ``label``, ``hard`` and ``source_engine`` on annotated rows; the agreement
     columns stay null and nothing is dropped (``finalize_rows`` does that once the other engines ran).
@@ -132,14 +148,10 @@ def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
     for run, labs in by_run.items():
         top = max(("TMT", "iTRAQ"), key=labs.count)
         run_label[run] = top if labs.count(top) >= RUN_LABEL_SHARE * len(labs) else "none"
-    cut = {}
-    for act in {r["activation"] for r in rows}:
-        ex = np.array([r["explained"] for r in rows if r["activation"] == act], np.float64)
-        cut[act] = float(np.quantile(ex, HARD_EXPLAINED_QUANTILE))
+    cut = explained_cuts([r["activation"] for r in rows], [r["explained"] for r in rows])
     for r in rows:
         r["label"] = run_label[r["run"]]
-        r["hard"] = (len(r["sequence"]) <= HARD_MAX_LENGTH or r["explained"] < cut[r["activation"]]
-                     or any(uid not in COMMON_MODS for _, uid in r["mods"]))
+        r["hard"] = is_hard(r["sequence"], r["explained"], r["mods"], cut[r["activation"]])
         r["source_engine"] = source_engine
         for e in VOTE_SOURCES + INFO_SOURCES:
             r[f"agree_{e}" if e in VOTE_SOURCES else f"{e}_agree"] = None

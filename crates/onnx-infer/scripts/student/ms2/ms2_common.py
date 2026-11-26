@@ -160,6 +160,27 @@ def instrument_class(name: str | None) -> int:
     return 0
 
 
+# Training cells (the corpus manifest's cell set). HLA is a property of the run (searched without enzyme
+# specificity in an immunopeptidomics dataset), so ``row_cell`` takes it as a flag; every other cell follows from the
+# row: isobaric label, then activation, then instrument family.
+CELLS = ("QE-Exploris", "Tribrid", "CID-ITMS", "HLA", "TMT", "iTRAQ", "timsTOF", "EThcD-ETD", "Astral", "VelosElite",
+         "LTQ", "TOF", "other")
+
+
+def row_cell(label: str | None, activation: str | None, instrument: str | None, hla: bool = False) -> str:
+    """Training cell of a shard row (see ``CELLS``)."""
+    if hla:
+        return "HLA"
+    if label in ("TMT", "iTRAQ"):
+        return label
+    act_cell = {"HCD-TOF": "timsTOF", "CID-ITMS": "CID-ITMS", "ETD": "EThcD-ETD", "EThcD": "EThcD-ETD",
+                "HCD-ASTMS": "Astral"}.get(activation or "")
+    if act_cell:
+        return act_cell
+    c = INSTRUMENTS[instrument_class(instrument)]
+    return {"QExactive": "QE-Exploris", "Exploris": "QE-Exploris", "unknown": "other"}.get(c, c)
+
+
 def activation_index(name: str | None) -> int:
     return ACTIVATIONS.index(name) if name in ACTIVATIONS else 0
 

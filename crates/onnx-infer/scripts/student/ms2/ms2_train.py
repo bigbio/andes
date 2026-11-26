@@ -22,7 +22,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -37,17 +36,11 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import ACTIVATIONS, N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
 from ms2_model import Ms2Cnn, config_of, export_weights, make_batch, masked_sa_loss, teacher_kl  # noqa: E402
+from ms2_mix import DATASET_CAP, DATASET_CAP_SCARCE, load_hla_runs, plan, shard_files, write_mix  # noqa: E402
 from rt_model import encode  # noqa: E402
 
 COLS = ["dataset", "peptidoform", "sequence", "charge", "nce", "activation", "instrument",
         "n_matched", "explained", "intensities"]
-
-
-def shard_files(paths):
-    out = []
-    for p in paths:
-        out += sorted(glob.glob(os.path.join(p, "**", "*.parquet"), recursive=True)) if os.path.isdir(p) else [p]
-    return out
 
 
 def v1_channels(t, col):
@@ -62,7 +55,7 @@ def v1_channels(t, col):
 class Data:
     """All rows in memory: per-row metadata arrays plus flat float16 intensities."""
 
-    def __init__(self, files, min_matched, min_explained, max_rows, seed, use_teacher):
+    def __init__(self, files, min_matched, min_explained, max_rows, seed, use_teacher, keep=None):
         tables = []
         has_teacher = use_teacher
         for f in files:
@@ -74,8 +67,11 @@ class Data:
             if meta.get(b"andes.ms2_shard.schema", b"1.0").startswith(b"2."):
                 # v1 training reads the first 12 channels of a v2 shard
                 t = v1_channels(t, "intensities")
-            t = t.filter(pc.and_(pc.greater_equal(t["n_matched"], min_matched),
-                                 pc.greater_equal(t["explained"], min_explained)))
+            if keep is not None:
+                t = t.filter(pa.array(keep[f]))
+            else:
+                t = t.filter(pc.and_(pc.greater_equal(t["n_matched"], min_matched),
+                                     pc.greater_equal(t["explained"], min_explained)))
             tables.append(t)
         t = pa.concat_tables(tables)
         if max_rows and t.num_rows > max_rows:
@@ -188,6 +184,11 @@ def main():
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--min-explained", type=float, default=0.0)
     p.add_argument("--max-rows", type=int, default=0, help="subsample the shards (0 = all)")
+    p.add_argument("--dataset-cap", type=int, default=DATASET_CAP,
+                   help="rows kept per (dataset, training cell) unit, a uniform sample (0 = no cap; ms2_mix.py)")
+    p.add_argument("--dataset-cap-scarce", type=int, default=DATASET_CAP_SCARCE,
+                   help="the cap in a scarce cell (ms2_mix.SCARCE_CELLS)")
+    p.add_argument("--hla-runs", help="TSV dataset, run of the HLA runs outside msnet/HLA/ (ms2_mix.py)")
     p.add_argument("--emb", type=int, default=32)
     p.add_argument("--ch", type=int, default=96)
     p.add_argument("--dilations", type=int, nargs="+", default=[1, 2, 4, 8, 1, 2])
@@ -213,7 +214,13 @@ def main():
     if dev == "cpu":
         torch.set_num_threads(a.threads)
     t0 = time.time()
-    data = Data(shard_files(a.shards), a.min_matched, a.min_explained, a.max_rows, a.seed, a.teacher_weight > 0)
+    files = shard_files(a.shards)
+    keep, mix = plan(files, load_hla_runs(a.hla_runs), a.min_matched, a.min_explained, a.dataset_cap,
+                     a.dataset_cap_scarce, a.seed)
+    write_mix(mix, os.path.join(a.out, "mix.tsv"))
+    print(f"mix: {len(mix)} units, {sum(r[3] for r in mix)} eligible rows, {sum(r[4] for r in mix)} after the "
+          f"per-dataset cap ({a.dataset_cap}, scarce {a.dataset_cap_scarce})", flush=True)
+    data = Data(files, a.min_matched, a.min_explained, a.max_rows, a.seed, a.teacher_weight > 0, keep)
     hold = np.isin(data.dataset, a.holdout_datasets)
     train = np.flatnonzero(data.ok & ~hold & (data.split == "train"))
     val = np.flatnonzero(data.ok & ~hold & (data.split == "val"))

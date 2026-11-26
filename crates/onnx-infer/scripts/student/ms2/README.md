@@ -38,6 +38,7 @@ AlphaPeptDeep predictions can be added.
 | `ms2_extract_raw.py` | One array task: raw → mzML (ThermoRawFileParser) → annotated shard |
 | `ms2_extract_flats.py` | The same from andes training flats (peak lists attached; e.g. PXD009875) |
 | `ms2_finalize.py` | Candidate shards + per-engine confident IDs → training shards (multi-engine label rule) |
+| `ms2_mix.py` | Per-dataset cap of the training rows per (dataset, training cell) unit; writes the effective mix |
 | `ms2_teacher.py` | Adds a `teacher` column with AlphaPeptDeep predictions (optional distillation) |
 | `ms2_model.py` | Network, loss, `AMS20001` export |
 | `ms2_train.py` | Trainer: sequence-hash split, held-out datasets, stratified test report |
@@ -79,7 +80,14 @@ Two stages. The extractors write *candidate* shards (`andes.ms2_shard.finalized`
 null, nothing dropped). `ms2_finalize.py --votes ENGINE=PATH ...` sets the agreement columns from each engine's
 own Percolator q ≤ 0.01 identifications (same FASTA, modifications and enzyme) and keeps a row when
 `n_engines` ≥ 2, a hard row when `n_engines` ≥ 3 (`finalized` = `true`). The panel is andes, Comet, MSFragger,
-Sage and MaxQuant; the andes column is recorded but never counts.
+Sage and MaxQuant; the andes column is recorded but never counts. A candidate part holding a single run takes
+its `hard` quartile over that run only; `--hard-scope unit` sets `hard` again over every candidate part of the
+dataset, per (dataset, training cell) and activation, as a multi-run extraction task does.
+
+Training balance: `ms2_train.py` keeps at most `--dataset-cap` rows (default 60,000; `--dataset-cap-scarce` 400,000 in
+CID-ITMS, timsTOF, EThcD-ETD and HLA) per (dataset, training cell) unit, a uniform sample at load time; the shards keep
+every row. The training cell is `ms2_common.row_cell`; HLA runs outside `msnet/HLA/` come from `--hla-runs`. The kept
+mix goes to `<out>/mix.tsv`; `ms2_mix.py --out mix.tsv` writes the same table without training.
 
 Annotation details:
 - Tolerance is 20 ppm for FTMS/ASTMS/TOF and 0.5 Da for ITMS.

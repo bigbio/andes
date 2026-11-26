@@ -392,13 +392,15 @@ pub(crate) struct SearchArgs {
           help_heading = H_MODES)]
     pub(crate) dia_ms1_tol_ppm: f64,
 
-    /// diaPASEF MS1 gate in mobility (experiment): 1/K0 margin around the scan's mobility slice
+    /// diaPASEF MS1 gate in mobility: 1/K0 margin around the scan's mobility slice
     ///
-    /// With a value, a candidate passes the MS1 gate only when its MS1 peak lies inside the
-    /// MS2 scan's mobility slice widened by this margin (Vs/cm2) on each side; `auto` learns
-    /// the margin from the run's RT calibration anchors.
-    #[arg(long, value_name = "K0|auto", hide = true, value_parser = parse_mobility_margin)]
-    pub(crate) dia_ms1_mobility_margin: Option<f64>,
+    /// A candidate passes the MS1 gate only when its MS1 peak lies inside the MS2 scan's
+    /// mobility slice widened by this margin (Vs/cm2) on each side. `auto` learns the margin
+    /// from the run's RT calibration anchors; `off` ignores mobility. Runs without ion
+    /// mobility are unaffected.
+    #[arg(long, value_name = "K0|auto|off", hide = true, default_value = "auto",
+          value_parser = parse_mobility_margin)]
+    pub(crate) dia_ms1_mobility_margin: f64,
 
     /// --dia --rescore: drop precursors whose fragments a stronger co-eluting precursor explains
     ///
@@ -1195,10 +1197,13 @@ impl GeometryArgs {
     }
 }
 
-/// `--dia-ms1-mobility-margin`: a non-negative 1/K0 margin, or `auto` (stored as -1).
+/// `--dia-ms1-mobility-margin`: a non-negative 1/K0 margin, `auto` (stored as -1) or `off`
+/// (stored as NaN).
 fn parse_mobility_margin(v: &str) -> Result<f64, String> {
-    if v == "auto" {
-        return Ok(-1.0);
+    match v {
+        "auto" => return Ok(-1.0),
+        "off" => return Ok(f64::NAN),
+        _ => {}
     }
     match v.parse::<f64>() {
         Ok(m) if m.is_finite() && m >= 0.0 => Ok(m),

@@ -211,7 +211,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("max_spectra", Section::Scoring, "max_spectra", Unit::Count, None, Unset::ClapDefault, None),
     row("no_search_gbdt", Section::CliOnly, "no_search_gbdt", Unit::None, None, Unset::Off, None),
     row("no_search_rich_ion", Section::CliOnly, "no_search_rich_ion", Unit::None, None, Unset::Off, None),
-    row("dia_ms1_mobility_margin", Section::CliOnly, "dia_ms1_mobility_margin", Unit::None, None, Unset::Off, None),
+    row("dia_ms1_mobility_margin", Section::CliOnly, "dia_ms1_mobility_margin", Unit::None, None, Unset::ClapDefault, None),
     row("precursor_mono", Section::Scoring, "precursor_mono", Unit::None, None, Unset::ClapDefault, None),
     row("decoy_prefix", Section::Decoys, "prefix", Unit::None, None, Unset::ClapDefault, None),
     with_example(row("decoy_suffix", Section::Decoys, "suffix", Unit::None, None, Unset::Off, None), "rev"),

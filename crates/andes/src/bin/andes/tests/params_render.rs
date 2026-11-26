@@ -4,9 +4,9 @@
 use clap::CommandFactory;
 
 use crate::config::RunConfig;
+use crate::params::render::{config_example, docs_reference, effective_config};
 use crate::params::sources::{ParamSources, Source};
 use crate::params::{Section, PARAMS};
-use crate::params::render::{config_example, docs_reference, effective_config};
 
 const START: &str = "<!-- generated:search-flags:start -->";
 const END: &str = "<!-- generated:search-flags:end -->";
@@ -122,6 +122,29 @@ fn effective_config_leaves_defaults_unset() {
 }
 
 #[test]
+fn experimental_entrapment_config_round_trips_explicit_values_and_leaves_defaults_unset() {
+    let defaults = effective_config(&ParamSources::default()).expect("printable defaults");
+    let cfg = RunConfig::from_yaml_str(&defaults).expect("default config parses");
+    assert_eq!(cfg.rescoring.add_entrapment, None);
+    assert_eq!(cfg.rescoring.entrapment_seed, None);
+
+    let mut sources = ParamSources::default();
+    sources.record_as("add_entrapment", Source::CommandLine, &true);
+    sources.record_as("entrapment_seed", Source::Config, &17u64);
+    let text = effective_config(&sources).expect("printable entrapment config");
+    let cfg = RunConfig::from_yaml_str(&text).expect("entrapment config parses");
+    assert_eq!(cfg.rescoring.add_entrapment, Some(true));
+    assert_eq!(cfg.rescoring.entrapment_seed, Some(17));
+    for (key, source) in [
+        ("add_entrapment: true", "# command line"),
+        ("entrapment_seed: 17", "# config"),
+    ] {
+        assert!(text.lines().any(|line| line.trim_start().starts_with(key)
+            && line.trim_end().ends_with(source)), "{text}");
+    }
+}
+
+#[test]
 fn example_config_sets_only_the_paths() {
     let cfg = RunConfig::from_yaml_str(&config_example()).expect("parses");
     assert_eq!(cfg.search.max_missed_cleavages, None);
@@ -130,7 +153,10 @@ fn example_config_sets_only_the_paths() {
 #[test]
 fn effective_config_hides_internal_flags_until_set() {
     let text = effective_config(&ParamSources::default()).expect("printable");
-    assert!(!text.contains("max_spectra"), "internal key shown by default");
+    assert!(
+        !text.contains("max_spectra"),
+        "internal key shown by default"
+    );
 }
 
 #[test]

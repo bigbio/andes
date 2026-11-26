@@ -174,6 +174,43 @@ fn print_config_quotes_paths() {
 }
 
 #[test]
+fn print_config_round_trips_experimental_entrapment_settings() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spectrum = fixture(SPECTRUM);
+    let database = fixture(DATABASE);
+    let text = printed(&[
+        os("--spectrum"),
+        spectrum.as_os_str(),
+        os("--database"),
+        database.as_os_str(),
+        os("--add-entrapment"),
+        os("--entrapment-seed"),
+        os("17"),
+    ]);
+    let doc = parse(&text);
+    assert_eq!(doc["rescoring"]["add_entrapment"].as_bool(), Some(true));
+    assert_eq!(doc["rescoring"]["entrapment_seed"].as_u64(), Some(17));
+    let cfg = dir.path().join("entrapment.yaml");
+    std::fs::write(&cfg, &text).expect("write config");
+    let replay = parse(&printed(&[os("--config"), cfg.as_os_str()]));
+    assert_eq!(doc["rescoring"], replay["rescoring"]);
+    let overridden = parse(&printed(&[
+        os("--config"),
+        cfg.as_os_str(),
+        os("--entrapment-seed"),
+        os("23"),
+    ]));
+    assert_eq!(
+        overridden["rescoring"]["add_entrapment"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        overridden["rescoring"]["entrapment_seed"].as_u64(),
+        Some(23)
+    );
+}
+
+#[test]
 fn print_config_omits_default_internal_flags() {
     let dir = tempfile::tempdir().expect("tempdir");
     let spectrum = fixture(SPECTRUM);

@@ -46,8 +46,8 @@ fn reads_andes_pin_header_and_rows() {
     let files: Vec<u32> = pin.meta.iter().map(|m| m.file).collect();
     assert_eq!(files, vec![0, 0, 0, 1, 1, 1]);
     assert_eq!(pin.text(0).unwrap().psm_id, "a/1");
-    assert_eq!(pin.meta[0].scan, 1);
-    assert_eq!(pin.meta[0].exp_mass, 1000.5);
+    assert_eq!({ pin.meta[0].scan }, 1);
+    assert_eq!({ pin.meta[0].exp_mass }, 1000.5);
     assert_eq!(pin.text(0).unwrap().peptide, "K.AAA.R");
     assert_eq!(pin.text(0).unwrap().proteins, "P1\tP2");
     assert_eq!(pin.text(3).unwrap().proteins, "P5\tP6\tP7");
@@ -75,7 +75,7 @@ fn filename_is_metadata() {
     let p2 = write(d.path(), "y.pin", &lower);
     let pin2 = read_pin(&p2, ram(d.path())).unwrap();
     assert_eq!(pin2.feature_names, vec!["f1", "f2", "f3"]);
-    assert_eq!(pin2.meta[3].file, 1);
+    assert_eq!({ pin2.meta[3].file }, 1);
     let nofile = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\ns1\t1\t1\t0.5\tK.A.R\tP1\ns2\t-1\t2\t0.7\tK.B.R\tdecoy_P2\n";
     let p3 = write(d.path(), "z.pin", nofile);
     let pin3 = read_pin(&p3, ram(d.path())).unwrap();

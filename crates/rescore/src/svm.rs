@@ -416,33 +416,7 @@ impl Train<'_> {
         I: Fn() -> P + Sync,
         B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
     {
-        match &self.x.data {
-            RowData::Ram(_) => pass_ram(
-                |k| self.x.row(self.rows[subset[k]]),
-                &mut out[..subset.len()],
-                init,
-                body,
-            ),
-            RowData::Spill(path, codec) => {
-                let file = File::open(path).expect("open rows spill file");
-                out[..subset.len()]
-                    .par_chunks_mut(CHUNK)
-                    .enumerate()
-                    .map(|(c, outs)| {
-                        let mut part = init();
-                        let first = c * CHUNK;
-                        let ids: Vec<usize> = subset[first..first + outs.len()]
-                            .iter()
-                            .map(|&i| self.rows[i])
-                            .collect();
-                        read_rows(&file, codec, &ids, |j, row| {
-                            body(&mut part, first + j, row, &mut outs[j]);
-                        });
-                        part
-                    })
-                    .collect()
-            }
-        }
+        self.pass_by(subset.len(), |k| subset[k], out, init, body)
     }
 
     /// `pass` over every example in order, without an index vector of them.
@@ -452,18 +426,31 @@ impl Train<'_> {
         I: Fn() -> P + Sync,
         B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
     {
-        let m = self.len();
+        self.pass_by(self.len(), |k| k, out, init, body)
+    }
+
+    /// One parallel pass over `n` examples, the `k`-th being example `example(k)`: `body` sees
+    /// each in order within its CHUNK, with the CHUNK's own partial state.
+    fn pass_by<P, I, B, E>(&self, n: usize, example: E, out: &mut [f64], init: I, body: B) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+        E: Fn(usize) -> usize + Sync,
+    {
         match &self.x.data {
-            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[k]), &mut out[..m], init, body),
+            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[example(k)]), &mut out[..n], init, body),
             RowData::Spill(path, codec) => {
                 let file = File::open(path).expect("open rows spill file");
-                out[..m]
+                out[..n]
                     .par_chunks_mut(CHUNK)
                     .enumerate()
                     .map(|(c, outs)| {
                         let mut part = init();
                         let first = c * CHUNK;
-                        read_rows(&file, codec, &self.rows[first..first + outs.len()], |j, row| {
+                        let ids: Vec<usize> =
+                            (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                        read_rows(&file, codec, &ids, |j, row| {
                             body(&mut part, first + j, row, &mut outs[j]);
                         });
                         part

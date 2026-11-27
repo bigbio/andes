@@ -245,12 +245,19 @@ impl MmapAccumulator {
     /// Every candidate in index order; the accumulator is left empty.
     pub(super) fn take_all(&mut self) -> Vec<Candidate> {
         use rayon::prelude::*;
-        let out = (0..self.len())
+        let mut whole = std::mem::take(&mut self.whole);
+        let mut out: Vec<Option<Candidate>> = (0..self.len())
             .into_par_iter()
-            .filter_map(|i| self.get(i))
+            .map(|i| match self.metas[i].flags & WHOLE {
+                0 => self.get(i),
+                _ => None,
+            })
             .collect();
+        for (i, c) in whole.drain() {
+            out[i as usize] = Some(c);
+        }
         *self = Self::default();
-        out
+        out.into_iter().flatten().collect()
     }
 
     /// Forgets the candidates from index `len` on and returns their memory.

@@ -211,3 +211,60 @@ fn compact_store_returns_each_candidate_bit_for_bit() {
         assert!(same(a, b));
     }
 }
+
+#[test]
+fn compact_store_keeps_candidates_whole_when_the_residue_table_is_full() {
+    let db = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"MKWVTFISLLRK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&db, "XXX");
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = SearchParams::default_tryptic(aa_set);
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
+    let mut prepared =
+        PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+    let cand = |k: u32| {
+        let residues: Vec<model::AminoAcid> = (0..3)
+            .map(|j| model::AminoAcid {
+                residue: b'G',
+                mass: 57.0 + f64::from(3 * k + j) * 1e-6,
+                mod_: None,
+            })
+            .collect();
+        Candidate {
+            peptide: Peptide::new(residues, b'K', b'K'),
+            protein_index: k as usize,
+            start_offset_in_protein: 0,
+            is_decoy: k % 2 == 1,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    };
+    let cands: Vec<Candidate> = (0..120).map(cand).collect();
+    {
+        let mut accum = prepared.mmap_accum.lock().unwrap();
+        for (i, c) in cands.iter().enumerate() {
+            assert_eq!(accum.intern(c), i as u32);
+        }
+        for (i, c) in cands.iter().enumerate() {
+            assert_eq!(accum.intern(c), i as u32);
+            let got = accum.get(i).unwrap();
+            assert_eq!(got.peptide, c.peptide, "candidate {i}");
+            assert_eq!(got.peptide.mass().to_bits(), c.peptide.mass().to_bits());
+            assert_eq!(got.protein_index, c.protein_index);
+            assert_eq!(got.is_decoy, c.is_decoy);
+        }
+    }
+    prepared.sync_materialized_candidates();
+    assert_eq!(prepared.candidates.len(), cands.len());
+    for (a, b) in prepared.candidates.iter().zip(&cands) {
+        assert_eq!(a.peptide, b.peptide);
+        assert_eq!(a.peptide.mass().to_bits(), b.peptide.mass().to_bits());
+        assert_eq!(a.protein_index, b.protein_index);
+    }
+}

@@ -78,10 +78,8 @@ pub(super) fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], 
         while start < part.len() {
             let take = index_chunk_len(&part[start..], index_order_mass, span_da);
             let chunk = &part[start..start + take];
-            for (s, q) in chunk
-                .iter()
-                .zip(prepared.run_chunk(chunk, searched + start))
-            {
+            let queues = prepared.run_chunk_for_top(chunk, searched + start, prepared.params);
+            for (s, q) in chunk.iter().zip(queues) {
                 if let Some(p) = q.peek_top() {
                     let idx = p.primary_candidate_idx();
                     let rt = s
@@ -199,7 +197,7 @@ pub(super) fn recalibrate_dia_ms1(
     let mut start = 0;
     while start < sample.len() {
         let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
-        queues.extend(prepared.run_chunk_with_params(&sample[start..start + take], start, &wide));
+        queues.extend(prepared.run_chunk_for_top(&sample[start..start + take], start, &wide));
         start += take;
     }
     match search::fragments::error::dia_ms1_offset_ppm(prepared, &sample, &queues, WINDOW_PPM) {
@@ -257,11 +255,12 @@ impl FragmentErrorMeasurer {
                 let mut start = 0;
                 while start < sample.len() {
                     let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
-                    queues.extend(prepared.run_chunk(&sample[start..start + take], start));
+                    let part = &sample[start..start + take];
+                    queues.extend(prepared.run_chunk_for_top(part, start, prepared.params));
                     start += take;
                 }
             }
-            None => queues.extend(prepared.run_chunk(&sample, 0)),
+            None => queues.extend(prepared.run_chunk_for_top(&sample, 0, prepared.params)),
         }
         match search::fragments::error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {

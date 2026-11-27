@@ -278,8 +278,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 if compact.is_spilled() {
                     log::debug!(
                         target: "rescore",
-                        "iteration {}: training rows spilled, {} bytes a row ({} of {} features as one byte)",
+                        "iteration {}: training rows {}, {} bytes a row ({} of {} features as one byte)",
                         it + 1,
+                        if compact.on_disk() { "spilled" } else { "compact in memory" },
                         codec.width(),
                         codec.coded(),
                         pin.rows.nfeat()

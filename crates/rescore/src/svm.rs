@@ -20,6 +20,8 @@ pub struct Rows {
 
 enum RowData {
     Ram(Vec<f32>),
+    /// Rows in memory in `RowCodec`'s compact layout, decoded as the spill file is read.
+    Coded(Vec<u8>, Arc<RowCodec>),
     Spill(PathBuf, Arc<RowCodec>),
 }
 
@@ -178,6 +180,20 @@ impl Rows {
             rows._ram = ram;
             return Ok(rows);
         }
+        let width = codec.width();
+        if let Some(ram) = Reservation::take(budget, (idx.len() * width) as u64) {
+            let mut data = vec![0u8; idx.len() * width];
+            fill(store, norm, idx, |p, row, raw| {
+                codec.encode(raw, row, &mut data[p * width..(p + 1) * width]);
+            });
+            return Ok(Rows {
+                data: RowData::Coded(data, codec.clone()),
+                nrows: idx.len(),
+                ncols,
+                stride,
+                _ram: ram,
+            });
+        }
         let k = ROWS_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = budget
             .spill_dir()
@@ -242,14 +258,23 @@ impl Rows {
         }
     }
 
+    /// Whether the rows are only reachable through a pass (spilled to disk or held compact in
+    /// memory), not as `f32` slices.
     pub fn is_spilled(&self) -> bool {
+        !matches!(self.data, RowData::Ram(_))
+    }
+
+    /// Whether the rows are spilled to disk, not held in memory in any layout.
+    pub fn on_disk(&self) -> bool {
         matches!(self.data, RowData::Spill(..))
     }
 
     pub fn row(&self, i: usize) -> &[f32] {
         match &self.data {
             RowData::Ram(v) => &v[i * self.stride..(i + 1) * self.stride],
-            RowData::Spill(..) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
+            RowData::Spill(..) | RowData::Coded(..) => {
+                panic!("Rows::row: the rows are spilled or compact; use a scan")
+            }
         }
     }
 
@@ -261,11 +286,22 @@ impl Rows {
                     f(k, self.row(i));
                 }
             }
+            RowData::Coded(data, codec) => decode_rows(data, codec, ids, f),
             RowData::Spill(path, codec) => {
                 let file = File::open(path).expect("open rows spill file");
                 read_rows(&file, codec, ids, f);
             }
         }
+    }
+}
+
+/// Calls `f(j, row)` for each row `ids[j]` of compact rows held in memory in `codec`'s layout.
+fn decode_rows(data: &[u8], codec: &RowCodec, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
+    let width = codec.width();
+    let mut vals = codec.blank();
+    for (j, &i) in ids.iter().enumerate() {
+        codec.decode(&data[i * width..(i + 1) * width], &mut vals);
+        f(j, &vals);
     }
 }
 
@@ -440,6 +476,19 @@ impl Train<'_> {
     {
         match &self.x.data {
             RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[example(k)]), &mut out[..n], init, body),
+            RowData::Coded(data, codec) => out[..n]
+                .par_chunks_mut(CHUNK)
+                .enumerate()
+                .map(|(c, outs)| {
+                    let mut part = init();
+                    let first = c * CHUNK;
+                    let ids: Vec<usize> = (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                    decode_rows(data, codec, &ids, |j, row| {
+                        body(&mut part, first + j, row, &mut outs[j]);
+                    });
+                    part
+                })
+                .collect(),
             RowData::Spill(path, codec) => {
                 let file = File::open(path).expect("open rows spill file");
                 out[..n]

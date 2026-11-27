@@ -11,6 +11,9 @@
 //! The entrapment proteins are added to the targets before decoys are built, so they get decoys
 //! of their own and the search cannot tell them from targets.
 
+use std::collections::{BTreeSet, HashSet};
+
+use aho_corasick::AhoCorasick;
 use rayon::prelude::*;
 
 use rustc_hash::FxHashMap;
@@ -189,11 +192,35 @@ impl<'a> EntrapmentLookup<'a> {
             .filter(|(_, w)| *w == peptide);
         let (at, _) = matches.next()?;
         let paired = source.sequence.get(at..at + peptide.len())?;
-        if matches.any(|(at, _)| source.sequence.get(at..at + peptide.len()) != Some(paired)) {
+        if !same_residue_composition(peptide, paired)
+            || matches.any(|(at, _)| {
+                let Some(candidate) = source.sequence.get(at..at + peptide.len()) else {
+                    return true;
+                };
+                candidate != paired || !same_residue_composition(peptide, candidate)
+            })
+        {
             return None;
         }
         Some(paired)
     }
+}
+
+fn same_residue_composition(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left
+        .iter()
+        .map(|&residue| if residue == b'I' { b'L' } else { residue })
+        .collect::<Vec<_>>();
+    let mut right = right
+        .iter()
+        .map(|&residue| if residue == b'I' { b'L' } else { residue })
+        .collect::<Vec<_>>();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 /// The accession prefix with its separator, `ENTRAP_`.
@@ -213,6 +240,36 @@ pub fn entrapment_source(accession: &str) -> Option<&str> {
     accession
         .strip_prefix(ENTRAPMENT_PREFIX)
         .and_then(|rest| rest.strip_prefix('_'))
+}
+
+/// Finds normalized query sequences in normalized target proteins, including overlapping matches.
+pub fn target_substrings<'a>(
+    targets: impl Iterator<Item = &'a [u8]>,
+    queries: impl IntoIterator<Item = String>,
+) -> Result<HashSet<String>, aho_corasick::BuildError> {
+    let queries: Vec<String> = queries.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+    if queries.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let matcher = AhoCorasick::new(&queries)?;
+    let mut found = vec![false; queries.len()];
+    let mut sequence = Vec::new();
+    for target in targets {
+        sequence.clear();
+        sequence.extend(
+            target
+                .iter()
+                .map(|&residue| if residue == b'I' { b'L' } else { residue }),
+        );
+        for hit in matcher.find_overlapping_iter(&sequence) {
+            found[hit.pattern().as_usize()] = true;
+        }
+    }
+    Ok(queries
+        .into_iter()
+        .zip(found)
+        .filter_map(|(query, found)| found.then_some(query))
+        .collect())
 }
 
 #[cfg(test)]

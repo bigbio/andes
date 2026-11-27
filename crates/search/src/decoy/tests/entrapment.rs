@@ -112,6 +112,30 @@ fn repeated_entrapment_peptides_with_different_sources_have_no_pair() {
 }
 
 #[test]
+fn a_semi_specific_pair_rejects_mismatched_residue_composition() {
+    let searched = db(&[("P1", b"MALMKPQR"), ("ENTRAP_P1", b"MALKMPQR")]);
+    let digest = Proteases {
+        num_tolerable_termini: 1,
+        ..Proteases::default()
+    };
+    let lookup = EntrapmentLookup::new(searched.proteins.iter(), &digest).expect("entrapment");
+    assert_eq!(lookup.paired_target("ENTRAP_P1", b"ALK"), None);
+}
+
+#[test]
+fn target_substrings_fold_i_and_l_and_do_not_cross_proteins() {
+    let targets = [b"MAGPEPTIDEKA".as_slice(), b"AAACROSS".as_slice(), b"BORDERAAA"];
+    let queries = ["PEPTLDEK", "EPTLDE", "CROSSBORDER", "DECOYONLY", "ENTRAPONLY"]
+        .into_iter()
+        .map(String::from);
+    let found = target_substrings(targets.into_iter(), queries).expect("valid patterns");
+    assert_eq!(
+        found,
+        std::collections::HashSet::from(["PEPTLDEK".into(), "EPTLDE".into()])
+    );
+}
+
+#[test]
 fn identical_target_peptides_across_species_are_counted_once() {
     let searched = db(&[
         ("human_P1", b"MAGLEVTDPLSK"),

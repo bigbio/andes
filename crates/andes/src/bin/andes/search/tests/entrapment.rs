@@ -39,46 +39,21 @@ fn entrapment_rejects_disabled_decoys_and_prebuilt_decoy_entries() {
 }
 
 #[test]
-fn target_rescue_is_digest_independent_folded_overlapping_and_never_crosses_proteins() {
-    let proteins = [
-        ("P1", "MAGPEPTIDEKA"),
-        ("P2", "AAACROSS"),
-        ("P3", "BORDERAAA"),
-        ("XXX_P1", "DECOYONLY"),
-        ("ENTRAP_P1", "ENTRAPONLY"),
-    ]
-    .into_iter()
-    .map(|(accession, sequence)| model::protein::Protein {
-        accession: accession.into(),
-        sequence: sequence.as_bytes().to_vec(),
-        description: String::new(),
-        annotation: None,
-    })
-    .collect();
-    let index =
-        search::SearchIndex::from_prebuilt(model::protein::ProteinDb { proteins }, "XXX", None);
-    let rows: Vec<_> = [
-        "PEPTLDEK",
-        "EPTIDE",
-        "CROSSBORDER",
-        "DECOYONLY",
-        "ENTRAPONLY",
-    ]
-    .iter()
-    .enumerate()
-    .map(|(i, peptide)| psm(&i.to_string(), peptide, "ENTRAP_P1"))
-    .collect();
-    let lookup = EntrapmentLookup::new(
-        index.iter_target_proteins(),
-        &search::decoy::Proteases::default(),
-    )
-    .unwrap();
-    assert!(!lookup.is_target_peptide(b"PEPTIDEK"));
-    let rescued = shared::peptides(&index, rows.iter()).unwrap();
-    assert_eq!(
-        rescued,
-        std::collections::HashSet::from(["PEPTLDEK".into(), "EPTLDE".into()])
-    );
+fn entrapment_rejects_a_generated_accession_that_matches_a_decoy_affix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("targets.fasta");
+    std::fs::write(&path, ">P1\nMAGLEVTDPLSK\n").unwrap();
+    for args in [
+        vec!["andes", "--add-entrapment", "--decoy-prefix", "ENTRAP"],
+        vec!["andes", "--add-entrapment", "--decoy-suffix", "_P1"],
+    ] {
+        let cli = Args::try_parse_from(args).unwrap().search;
+        let message = match super::super::resolve::load_search_database(&cli, &path) {
+            Ok(_) => panic!("decoy-affix collision was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains("configured decoy prefix or suffix"), "{message}");
+    }
 }
 
 #[test]

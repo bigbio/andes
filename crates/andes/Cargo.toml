@@ -10,7 +10,6 @@ name = "andes"
 path = "src/bin/andes/main.rs"
 
 [dependencies]
-aho-corasick = "1"
 log = { workspace = true }
 xl = { path = "../xl" }
 glyco = { path = "../glyco" }

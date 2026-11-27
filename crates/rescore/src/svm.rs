@@ -922,9 +922,6 @@ fn partition(
     f_start: f64,
     sc: Option<&Screen<'_>>,
 ) -> (usize, f64) {
-    if sc.is_none() && t.len() > CHUNK {
-        return partition_all(t, o, subset, f_start);
-    }
     let m = t.len();
     let mut active = 0usize;
     let mut inactive = m;
@@ -940,58 +937,6 @@ fn partition(
             subset[inactive] = i;
         }
     });
-    (active, f)
-}
-
-/// `partition` of every row, placing the rows chunk by chunk in parallel: the active rows in
-/// ascending order at the front, the inactive ones in descending order at the back, as the
-/// serial loop places them. `f` is still summed row after row in ascending order, so its bits
-/// do not change.
-fn partition_all(t: &Train, o: &[f64], subset: &mut [usize], f_start: f64) -> (usize, f64) {
-    let m = t.len();
-    let nchunks = m.div_ceil(CHUNK);
-    let rows = |c: usize| c * CHUNK..((c + 1) * CHUNK).min(m);
-    let is_active = |i: usize| 1.0 - t.y(i) * o[i] > 0.0;
-    let active_in: Vec<usize> = (0..nchunks)
-        .into_par_iter()
-        .map(|c| rows(c).filter(|&i| is_active(i)).count())
-        .collect();
-    let active: usize = active_in.iter().sum();
-    let (front, back) = subset[..m].split_at_mut(active);
-    let mut fronts = Vec::with_capacity(nchunks);
-    let mut backs = Vec::with_capacity(nchunks);
-    let (mut f_rest, mut b_rest) = (front, back);
-    for (c, &k) in active_in.iter().enumerate() {
-        let (a, r) = f_rest.split_at_mut(k);
-        fronts.push(a);
-        f_rest = r;
-        let n_in = rows(c).len() - k;
-        let cut = b_rest.len() - n_in;
-        let (r, b) = b_rest.split_at_mut(cut);
-        backs.push(b);
-        b_rest = r;
-    }
-    fronts
-        .into_par_iter()
-        .zip(backs)
-        .enumerate()
-        .for_each(|(c, (a, b))| {
-            let (mut ia, mut ib) = (0usize, b.len());
-            for i in rows(c) {
-                if is_active(i) {
-                    a[ia] = i;
-                    ia += 1;
-                } else {
-                    ib -= 1;
-                    b[ib] = i;
-                }
-            }
-        });
-    let mut f = f_start;
-    for &i in &subset[..active] {
-        let diff = 1.0 - t.y(i) * o[i];
-        f += 0.5 * t.c(i) * diff * diff;
-    }
     (active, f)
 }
 
@@ -1309,36 +1254,6 @@ fn mfn_timed(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn partition_of_every_row_puts_active_rows_ascending_then_inactive_descending() {
-        let m = 3 * CHUNK + 17;
-        let x = Rows::from_dense(vec![0.0; m], m, 1);
-        let rows: Vec<usize> = (0..m).collect();
-        let pos: Vec<bool> = (0..m).map(|i| i % 3 == 0).collect();
-        let t = Train {
-            x: &x,
-            rows: &rows,
-            pos: &pos,
-            cpos: 2.0,
-            cneg: 0.5,
-        };
-        let o: Vec<f64> = (0..m).map(|i| ((i * 37) % 11) as f64 / 4.0 - 1.0).collect();
-        let mut subset = vec![0usize; m];
-        let (active, f) = partition(&t, &o, &mut subset, 0.25, None);
-        let margin = |i: usize| 1.0 - t.y(i) * o[i];
-        let want_active: Vec<usize> = (0..m).filter(|&i| margin(i) > 0.0).collect();
-        let want_inactive: Vec<usize> = (0..m).rev().filter(|&i| margin(i) <= 0.0).collect();
-        assert!(!want_active.is_empty() && !want_inactive.is_empty());
-        assert_eq!(&subset[..active], &want_active[..]);
-        assert_eq!(&subset[active..], &want_inactive[..]);
-        let mut want_f = 0.25;
-        for &i in &want_active {
-            let d = margin(i);
-            want_f += 0.5 * t.c(i) * d * d;
-        }
-        assert_eq!(f.to_bits(), want_f.to_bits());
-    }
 
     #[test]
     fn spilled_scan_repeats_a_row_as_the_ram_scan_does() {

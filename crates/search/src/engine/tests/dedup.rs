@@ -148,3 +148,67 @@ fn dedup_keeps_highest_rank_score_survivor() {
     assert_eq!(out.len(), 1);
     assert!((out[0].rank_score - 60.4).abs() < f32::EPSILON);
 }
+
+fn decoy_or_target(seq: &[u8], protein_index: usize, is_decoy: bool) -> Candidate {
+    Candidate {
+        peptide: seq_peptide(seq),
+        protein_index,
+        start_offset_in_protein: 0,
+        is_decoy,
+        is_protein_n_term: false,
+        is_protein_c_term: false,
+    }
+}
+
+#[test]
+fn i_l_twins_are_one_psm_with_the_union_of_their_candidates_and_the_lower_sequence() {
+    for is_decoy in [false, true] {
+        let cands = vec![
+            decoy_or_target(b"PEPTLDELK", 0, is_decoy),
+            decoy_or_target(b"PEPTIDELK", 1, is_decoy),
+            decoy_or_target(b"PEPTLDEIK", 2, is_decoy),
+            decoy_or_target(b"PEPTIDELK", 3, is_decoy),
+        ];
+        for order in [[0u32, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]] {
+            let psms = order.iter().map(|&i| psm(i, 40.0, 40.0)).collect();
+            let out = dedup_pepseq_score(psms, &cands);
+            assert_eq!(out.len(), 1, "twins merge (decoy {is_decoy})");
+            let primary = out[0].primary_candidate_idx() as usize;
+            assert_eq!(
+                cands[primary].peptide.residues[4].residue, b'I',
+                "the lowest database sequence reports, whatever the input order"
+            );
+            assert_eq!(cands[primary].peptide.residues[7].residue, b'L');
+            let mut idxs: Vec<u32> = out[0].candidate_idxs.to_vec();
+            idxs.sort_unstable();
+            assert_eq!(idxs, vec![0, 1, 2, 3], "every twin's protein is kept");
+        }
+    }
+}
+
+#[test]
+fn a_higher_scoring_twin_reports_and_a_target_never_merges_with_a_decoy() {
+    let cands = vec![
+        decoy_or_target(b"PEPTIDEK", 0, false),
+        decoy_or_target(b"PEPTLDEK", 1, false),
+        decoy_or_target(b"PEPTLDEK", 2, true),
+    ];
+    let out = dedup_pepseq_score(vec![psm(0, 40.0, 40.0), psm(1, 40.2, 40.0)], &cands);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].primary_candidate_idx(), 1);
+    assert_eq!(out[0].candidate_idxs.len(), 2);
+    let out = dedup_pepseq_score(vec![psm(0, 40.0, 40.0), psm(2, 40.0, 40.0)], &cands);
+    assert_eq!(out.len(), 2, "target and decoy stay separate rows");
+}
+
+#[test]
+fn i_l_twins_share_the_competitor_key_but_not_the_tie_key() {
+    let a = seq_peptide(b"PEPTIDEK");
+    let b = seq_peptide(b"PEPTLDEK");
+    assert_eq!(competitor_key(&a), competitor_key(&b));
+    assert_ne!(peptidoform_key(&a), peptidoform_key(&b));
+    assert_ne!(
+        competitor_key(&a),
+        competitor_key(&seq_peptide(b"PEPTVDEK"))
+    );
+}

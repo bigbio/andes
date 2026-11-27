@@ -1,6 +1,7 @@
-//! Peptide-level dedup of PSMs and the peptidoform keys it uses, the I/L-folded bare-sequence
-//! sets that relabel decoys colliding with a target, and the merge of candidate indices.
-//! Part of the match engine.
+//! Peptide-level dedup of PSMs, where I/L twins are one PSM, and the peptidoform keys it uses;
+//! the I/L-folded bare-sequence sets that relabel decoys colliding with a target (I and L are
+//! isobaric, so such a decoy is the target's precursor and fragment ladder); the merge of
+//! candidate indices. Part of the match engine.
 
 use super::*;
 
@@ -36,7 +37,7 @@ pub(crate) fn dedup_pepseq_score(psms: Vec<PsmMatch>, candidates: &[Candidate]) 
             Entry::Occupied(mut slot) => {
                 let existing = slot.get_mut();
                 merge_unique_candidate_idxs(&mut existing.candidate_idxs, &psm.candidate_idxs);
-                if psm.rank_score > existing.rank_score {
+                if survives(&psm, existing, candidates) {
                     let merged_idxs = std::mem::take(&mut existing.candidate_idxs);
                     let mut survivor = psm;
                     merge_unique_candidate_idxs(&mut survivor.candidate_idxs, &merged_idxs);
@@ -51,12 +52,53 @@ pub(crate) fn dedup_pepseq_score(psms: Vec<PsmMatch>, candidates: &[Candidate]) 
     out
 }
 
+/// Whether `psm` replaces `existing` as the reported row of their dedup group: a higher rank
+/// score wins; at an equal rank score (I/L twins score the same), the lower database sequence
+/// wins, so the twins of a precursor report one sequence in every spectrum, the same rule for
+/// targets and decoys and independent of the protein order of the database.
+fn survives(psm: &PsmMatch, existing: &PsmMatch, candidates: &[Candidate]) -> bool {
+    match psm.rank_score.total_cmp(&existing.rank_score) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => residue_order(psm, existing, candidates).is_lt(),
+    }
+}
+
+/// The order of the database sequences of two PSMs' primary candidates; at an equal rank score
+/// the lower sequence of an I/L twin pair reports.
+pub(crate) fn residue_order(
+    a: &PsmMatch,
+    b: &PsmMatch,
+    candidates: &[Candidate],
+) -> std::cmp::Ordering {
+    let residues = |p: &PsmMatch| {
+        candidates[p.primary_candidate_idx() as usize]
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| aa.residue)
+    };
+    residues(a).cmp(residues(b))
+}
+
 #[inline]
 pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
+    peptidoform_hash(peptide, |r| r)
+}
+
+/// The key of a spectrum's competing peptidoforms (delta, reference and runner-up scores): I/L
+/// twins share it, so a twin is never the runner-up of its own peptide.
+#[inline]
+pub(crate) fn competitor_key(peptide: &model::Peptide) -> u64 {
+    peptidoform_hash(peptide, fold_isoleucine)
+}
+
+#[inline]
+fn peptidoform_hash(peptide: &model::Peptide, residue: impl Fn(u8) -> u8) -> u64 {
     use std::hash::Hasher;
     let mut h = rustc_hash::FxHasher::default();
     for aa in &peptide.residues {
-        h.write_u8(aa.residue);
+        h.write_u8(residue(aa.residue));
         let units = aa
             .mod_
             .as_ref()
@@ -67,15 +109,7 @@ pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
     h.finish()
 }
 
-/// I and L are isobaric, so a decoy peptide that equals a target peptide with I and L folded is
-/// the same precursor and fragment ladder as that target.
-pub(super) fn fold_isoleucine(r: u8) -> u8 {
-    if r == b'I' {
-        b'L'
-    } else {
-        r
-    }
-}
+pub(super) use model::isomers::fold_isoleucine;
 
 /// The residues of a candidate with I folded to L, the key of the target peptide set.
 pub(super) fn bare_residues(cand: &Candidate) -> Box<[u8]> {
@@ -206,6 +240,8 @@ pub(super) fn build_target_bare_seqs_where(
     folded_set(spans)
 }
 
+/// The identity of a peptidoform in the dedup of one spectrum's PSMs: its residues with I read as
+/// L and the mass of each residue's modification, so I/L twins are one PSM.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct PepDedupKey {
     residues: Vec<u8>,
@@ -218,7 +254,7 @@ impl PepDedupKey {
         let mut residues = Vec::with_capacity(len);
         let mut mod_units = Vec::with_capacity(len);
         for aa in &peptide.residues {
-            residues.push(aa.residue);
+            residues.push(fold_isoleucine(aa.residue));
             mod_units.push(
                 aa.mod_
                     .as_ref()

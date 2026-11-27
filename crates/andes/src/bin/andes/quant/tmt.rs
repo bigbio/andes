@@ -965,7 +965,8 @@ mod tests {
                 peptides_per_accession: Vec::new(),
                 is_decoy: false,
             });
-            inf.peptide_group.insert(pep.to_string(), i);
+            inf.peptide_group
+                .insert(model::isomers::fold_isoleucine_text(pep), i);
         }
         inf
     }

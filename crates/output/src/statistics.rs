@@ -606,12 +606,13 @@ impl IdentificationSummary {
         unlinked_psms: usize,
         ctx: &SummaryContext,
     ) -> Self {
-        let precursors: HashSet<(&str, u8)> = facts
+        use model::isomers::fold_isoleucine_text as fold;
+        let precursors: HashSet<(String, u8)> = facts
             .iter()
-            .map(|f| (f.peptidoform.as_str(), f.charge))
+            .map(|f| (fold(&f.peptidoform), f.charge))
             .collect();
-        let peptidoforms: HashSet<&str> = facts.iter().map(|f| f.peptidoform.as_str()).collect();
-        let sequences: HashSet<&str> = facts.iter().map(|f| f.sequence.as_str()).collect();
+        let peptidoforms: HashSet<String> = facts.iter().map(|f| fold(&f.peptidoform)).collect();
+        let sequences: HashSet<String> = facts.iter().map(|f| fold(&f.sequence)).collect();
 
         let mut ppm: Vec<f64> = facts
             .iter()

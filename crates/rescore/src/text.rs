@@ -28,8 +28,52 @@ enum Data {
     Spill(PathBuf, File),
 }
 
+/// Rows per group of `Offsets`: a group's records must hold fewer than 4 GiB together.
+const OFFSET_GROUP_ROWS: usize = 1 << 12;
+
+/// Record end offsets as one `u64` base per `OFFSET_GROUP_ROWS` rows plus a `u32` per row from
+/// that base: about 4 bytes a row instead of 8.
+struct Offsets {
+    base: Vec<u64>,
+    low: Vec<u32>,
+}
+
+impl Offsets {
+    fn new() -> Offsets {
+        Offsets {
+            base: vec![0],
+            low: vec![0],
+        }
+    }
+
+    /// Offset `i`; `i = 0` is the start of the first record.
+    fn get(&self, i: usize) -> u64 {
+        self.base[i / OFFSET_GROUP_ROWS] + u64::from(self.low[i])
+    }
+
+    fn len(&self) -> usize {
+        self.low.len()
+    }
+
+    fn last(&self) -> u64 {
+        self.get(self.low.len() - 1)
+    }
+
+    fn push(&mut self, end: u64) -> Result<(), String> {
+        let i = self.low.len();
+        if i % OFFSET_GROUP_ROWS == 0 {
+            self.base.push(end);
+        }
+        let low = u32::try_from(end - self.base[i / OFFSET_GROUP_ROWS]).map_err(|_| {
+            format!("PSM texts of {OFFSET_GROUP_ROWS} consecutive rows exceed 4 GiB")
+        })?;
+        self.low.push(low);
+        Ok(())
+    }
+}
+
 pub struct Texts {
-    offsets: Vec<u64>,
+    offsets: Offsets,
     data: Data,
     budget: Arc<Budget>,
     _ram: Reservation,
@@ -51,11 +95,11 @@ const TEXT_ROW_OVERHEAD_BYTES: u64 = 128;
 impl Texts {
     /// Bytes of every record together.
     pub fn bytes(&self) -> u64 {
-        self.offsets.last().copied().unwrap_or(0)
+        self.offsets.last()
     }
 
     pub fn len(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
+        self.offsets.len() - 1
     }
 
     pub fn is_empty(&self) -> bool {
@@ -131,7 +175,7 @@ impl Texts {
         rows: &[usize],
         ks: &[usize],
     ) -> std::io::Result<Vec<RowText>> {
-        let span = |k: usize| (self.offsets[rows[k]], self.offsets[rows[k] + 1]);
+        let span = |k: usize| (self.offsets.get(rows[k]), self.offsets.get(rows[k] + 1));
         let mut out = Vec::with_capacity(ks.len());
         let mut buf = Vec::new();
         let mut a = 0usize;
@@ -158,7 +202,7 @@ impl Texts {
     }
 
     pub fn get(&self, i: usize) -> Result<RowText, String> {
-        let (a, b) = (self.offsets[i], self.offsets[i + 1]);
+        let (a, b) = (self.offsets.get(i), self.offsets.get(i + 1));
         let bytes = match &self.data {
             Data::Ram(v) => v[a as usize..b as usize].to_vec(),
             Data::Spill(path, file) => {
@@ -196,7 +240,7 @@ enum Sink {
 }
 
 pub(crate) struct TextsBuilder {
-    offsets: Vec<u64>,
+    offsets: Offsets,
     len: u64,
     budget: Arc<Budget>,
     ram: Reservation,
@@ -206,7 +250,7 @@ pub(crate) struct TextsBuilder {
 impl TextsBuilder {
     pub(crate) fn new(budget: &Arc<Budget>) -> Self {
         TextsBuilder {
-            offsets: vec![0],
+            offsets: Offsets::new(),
             len: 0,
             budget: budget.clone(),
             ram: Reservation::none(),
@@ -240,13 +284,12 @@ impl TextsBuilder {
                 .map_err(|e| format!("write spill file {}: {e}", path.display()))?;
         }
         self.len += n;
-        self.offsets.push(self.len);
-        Ok(())
+        self.offsets.push(self.len)
     }
 
     pub(crate) fn finish(mut self) -> Result<Texts, String> {
         let sink = std::mem::replace(&mut self.sink, Sink::Ram(Vec::new()));
-        let offsets = std::mem::take(&mut self.offsets);
+        let offsets = std::mem::replace(&mut self.offsets, Offsets::new());
         let ram = std::mem::replace(&mut self.ram, Reservation::none());
         let data = match sink {
             Sink::Ram(v) => Data::Ram(v),
@@ -282,6 +325,25 @@ impl Drop for TextsBuilder {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn offsets_cross_group_boundaries_and_reject_a_group_over_4_gib() {
+        let mut o = Offsets::new();
+        let mut want = vec![0u64];
+        let mut end = 0u64;
+        for i in 0..3 * OFFSET_GROUP_ROWS + 5 {
+            end += 1_000 + (i % 7) as u64 * 100_000;
+            o.push(end).unwrap();
+            want.push(end);
+        }
+        assert_eq!(o.len(), want.len());
+        for (i, &w) in want.iter().enumerate() {
+            assert_eq!(o.get(i), w, "offset {i}");
+        }
+        assert_eq!(o.last(), end);
+        let mut big = Offsets::new();
+        assert!(big.push(u64::from(u32::MAX) + 1).is_err());
+    }
     use super::*;
 
     fn texts(budget_bytes: u64, dir: &std::path::Path, n: usize) -> Texts {

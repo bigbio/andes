@@ -302,7 +302,7 @@ const CHUNK_BYTES: usize = 4 << 20;
 /// budget: its `RowMeta` and its text offset. They are charged to the storage budget as the
 /// rows are read, so the rest of the budget is memory the stores, training rows and fits can
 /// really use.
-const PER_ROW_BYTES: u64 = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u64>()) as u64;
+const PER_ROW_BYTES: u64 = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u32>()) as u64;
 
 const IN_FLIGHT_BYTES_PER_CHUNK: u64 = 4 * CHUNK_BYTES as u64;
 
@@ -591,7 +591,7 @@ mod tests {
         assert!(!pin.rows.is_spilled() && !pin.texts.is_spilled());
         let used = pin.budget.total() - pin.budget.available();
         let stores = (rows * 2 * 4) as u64 + pin.texts.bytes();
-        let kept = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u64>()) as u64;
+        let kept = (std::mem::size_of::<RowMeta>() + std::mem::size_of::<u32>()) as u64;
         assert_eq!(used, stores + rows as u64 * kept);
     }
 

@@ -41,6 +41,10 @@ impl IsomerClass {
         Ok(c)
     }
 
+    /// Parses a peptidoform (`K.PEPT+79.97IDE.R`, `[UNIMOD:1]-PEPM[UNIMOD:35]K`). Modification
+    /// masses are summed per residue, a terminal modification counting on the first or last
+    /// residue, so a terminal and a first-residue modification written apart give the same class
+    /// as the two written as one summed mass, as `of_peptide` gives it.
     pub fn parse_into(
         &mut self,
         text: &str,
@@ -55,10 +59,20 @@ impl IsomerClass {
             text
         };
         let bytes = core.as_bytes();
+        let mut pending: Option<f64> = None;
+        let mut on_residue: Option<f64> = None;
+        let add = |mass: f64, residues: &[u8], pending: &mut Option<f64>, on: &mut Option<f64>| {
+            let slot = if residues.is_empty() { pending } else { on };
+            *slot = Some(slot.unwrap_or(0.0) + mass);
+        };
         let mut i = 0;
         while i < bytes.len() {
             let c = bytes[i];
             if c.is_ascii_uppercase() {
+                if let Some(m) = on_residue.take() {
+                    self.mod_units.push(mod_mass_units(m));
+                }
+                on_residue = pending.take();
                 self.residues.push(c);
                 i += 1;
             } else if c == b'[' {
@@ -76,7 +90,7 @@ impl IsomerClass {
                     resolve(tag)
                         .ok_or_else(|| format!("{text}: no mass for modification [{tag}]"))?
                 };
-                self.mod_units.push(mod_mass_units(mass));
+                add(mass, &self.residues, &mut pending, &mut on_residue);
                 i = end + 1;
             } else if (c == b'+' || c == b'-')
                 && bytes
@@ -91,13 +105,16 @@ impl IsomerClass {
                 let mass = core[start..i]
                     .parse::<f64>()
                     .map_err(|_| format!("{text}: unreadable mass {}", &core[start..i]))?;
-                self.mod_units.push(mod_mass_units(mass));
+                add(mass, &self.residues, &mut pending, &mut on_residue);
             } else {
                 i += 1;
             }
         }
         if self.residues.is_empty() {
             return Err(format!("{text}: no residues"));
+        }
+        if let Some(m) = on_residue {
+            self.mod_units.push(mod_mass_units(m));
         }
         self.mod_units.sort_unstable();
         Ok(())
@@ -124,6 +141,27 @@ pub fn mod_units_match(a: &[i64], b: &[i64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifications_are_summed_per_residue_with_terminal_ones_on_the_end_residue() {
+        let r = |t: &str| match t {
+            "UNIMOD:5" => Some(43.005814),
+            "UNIMOD:35" => Some(15.994915),
+            "UNIMOD:4" => Some(57.021464),
+            _ => None,
+        };
+        let pin = IsomerClass::parse("K.M+59.00073QWNVPR.T", r).unwrap();
+        let table = IsomerClass::parse("[UNIMOD:5]-M[UNIMOD:35]QWNVPR", r).unwrap();
+        assert!(pin.matches(&table));
+        let cam = IsomerClass::parse("K.C+100.02728AC+57.02146TVVNR.D", r).unwrap();
+        let cam_table = IsomerClass::parse("[UNIMOD:5]-C[UNIMOD:4]AC[UNIMOD:4]TVVNR", r).unwrap();
+        assert!(cam.matches(&cam_table));
+        let carboxymethyl = IsomerClass::parse("AC[+58.005479]MK", r).unwrap();
+        let acetyl_oxidation = IsomerClass::parse("[+42.010565]-ACM[+15.994915]K", r).unwrap();
+        assert!(!carboxymethyl.matches(&acetyl_oxidation));
+        let c_term = IsomerClass::parse("PEPTIDEK-[+0.984016]", r).unwrap();
+        assert_eq!(c_term.mod_units(), &[mod_mass_units(0.984016)]);
+    }
     use crate::{AminoAcid, ModLocation, Modification, ResidueSpec};
 
     fn resolve(tag: &str) -> Option<f64> {

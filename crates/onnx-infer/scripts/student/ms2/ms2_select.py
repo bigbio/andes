@@ -92,12 +92,17 @@ def _ident_key(peptidoform: str):
     if k is None:
         return None
     seq, mods = k
-    return seq.replace("I", "L"), tuple(m for m in mods if m[1] != CARBAMIDOMETHYL)
+
+    def fixed_cam(pos, uid):
+        return uid == CARBAMIDOMETHYL and seq[max(pos, 1) - 1: max(pos, 1)] == "C"
+
+    return seq.replace("I", "L"), tuple(m for m in mods if not fixed_cam(*m))
 
 
 def same_identification(a: str, b: str) -> bool:
     """Whether two ProForma peptidoforms name the same identification: I and L are equal, and
-    carbamidomethylation (a fixed mod some submitters leave out) is ignored."""
+    carbamidomethylation on C (a fixed mod some submitters leave out) is ignored. Carbamidomethylation
+    elsewhere (N-terminus, K: alkylation side products searched as variable mods) must agree."""
     ka = _ident_key(a)
     return ka is not None and ka == _ident_key(b)
 

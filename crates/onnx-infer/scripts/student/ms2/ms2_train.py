@@ -34,8 +34,9 @@ import pyarrow.parquet as pq
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import ACTIVATIONS, N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
+from ms2_common import ACTIVATIONS, N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, label_index, parse_proforma, split_of  # noqa: E402
 from ms2_model import Ms2Cnn, config_of, export_weights, make_batch, masked_sa_loss, teacher_kl  # noqa: E402
+from ms2_manifest import BENCHMARK  # noqa: E402
 from ms2_mix import DATASET_CAP, DATASET_CAP_SCARCE, load_hla_runs, plan, shard_files, write_mix  # noqa: E402
 from rt_model import encode  # noqa: E402
 
@@ -55,18 +56,26 @@ def v1_channels(t, col):
 class Data:
     """All rows in memory: per-row metadata arrays plus flat float16 intensities."""
 
-    def __init__(self, files, min_matched, min_explained, max_rows, seed, use_teacher, keep=None):
+    def __init__(self, files, min_matched, min_explained, max_rows, seed, use_teacher, keep=None, version=2):
+        self.n_ion = N_ION_V2 if version >= 2 else N_ION
         tables = []
         has_teacher = use_teacher
         for f in files:
             names = pq.ParquetFile(f).schema_arrow.names
             has_teacher = has_teacher and "teacher" in names
         for f in files:
-            t = pq.read_table(f, columns=COLS + (["teacher"] if has_teacher else []))
             meta = pq.ParquetFile(f).schema_arrow.metadata or {}
-            if meta.get(b"andes.ms2_shard.schema", b"1.0").startswith(b"2."):
-                # v1 training reads the first 12 channels of a v2 shard
+            v2_shard = meta.get(b"andes.ms2_shard.schema", b"1.0").startswith(b"2.")
+            if version >= 2 and not v2_shard:
+                sys.exit(f"{f}: a version 2 model needs v2 shards (schema 2.x)")
+            cols = COLS + (["label"] if v2_shard else []) + (["teacher"] if has_teacher else [])
+            t = pq.read_table(f, columns=cols)
+            if v2_shard and version < 2:
                 t = v1_channels(t, "intensities")
+                if has_teacher:
+                    t = v1_channels(t, "teacher")
+            if not v2_shard:
+                t = t.append_column("label", pa.array(["none"] * t.num_rows, pa.string()))
             if keep is not None:
                 t = t.filter(pa.array(keep[f]))
             else:
@@ -97,6 +106,9 @@ class Data:
         ins = pc.dictionary_encode(t["instrument"]).combine_chunks()
         self.instr = np.array([instrument_class(x) for x in ins.dictionary.to_pylist()])[ins.indices.to_numpy()]
         self.act_name = np.asarray(acts.dictionary.to_pylist(), dtype=object)[acts.indices.to_numpy()]
+        labs = pc.dictionary_encode(t["label"]).combine_chunks()
+        self.label = np.array([label_index(x) for x in labs.dictionary.to_pylist()],
+                              np.int64)[labs.indices.to_numpy()] if version >= 2 else np.zeros(t.num_rows, np.int64)
 
         def flat(col):
             arr = t[col].combine_chunks()
@@ -110,7 +122,7 @@ class Data:
         self.split = sp[seqs.indices.to_numpy()]
         self.length = np.array([len(p[0]) if p else 0 for p in self.seqmods])[self.form_id]
         ok = np.array([e is not None for e in self.enc])[self.form_id]
-        ok &= (self.off[1:] - self.off[:-1]) == (self.length - 1) * N_ION
+        ok &= (self.off[1:] - self.off[:-1]) == (self.length - 1) * self.n_ion
         # A shard-only activation (ms2_common.SHARD_ONLY_ACTIVATIONS, e.g. UVPD) has no model row: never train it as
         # another class.
         ok &= np.array([x in ACTIVATIONS for x in acts.dictionary.to_pylist()], bool)[acts.indices.to_numpy()]
@@ -120,16 +132,17 @@ class Data:
         items = []
         for i in idx:
             e = self.enc[self.form_id[i]]
-            items.append((e[0], e[1], int(self.charge[i]), float(self.nce[i]), int(self.act[i]), int(self.instr[i])))
+            items.append((e[0], e[1], int(self.charge[i]), float(self.nce[i]), int(self.act[i]), int(self.instr[i]),
+                          int(self.label[i])))
         T, C, num, act, ins, lab = (x.to(device) for x in make_batch(items))
         S = T.shape[1] - 2  # sites in the padded batch (model output rows)
-        tgt = np.full((len(idx), S, N_ION), -1.0, np.float32)
-        tch = np.full((len(idx), S, N_ION), -1.0, np.float32) if self.teacher is not None else None
+        tgt = np.full((len(idx), S, self.n_ion), -1.0, np.float32)
+        tch = np.full((len(idx), S, self.n_ion), -1.0, np.float32) if self.teacher is not None else None
         for b, i in enumerate(idx):
             n = self.length[i] - 1
-            tgt[b, :n] = self.vals[self.off[i]: self.off[i + 1]].reshape(n, N_ION)
+            tgt[b, :n] = self.vals[self.off[i]: self.off[i + 1]].reshape(n, self.n_ion)
             if tch is not None:
-                tch[b, :n] = self.teacher[self.off[i]: self.off[i + 1]].reshape(n, N_ION)
+                tch[b, :n] = self.teacher[self.off[i]: self.off[i + 1]].reshape(n, self.n_ion)
         tgt = torch.from_numpy(tgt).to(device)
         tch = torch.from_numpy(tch).to(device) if tch is not None else None
         return (T, C, num, act, ins, lab), tgt, tch
@@ -180,7 +193,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--shards", nargs="+", required=True, help="parquet files or directories")
     p.add_argument("--out", required=True)
-    p.add_argument("--holdout-datasets", nargs="*", default=["PXD019263", "PXD005235", "PXD012255"])
+    p.add_argument("--version", type=int, choices=(1, 2), default=2,
+                   help="AMS2 model version: 2 = 19 ion channels (3+, a, c, z-dot) and the label condition")
+    p.add_argument("--holdout-datasets", nargs="+", required=True,
+                   help="datasets never trained or validated on; choose them per training cell")
+    p.add_argument("--exclude-datasets", nargs="*", default=[],
+                   help="datasets dropped from every split (e.g. labels known to be defective)")
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--min-explained", type=float, default=0.0)
     p.add_argument("--max-rows", type=int, default=0, help="subsample the shards (0 = all)")
@@ -220,7 +238,14 @@ def main():
     write_mix(mix, os.path.join(a.out, "mix.tsv"))
     print(f"mix: {len(mix)} units, {sum(r[3] for r in mix)} eligible rows, {sum(r[4] for r in mix)} after the "
           f"per-dataset cap ({a.dataset_cap}, scarce {a.dataset_cap_scarce})", flush=True)
-    data = Data(files, a.min_matched, a.min_explained, a.max_rows, a.seed, a.teacher_weight > 0, keep)
+    data = Data(files, a.min_matched, a.min_explained, a.max_rows, a.seed, a.teacher_weight > 0, keep, a.version)
+    bench = np.isin(data.dataset, sorted(BENCHMARK))
+    if bench.any():
+        sys.exit(f"benchmark datasets in the shards: {sorted(set(data.dataset[bench]))}")
+    excluded = np.isin(data.dataset, a.exclude_datasets)
+    if excluded.any():
+        print(f"excluded {int(excluded.sum())} rows of {sorted(set(data.dataset[excluded]))}", flush=True)
+    data.ok &= ~excluded
     hold = np.isin(data.dataset, a.holdout_datasets)
     train = np.flatnonzero(data.ok & ~hold & (data.split == "train"))
     val = np.flatnonzero(data.ok & ~hold & (data.split == "val"))
@@ -241,7 +266,7 @@ def main():
         w = np.array([1 / np.sqrt(counts[k]) for k in data.act[train]])
         weights = w / w.sum()
 
-    model = Ms2Cnn(a.emb, a.ch, a.dilations, a.n_heads, a.cond_emb, a.film_hidden).to(dev)
+    model = Ms2Cnn(a.emb, a.ch, a.dilations, a.n_heads, a.cond_emb, a.film_hidden, a.version).to(dev)
     if a.init:
         model.load_state_dict(torch.load(os.path.join(a.init, "model.pt"), map_location=dev))
     n_params = sum(p.numel() for p in model.parameters())

@@ -31,8 +31,13 @@ import sys
 
 import pyarrow.parquet as pq
 
-# Never trained on: the andes benchmark datasets.
-BENCHMARK = {"PXD070049", "PXD001819", "PXD007683", "PXD007653", "PXD005553", "PXD002047"}
+# Never trained on: the andes benchmark datasets (docs/benchmarks), the GTEx study (PXD016999) and
+# PXD004940 (excluded at the M1 selection).
+BENCHMARK = frozenset({
+    "PXD001819", "PXD002047", "PXD004940", "PXD005553", "PXD007653", "PXD007683", "PXD009740", "PXD009815",
+    "PXD014415", "PXD014750", "PXD016921", "PXD016999", "PXD017803", "PXD028735", "PXD030780", "PXD031032",
+    "PXD042233", "PXD053748", "PXD064202", "PXD065680", "PXD070049",
+})
 
 KNOWN_GROUPS = {
     **{d: "HCD-LFQ" for d in (

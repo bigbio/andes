@@ -33,8 +33,8 @@ from ms2_select import run_stem  # noqa: E402
 
 DATASET_CAP = 60000
 DATASET_CAP_SCARCE = 400000
-SCARCE_CELLS = frozenset({"CID-ITMS", "timsTOF", "EThcD-ETD", "HLA"})
-MIX_COLS = ["dataset", "run", "label", "activation", "instrument", "n_matched", "explained"]
+SCARCE_CELLS = frozenset({"CID-ITMS", "TMT-CID-ITMS", "timsTOF", "EThcD-ETD", "HLA", "Astral"})
+MIX_COLS = ["dataset", "run", "label", "activation", "instrument", "n_matched", "explained", "peptidoform"]
 
 
 def shard_files(paths):
@@ -81,8 +81,9 @@ def cap_of(cell: str, cap: int, cap_scarce: int) -> int:
 
 def plan(files, hla_runs: set, min_matched: int, min_explained: float, cap: int, cap_scarce: int, seed: int):
     """Rows to train per file and the mix. Returns ({file: bool mask over its rows}, mix rows
-    ``(dataset, cell, rows, eligible, kept)``). A cap of 0 keeps every eligible row of its units."""
-    masks, codes, datasets = {}, [], {}
+    ``(dataset, cell, rows, eligible, kept, distinct eligible, distinct kept)``), the distinct counts
+    being peptidoforms. A cap of 0 keeps every eligible row of its units."""
+    masks, codes, datasets, forms, form_ids = {}, [], {}, {}, []
     for f in files:
         names = pq.ParquetFile(f).schema_arrow.names
         t = pq.read_table(f, columns=[c for c in MIX_COLS if c in names])
@@ -94,9 +95,14 @@ def plan(files, hla_runs: set, min_matched: int, min_explained: float, cap: int,
         cells = row_cells(t, f, hla_runs)
         ds = np.asarray([datasets.setdefault(d, len(datasets)) for d in t["dataset"].to_pylist()], np.int64)
         codes.append(ds * len(CELLS) + cells)
+        enc = pc.dictionary_encode(t["peptidoform"]).combine_chunks()
+        gid = np.asarray([forms.setdefault(x, len(forms)) for x in enc.dictionary.to_pylist()], np.int64)
+        form_ids.append(gid[enc.indices.to_numpy(zero_copy_only=False).astype(np.int64)] if len(gid) else
+                        np.full(t.num_rows, -1, np.int64))
         masks[f] = ok
     code = np.concatenate(codes) if codes else np.zeros(0, np.int64)
     elig = np.concatenate([masks[f] for f in files]) if files else np.zeros(0, bool)
+    form = np.concatenate(form_ids) if form_ids else np.zeros(0, np.int64)
     keep = elig.copy()
     rng = np.random.default_rng(seed)
     names = {v: k for k, v in datasets.items()}
@@ -109,7 +115,8 @@ def plan(files, hla_runs: set, min_matched: int, min_explained: float, cap: int,
         if lim and len(e) > lim:
             keep[e] = False
             keep[rng.choice(e, lim, replace=False)] = True
-        mix.append((ds, cell, len(rows), len(e), int(keep[rows].sum())))
+        kept = rows[keep[rows]]
+        mix.append((ds, cell, len(rows), len(e), len(kept), len(np.unique(form[e])), len(np.unique(form[kept]))))
     off = 0
     for f in files:
         n = len(masks[f])
@@ -120,7 +127,7 @@ def plan(files, hla_runs: set, min_matched: int, min_explained: float, cap: int,
 
 def write_mix(mix, path: str):
     with open(path, "w") as fh:
-        fh.write("dataset\tcell\trows\teligible\tkept\n")
+        fh.write("dataset\tcell\trows\teligible\tkept\tdistinct_eligible\tdistinct_kept\n")
         for r in sorted(mix):
             fh.write("\t".join(map(str, r)) + "\n")
 

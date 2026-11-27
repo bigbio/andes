@@ -42,6 +42,13 @@ def test_different_peptidoforms_stay_different():
         assert not same_identification(a, b), (a, b)
 
 
+def test_carbamidomethyl_is_ignored_on_c_only():
+    assert same_identification("PEPC[UNIMOD:4]TIDEK", "PEPCTIDEK"), "fixed CAM left out by a submitter"
+    assert not same_identification("PEPTIDEK[UNIMOD:4]", "PEPTIDEK"), "CAM on K is an alkylation side product"
+    assert not same_identification("[UNIMOD:4]-PEPTIDEK", "PEPTIDEK"), "N-terminal CAM is a side product"
+    assert same_identification("C[UNIMOD:4]PEPTIDEK", "CPEPTIDEK"), "CAM on a first-residue C"
+
+
 def test_key_keeps_other_positions():
     assert peptidoform_key("[UNIMOD:737]-PEPS[UNIMOD:21]K[UNIMOD:737]") == (
         "PEPSK", ((0, 737), (4, 21), (5, 737)))

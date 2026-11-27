@@ -18,7 +18,8 @@ def shard(path, ds, run, n, activation="HCD-FTMS", instrument="Q Exactive HF", l
     os.makedirs(os.path.dirname(path), exist_ok=True)
     pq.write_table(pa.table({
         "dataset": [ds] * n, "run": [run] * n, "label": [label] * n, "activation": [activation] * n,
-        "instrument": [instrument] * n, "n_matched": [6] * n, "explained": np.linspace(0, 1, n)}), path)
+        "instrument": [instrument] * n, "n_matched": [6] * n, "explained": np.linspace(0, 1, n),
+        "peptidoform": [f"PEPTIDE{i % 7}K" for i in range(n)]}), path)
 
 
 def test_row_cell():
@@ -26,6 +27,8 @@ def test_row_cell():
     assert row_cell("none", "HCD-FTMS", "Orbitrap Fusion Lumos") == "Tribrid"
     assert row_cell("none", "CID-ITMS", "Orbitrap Fusion Lumos") == "CID-ITMS"
     assert row_cell("TMT", "HCD-FTMS", "Q Exactive") == "TMT"
+    assert row_cell("TMT", "CID-ITMS", "Orbitrap Fusion Lumos") == "TMT-CID-ITMS"
+    assert row_cell("iTRAQ", "CID-ITMS", "Orbitrap Fusion Lumos") == "iTRAQ"
     assert row_cell("none", "HCD-TOF", "timsTOF Pro") == "timsTOF"
     assert row_cell("none", "HCD-FTMS", "Orbitrap Fusion Lumos", hla=True) == "HLA"
 
@@ -41,7 +44,9 @@ def test_cap_per_dataset_and_cell(tmp_path):
     shard(uvpd, "PXDB", "s2", 40, activation="UVPD")
     files = [big, hla, small, uvpd]
     keep, mix = plan(files, {("PXDA", "r2")}, 4, 0.0, 100, 200, seed=1)
-    got = {(d, c): (n, e, k) for d, c, n, e, k in mix}
+    got = {(d, c): (n, e, k) for d, c, n, e, k, _, _ in mix}
+    distinct = {(d, c): (de, dk) for d, c, _, _, _, de, dk in mix}
+    assert distinct[("PXDA", "QE-Exploris")] == (7, 7)
     assert got[("PXDA", "QE-Exploris")] == (500, 500, 100)
     assert got[("PXDA", "HLA")] == (300, 300, 200)
     assert got[("PXDB", "QE-Exploris")] == (90, 50, 50)

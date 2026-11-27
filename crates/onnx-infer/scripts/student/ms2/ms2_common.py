@@ -78,6 +78,14 @@ ION_TYPES_V2 = ION_TYPES + [
     ("z", 1, None), ("z", 2, None),
 ]
 N_ION_V2 = len(ION_TYPES_V2)
+
+
+def base_channels(ions) -> list:
+    """Channels that count as matched backbone ions: b, y, c and z at 1+ or 2+ without a neutral
+    loss. c and z are only valid under electron activation (``valid_mask``), so an HCD spectrum
+    counts its b/y ions as before, and an ETD spectrum explained by c/z ions is not dropped."""
+    return [i for i, (series, z, loss) in enumerate(ions) if series in ("b", "y", "c", "z") and z <= 2 and loss is None]
+
 PREFIX_SERIES = ("a", "b", "c")
 ELECTRON_SERIES = ("c", "z")
 
@@ -163,14 +171,16 @@ def instrument_class(name: str | None) -> int:
 # Training cells (the corpus manifest's cell set). HLA is a property of the run (searched without enzyme
 # specificity in an immunopeptidomics dataset), so ``row_cell`` takes it as a flag; every other cell follows from the
 # row: isobaric label, then activation, then instrument family.
-CELLS = ("QE-Exploris", "Tribrid", "CID-ITMS", "HLA", "TMT", "iTRAQ", "timsTOF", "EThcD-ETD", "Astral", "VelosElite",
-         "LTQ", "TOF", "other")
+CELLS = ("QE-Exploris", "Tribrid", "CID-ITMS", "HLA", "TMT", "TMT-CID-ITMS", "iTRAQ", "timsTOF", "EThcD-ETD", "Astral",
+         "VelosElite", "LTQ", "TOF", "other")
 
 
 def row_cell(label: str | None, activation: str | None, instrument: str | None, hla: bool = False) -> str:
     """Training cell of a shard row (see ``CELLS``)."""
     if hla:
         return "HLA"
+    if label == "TMT" and activation == "CID-ITMS":
+        return "TMT-CID-ITMS"
     if label in ("TMT", "iTRAQ"):
         return label
     act_cell = {"HCD-TOF": "timsTOF", "CID-ITMS": "CID-ITMS", "ETD": "EThcD-ETD", "EThcD": "EThcD-ETD",
@@ -355,7 +365,7 @@ def annotate(seq: str, mods, charge: int, mz: np.ndarray, intensity: np.ndarray,
         obs[idx] = intensity[j]
         used[j] = True
     top = obs[valid].max() if valid.any() else 0.0
-    n_base = int(np.count_nonzero(obs[:, :N_BASE_ION] > 0))
+    n_base = int(np.count_nonzero(obs[:, base_channels(ions)] > 0))
     total = float(intensity.sum())
     explained = float(intensity[used].sum() / total) if total > 0 else 0.0
     if top <= 0:

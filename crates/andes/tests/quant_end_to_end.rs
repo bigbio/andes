@@ -674,9 +674,16 @@ fn quant_dir_table_contains_decoys() {
             .unwrap_or_else(|| panic!("{} has no scan", r.spec_id));
         assert!((scan.rt - r.rt_s).abs() < 1e-9);
         let (lo, hi) = scan.window();
+        let near = |mz: f64| (lo - 1.5..hi + 1.5).contains(&mz);
+        let defaults = search::SearchParams::default_tryptic(
+            model::AminoAcidSetBuilder::new_standard().build().unwrap(),
+        );
         assert!(
-            (lo - 1.5..hi + 1.5).contains(&r.mz),
-            "{} outside {lo}-{hi}",
+            defaults
+                .isotope_error_range
+                .clone()
+                .any(|k| near(r.mz + f64::from(k) * model::mass::ISOTOPE / f64::from(r.charge))),
+            "{} (or an accepted isotope of it) outside {lo}-{hi}",
             r.mz
         );
         let masses = quant::ms2::residue_masses(&r.peptidoform, &mods).unwrap();

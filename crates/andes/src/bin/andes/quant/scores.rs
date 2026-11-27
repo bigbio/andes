@@ -159,7 +159,36 @@ impl ScoreSet {
     pub(super) fn agrees(&self, s: &Scored, is_decoy: bool, class: &IsomerClass) -> bool {
         s.is_decoy() == is_decoy
             && s.residues() == self.keys.residues(class.residues()) >> (64 - RESIDUE_BITS)
-            && mod_units_match(&self.mod_sets[s.mod_set()], class.mod_units())
+            && mod_masses_agree(&self.mod_sets[s.mod_set()], class.mod_units())
+    }
+}
+
+/// Whether two peptidoforms of the same residues carry the same modifications: the same masses,
+/// or the same total when one writes a terminal modification and the first residue's own as one
+/// summed mass (`M+59.00073` for Carbamyl and Oxidation, as the PIN does) and the other as two
+/// (`[UNIMOD:5]-M[UNIMOD:35]`, as the quant table does).
+fn mod_masses_agree(a: &[i64], b: &[i64]) -> bool {
+    let tol = model::isomers::mod_mass_units(model::isomers::MOD_MASS_TOL_DA);
+    mod_units_match(a, b)
+        || (a.len() != b.len() && (a.iter().sum::<i64>() - b.iter().sum::<i64>()).abs() <= tol)
+}
+
+#[cfg(test)]
+mod mod_masses_agree_tests {
+    use super::mod_masses_agree;
+    use model::isomers::mod_mass_units as u;
+
+    #[test]
+    fn a_summed_terminal_and_residue_modification_agrees_with_the_two_apart() {
+        let summed = [u(59.00073)];
+        let apart = [u(15.994915), u(43.005814)];
+        assert!(mod_masses_agree(&summed, &apart));
+        assert!(mod_masses_agree(&apart, &summed));
+        let cam = [u(100.02728), u(57.02146)];
+        let cam_apart = [u(43.005814), u(57.021464), u(57.021464)];
+        assert!(mod_masses_agree(&cam, &cam_apart));
+        assert!(!mod_masses_agree(&[u(15.994915)], &[u(43.005814)]));
+        assert!(!mod_masses_agree(&summed, &[u(15.994915), u(42.010565)]));
     }
 }
 

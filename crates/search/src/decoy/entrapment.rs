@@ -210,17 +210,17 @@ fn same_residue_composition(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    let mut left = left
-        .iter()
-        .map(|&residue| if residue == b'I' { b'L' } else { residue })
-        .collect::<Vec<_>>();
-    let mut right = right
-        .iter()
-        .map(|&residue| if residue == b'I' { b'L' } else { residue })
-        .collect::<Vec<_>>();
-    left.sort_unstable();
-    right.sort_unstable();
-    left == right
+    let mut counts = [0i16; 26];
+    for (&left, &right) in left.iter().zip(right) {
+        let left = if left == b'I' { b'L' } else { left };
+        let right = if right == b'I' { b'L' } else { right };
+        if !left.is_ascii_uppercase() || !right.is_ascii_uppercase() {
+            return false;
+        }
+        counts[usize::from(left - b'A')] += 1;
+        counts[usize::from(right - b'A')] -= 1;
+    }
+    counts.iter().all(|&count| count == 0)
 }
 
 /// The accession prefix with its separator, `ENTRAP_`.

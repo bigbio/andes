@@ -24,9 +24,11 @@ fn entrapment_rejects_disabled_decoys_and_prebuilt_decoy_entries() {
     let cli = Args::try_parse_from(["andes", "--add-entrapment", "--decoy-strategy", "none"])
         .unwrap()
         .search;
-    assert!(super::super::resolve::check_flag_combinations(&cli)
-        .unwrap_err()
-        .contains("--decoy-strategy none"));
+    assert!(
+        super::super::resolve::check_flag_combinations(&cli)
+            .unwrap_err()
+            .contains("--decoy-strategy none")
+    );
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("decoys.fasta");
     std::fs::write(&path, ">P1\nMAGLEVTDPLSK\n>XXX_P1\nMPLGAVDTELSK\n").unwrap();
@@ -52,7 +54,10 @@ fn entrapment_rejects_a_generated_accession_that_matches_a_decoy_affix() {
             Ok(_) => panic!("decoy-affix collision was accepted"),
             Err(error) => error.to_string(),
         };
-        assert!(message.contains("configured decoy prefix or suffix"), "{message}");
+        assert!(
+            message.contains("configured decoy prefix or suffix"),
+            "{message}"
+        );
     }
 }
 
@@ -67,14 +72,55 @@ fn precursor_keys_ignore_flanks_but_keep_modifications() {
 }
 
 #[test]
-fn charge_reader_rejects_multiple_active_charge_columns() {
+fn precursor_keys_keep_charges_above_the_pin_range_distinct() {
     let dir = tempfile::tempdir().unwrap();
-    let pin = dir.path().join("bad.pin");
-    std::fs::write(&pin, "SpecId\tcharge2\tcharge3\ns1\t1\t1\n").unwrap();
-    let rows = HashMap::from([("s1".into(), psm("s1", "PEPTIDEK", "P1"))]);
-    assert!(charges(&pin, &rows)
-        .unwrap_err()
-        .contains("unique positive charge"));
+    let pin = dir.path().join("run.pin");
+    std::fs::write(
+        &pin,
+        "SpecId\tcharge2\tcharge3\tcharge4\tcharge5\nt5\t0\t0\t0\t1\nt6\t0\t0\t0\t1\n",
+    )
+    .unwrap();
+    let proteins = [("P1", "MAGLEVTDPLSK"), ("ENTRAP_P1", "MPLGAVDTELSK")]
+        .into_iter()
+        .map(|(accession, sequence)| model::protein::Protein {
+            accession: accession.into(),
+            sequence: sequence.as_bytes().to_vec(),
+            description: String::new(),
+            annotation: None,
+        })
+        .collect();
+    let index =
+        search::SearchIndex::from_prebuilt(model::protein::ProteinDb { proteins }, "XXX", None);
+    let cli = Args::try_parse_from(["andes", "--add-entrapment", "--rescore"])
+        .unwrap()
+        .search;
+    let rows = HashMap::from([
+        ("t5".into(), psm("t5", "K.MAGLEVTDPLSK.A", "P1")),
+        ("t6".into(), psm("t6", "K.MAGLEVTDPLSK.A", "P1")),
+    ]);
+    let true_charges = HashMap::from([(String::from("t5"), 5), (String::from("t6"), 6)]);
+    let text = report(Inputs {
+        cli: &cli,
+        index: &index,
+        params: &search::SearchParams::default_tryptic(
+            model::amino_acid::set::AminoAcidSetBuilder::new_standard()
+                .build()
+                .unwrap(),
+        ),
+        rows: Some(&rows),
+        groups: None,
+        base: &dir.path().join("run"),
+        pin: &pin,
+        true_charges: &true_charges,
+        precursor_pin: false,
+    })
+    .unwrap()
+    .unwrap();
+    let precursor = text
+        .lines()
+        .find(|line| line.contains("precursor_at_psm_q:"))
+        .unwrap();
+    assert!(precursor.contains("targets 2  entrapment 0"), "{precursor}");
 }
 
 #[test]
@@ -114,6 +160,7 @@ fn dda_and_dia_reporting_write_versioned_entrapment_curves() {
             groups: None,
             base: &base,
             pin: &pin,
+            true_charges: &HashMap::from([(String::from("t"), 2), (String::from("e"), 3)]),
             precursor_pin,
         })
         .unwrap()
@@ -127,20 +174,24 @@ fn dda_and_dia_reporting_write_versioned_entrapment_curves() {
         let file = std::fs::File::open(base.with_extension("entrapment.parquet")).unwrap();
         let reader =
             parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        assert!(reader
-            .schema()
-            .field_with_name("pair")
-            .unwrap()
-            .is_nullable());
+        assert!(
+            reader
+                .schema()
+                .field_with_name("pair")
+                .unwrap()
+                .is_nullable()
+        );
         assert!(reader.schema().field_with_name("pair_below_cut").is_ok());
         assert!(reader.schema().field_with_name("pair_lower").is_ok());
         assert_eq!(reader.metadata().file_metadata().num_rows(), 6);
-        assert!(reader
-            .metadata()
-            .file_metadata()
-            .key_value_metadata()
-            .unwrap()
-            .iter()
-            .any(|m| m.key == "andes.entrapment.schema"));
+        assert!(
+            reader
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .any(|m| m.key == "andes.entrapment.schema")
+        );
     }
 }

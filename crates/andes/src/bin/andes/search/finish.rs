@@ -9,7 +9,7 @@ use model::Spectrum;
 use rayon::prelude::*;
 use search::TopNQueue;
 
-use super::outputs::{release_at_exit, write_proteoform_table, write_search_tsv, PsmTables};
+use super::outputs::{PsmTables, release_at_exit, write_proteoform_table, write_search_tsv};
 use super::*;
 use crate::cli::Cli;
 use crate::quant::run::QuantCollector;
@@ -227,6 +227,7 @@ pub(super) struct AfterRescoring<'a> {
     pub(super) dia_precursor_ids: HashSet<String>,
     pub(super) pin_candidates: Vec<search::candidates::Candidate>,
     pub(super) pin_index: search::SearchIndex,
+    pub(super) true_charges: HashMap<String, u8>,
     pub(super) trace: crate::report::build::Trace,
 }
 
@@ -271,6 +272,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        true_charges,
         mut trace,
     } = state;
     let spectrum_paths = &cli.spectrum;
@@ -412,6 +414,7 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
             groups: protein_groups.as_ref(),
             base: &report_base,
             pin: &output_pin_path,
+            true_charges: &true_charges,
             precursor_pin: !dia_precursor_ids.is_empty(),
         })?;
         summary.open_search = open_search_summary.take();
@@ -726,6 +729,15 @@ pub(super) fn write_pin_and_rescore(
         &params,
         &pin_index,
     )?;
+    let mut true_charges: HashMap<String, u8> = spectra
+        .iter()
+        .zip(&queues)
+        .flat_map(|(spectrum, queue)| {
+            output::emitted_row_candidates(spectrum, queue, &pin_candidates)
+                .into_iter()
+                .map(|(id, _, charge)| (id, charge))
+        })
+        .collect();
     log::info!(
         target: "output",
         "Wrote PIN: {} in {:.2} s",
@@ -885,7 +897,9 @@ pub(super) fn write_pin_and_rescore(
         row_scores,
         dia_replaced,
         dia_precursor_ids,
+        dia_precursor_charges,
     } = rescoring;
+    true_charges.extend(dia_precursor_charges);
     after_rescoring(AfterRescoring {
         cli,
         spectrum_path,
@@ -923,6 +937,7 @@ pub(super) fn write_pin_and_rescore(
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        true_charges,
         trace,
     })
 }

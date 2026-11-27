@@ -1,11 +1,10 @@
 //! Native entrapment diagnostics after rescoring.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use output::fdr::entrapment::{self, Discovery, Estimate, Level};
-use search::decoy::entrapment::{is_entrapment_accession, EntrapmentLookup};
+use search::decoy::entrapment::{EntrapmentLookup, is_entrapment_accession};
 
 use crate::cli::Cli;
 
@@ -42,6 +41,7 @@ pub(super) struct Inputs<'a> {
     pub groups: Option<&'a output::Inference>,
     pub base: &'a Path,
     pub pin: &'a Path,
+    pub true_charges: &'a HashMap<String, u8>,
     pub precursor_pin: bool,
 }
 
@@ -53,8 +53,9 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
         rows,
         groups,
         base,
-        pin,
+        true_charges,
         precursor_pin,
+        ..
     } = input;
     if !cli.add_entrapment {
         return Ok(None);
@@ -73,7 +74,6 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
     )
     .ok_or("--add-entrapment: searched database contains no entrapment proteins")?;
     let shared = shared::peptides(index, rows.values())?;
-    let charges = charges(pin, rows)?;
     let mut psms = Vec::with_capacity(rows.len());
     let mut peptides = Vec::with_capacity(rows.len());
     let mut precursors = Vec::with_capacity(rows.len());
@@ -103,9 +103,9 @@ pub(super) fn report(input: Inputs<'_>) -> Result<Option<String>, String> {
             q_value: p.q_value,
         };
         peptides.push(discovery.clone());
-        let charge = charges
+        let charge = true_charges
             .get(&p.psm_id)
-            .ok_or_else(|| format!("{}: no charge for rescored row {}", pin.display(), p.psm_id))?;
+            .ok_or_else(|| format!("no true charge for rescored row {}", p.psm_id))?;
         precursors.push(Discovery {
             key: format!("{}|{charge}", peptidoform(&p.peptide)),
             pair: None,
@@ -237,48 +237,6 @@ fn peptidoform(peptide: &str) -> String {
         _ => peptide,
     };
     core.replace('I', "L")
-}
-
-fn charges(
-    pin: &Path,
-    rows: &HashMap<String, output::PercolatorPsm>,
-) -> Result<HashMap<String, u8>, String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let mut reader = BufReader::new(std::fs::File::open(pin).map_err(|e| err(&e))?);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| err(&e))?;
-    let header: Vec<&str> = line.trim_end().split('\t').collect();
-    let id = header
-        .iter()
-        .position(|s| *s == "SpecId")
-        .ok_or_else(|| err(&"no SpecId column"))?;
-    let charge_cols: Vec<(usize, u8)> = header
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
-        .collect();
-    let mut out = HashMap::with_capacity(rows.len());
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).map_err(|e| err(&e))? == 0 {
-            break;
-        }
-        let fields: Vec<&str> = line.trim_end().split('\t').collect();
-        let Some(key) = fields.get(id).filter(|s| rows.contains_key(**s)) else {
-            continue;
-        };
-        let active: Vec<u8> = charge_cols
-            .iter()
-            .filter_map(|(c, z)| (fields.get(*c) == Some(&"1")).then_some(*z))
-            .collect();
-        if active.len() != 1 || active[0] == 0 {
-            return Err(err(&format!("row {key} has no unique positive charge")));
-        }
-        if out.insert((*key).to_string(), active[0]).is_some() {
-            return Err(err(&format!("duplicate SpecId {key}")));
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

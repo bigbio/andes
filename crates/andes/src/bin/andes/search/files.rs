@@ -423,7 +423,7 @@ fn parse_linked(
             ms1: read.run_ms1,
             ms3: Vec::new(),
             contexts: read.contexts,
-            scan_mobility: Vec::new(),
+            scan_mobility: input::DiaScanMobility::default(),
         };
         Ok((0, Vec::new(), scans))
     } else if file_is_mzml {
@@ -443,7 +443,7 @@ fn parse_linked(
             ms1: reader.take_run_ms1(),
             ms3: reader.take_product_scans(),
             contexts: reader.take_scan_contexts(),
-            scan_mobility: Vec::new(),
+            scan_mobility: input::DiaScanMobility::default(),
         };
         Ok((errc, errs, scans))
     } else if file_is_d {
@@ -490,7 +490,7 @@ fn parse_linked(
                 ms1: reader.take_run_ms1(),
                 ms3: reader.take_product_scans(),
                 contexts: reader.take_scan_contexts(),
-                scan_mobility: Vec::new(),
+                scan_mobility: input::DiaScanMobility::default(),
             };
             Ok((errc, errs, scans))
         }
@@ -888,7 +888,7 @@ fn search_indexed_ms1<'a>(
         ms1: if capture_ms1 { read.run_ms1 } else { Vec::new() },
         ms3: read.product_scans,
         contexts: read.contexts,
-        scan_mobility: Vec::new(),
+        scan_mobility: input::DiaScanMobility::default(),
     };
     let FileOutputs {
         all_spectra,

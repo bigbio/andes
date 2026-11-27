@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 
+use input::DiaScanMobility;
 use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use output::PercolatorPsm;
@@ -23,8 +24,8 @@ pub(crate) struct RunScans {
     pub ms1: Vec<Ms1Scan>,
     pub ms3: Vec<ProductScan>,
     pub contexts: Vec<ScanContext>,
-    /// 1/K0 per TIMS scan number of a diaPASEF run (empty otherwise).
-    pub scan_mobility: Vec<f32>,
+    /// Shared 1/K0 tables and their per-DIA-window table indices.
+    pub scan_mobility: DiaScanMobility,
 }
 
 pub(super) struct RunCapture {

@@ -679,12 +679,12 @@ impl<'a> PreparedSearch<'a> {
                         && self.idx.db.proteins[cand.protein_index].entry_kind()
                             == model::EntryKind::Reference
                     {
-                        ref_tracker.fold(s, peptidoform_key(&cand.peptide));
+                        ref_tracker.fold(s, competitor_key(&cand.peptide));
                     }
                     *tailor_hist.entry(s).or_insert(0) += 1;
                     tailor_total += 1;
                     strong_null_stats.push(pin_score);
-                    best_two.fold(s, || peptidoform_key(&cand.peptide));
+                    best_two.fold(s, || competitor_key(&cand.peptide));
                 }
 
                 let could_win = match per_charge_queues.get(&z) {
@@ -1029,7 +1029,7 @@ impl<'a> PreparedSearch<'a> {
 
             features.delta_raw_score = delta_raw_score;
             if track_ref {
-                if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide)) {
+                if let Some(r) = ref_tracker.best_excluding(competitor_key(&cand.peptide)) {
                     features.ref_competitor = 1;
                     features.ref_best_raw = r as f32;
                 }
@@ -1151,7 +1151,8 @@ impl<'a> PreparedSearch<'a> {
 }
 
 /// The best and second-best raw scores among a spectrum's candidates; the second comes from a
-/// peptidoform other than the best's.
+/// peptidoform other than the best's, and an I/L twin of the best is the same peptidoform
+/// ([`competitor_key`]).
 struct BestTwo {
     best_raw: i32,
     best_pep_key: u64,
@@ -1171,7 +1172,7 @@ impl Default for BestTwo {
 }
 
 impl BestTwo {
-    /// Folds in raw score `s`; `key` (the candidate's peptidoform key) is computed only when `s`
+    /// Folds in raw score `s`; `key` (the candidate's competitor key) is computed only when `s`
     /// beats the second-best score.
     #[inline]
     fn fold(&mut self, s: i32, key: impl FnOnce() -> u64) {

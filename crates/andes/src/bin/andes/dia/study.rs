@@ -247,8 +247,11 @@ pub(crate) fn normalise(rows: &mut [DiaQuantRow], stems: &[String]) -> Vec<Optio
     factor
 }
 
-/// Join key of a precursor across runs: a 128-bit hash of (peptide string, charge, decoy).
+/// Join key of a precursor across runs: a 128-bit hash of (peptide string, charge, decoy), the
+/// peptide read with I as L so I/L twins are one precursor
+/// ([`model::isomers::fold_isoleucine`]).
 pub(crate) fn precursor_key(peptide: &str, charge: u8, decoy: bool) -> u128 {
+    let peptide = model::isomers::fold_isoleucine_text(peptide);
     let half = |salt: u8| {
         let mut h = BuildHasherDefault::<DefaultHasher>::default().build_hasher();
         salt.hash(&mut h);

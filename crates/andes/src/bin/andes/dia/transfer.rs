@@ -593,6 +593,13 @@ mod tests {
     }
 
     #[test]
+    fn i_l_twins_are_one_precursor_across_runs() {
+        assert_eq!(key("PEPTIDEK", 2, false), key("PEPTLDEK", 2, false));
+        assert_ne!(key("PEPTIDEK", 2, false), key("PEPTLDEK", 2, true));
+        assert_ne!(key("PEPTIDEK", 2, false), key("PEPTVDEK", 2, false));
+    }
+
+    #[test]
     fn transfer_matches_keys_across_runs_and_takes_the_best_source() {
         let own: HashSet<u128> = [key("PEPTIDEK", 2, false)].into_iter().collect();
         let mut best = HashMap::new();

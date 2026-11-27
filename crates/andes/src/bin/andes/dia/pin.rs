@@ -1,6 +1,6 @@
 //! Reading a PIN into the rows the DIA steps index: each row's spectrum, peptidoform, charge,
 //! label and score. Lines are parsed in parallel blocks; peptidoforms are numbered in the order
-//! they first appear.
+//! they first appear, I/L twins as one peptidoform (the first one seen).
 
 use std::path::Path;
 
@@ -61,7 +61,11 @@ pub(crate) fn read_pin(
                     unencoded.push((*p).to_string());
                 }
                 let f = fm.map_or(NONE, |(f, m)| {
-                    *form_ix.entry(f.clone()).or_insert_with(|| {
+                    let key = Form {
+                        seq: model::isomers::fold_isoleucine_text(&f.seq),
+                        mods: f.mods.clone(),
+                    };
+                    *form_ix.entry(key).or_insert_with(|| {
                         forms.push((f, m));
                         (forms.len() - 1) as u32
                     })

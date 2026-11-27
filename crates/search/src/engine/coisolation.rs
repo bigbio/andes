@@ -472,7 +472,7 @@ pub(crate) fn search_secondary(
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
-            let mkey = crate::engine::peptidoform_key(&cand.peptide);
+            let mkey = crate::engine::competitor_key(&cand.peptide);
             if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;

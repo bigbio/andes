@@ -121,6 +121,47 @@ pub fn mod_units_match(a: &[i64], b: &[i64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol)
 }
 
+/// The residue with I read as L. I and L have the same residue mass, so two peptides that differ
+/// only by I and L ("I/L twins") have the same precursor and fragment masses and no MS2 spectrum
+/// tells them apart. Every key of peptide identity reads residues through this function, so the
+/// twins are one peptide whose proteins are the union of both; the sequence a row reports stays
+/// one of the database sequences.
+#[inline]
+pub fn fold_isoleucine(residue: u8) -> u8 {
+    if residue == b'I' {
+        b'L'
+    } else {
+        residue
+    }
+}
+
+/// `residues` with every I read as L (see [`fold_isoleucine`]).
+pub fn fold_isoleucine_bytes(residues: &[u8]) -> Vec<u8> {
+    residues.iter().map(|&r| fold_isoleucine(r)).collect()
+}
+
+/// A peptide text (a bare sequence, a PIN `Peptide` cell or a ProForma string) with every residue
+/// I read as L; text inside `[...]` or `(...)`, such as a modification name or accession, is kept
+/// as written. The identity key of a peptide or peptidoform text (see [`fold_isoleucine`]).
+pub fn fold_isoleucine_text(peptide: &str) -> String {
+    let mut depth = 0u32;
+    peptide
+        .chars()
+        .map(|c| match c {
+            '[' | '(' => {
+                depth += 1;
+                c
+            }
+            ']' | ')' => {
+                depth = depth.saturating_sub(1);
+                c
+            }
+            'I' if depth == 0 => 'L',
+            _ => c,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +275,18 @@ mod tests {
         let c = IsomerClass::of_peptide(&p);
         assert_eq!(c, class(&p.to_string()), "the PIN text");
         assert_eq!(c, class("PS[UNIMOD:21]K"));
+    }
+
+    #[test]
+    fn i_l_twins_fold_to_one_key_and_modification_text_is_kept() {
+        assert_eq!(fold_isoleucine(b'I'), b'L');
+        assert_eq!(fold_isoleucine(b'K'), b'K');
+        assert_eq!(fold_isoleucine_bytes(b"LDIK"), b"LDLK".to_vec());
+        assert_eq!(fold_isoleucine_text("K.PEPTIDEK.R"), "K.PEPTLDEK.R");
+        assert_eq!(
+            fold_isoleucine_text("PEPTIDEM[UNIMOD:35]K(Ile->Leu)"),
+            "PEPTLDEM[UNIMOD:35]K(Ile->Leu)"
+        );
+        assert_eq!(fold_isoleucine_text("ELIVK"), fold_isoleucine_text("EILVK"));
     }
 }

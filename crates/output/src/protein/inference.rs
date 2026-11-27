@@ -7,6 +7,14 @@ use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
 use crate::protein::proteoforms::bare_sequence;
+use model::isomers::fold_isoleucine_text;
+
+/// The identity of a peptide in inference: its bare sequence with I read as L, so I/L twins are
+/// one peptide whose proteins are the union of both (`Inference::peptide_group` and
+/// `Inference::shared_peptides` hold these keys).
+pub fn peptide_key(peptide: &str) -> String {
+    fold_isoleucine_text(&bare_sequence(peptide))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProteinGroup {
@@ -43,7 +51,7 @@ impl Inference {
 
     pub fn group_of(&self, psm: &PercolatorPsm) -> Option<&ProteinGroup> {
         self.peptide_group
-            .get(&bare_sequence(&psm.peptide))
+            .get(&peptide_key(&psm.peptide))
             .map(|&g| &self.groups[g])
     }
 }
@@ -60,6 +68,8 @@ pub enum GroupAt<'a> {
 
 impl Inference {
     pub fn group_at(&self, sequence: &str, max_q: f64) -> GroupAt<'_> {
+        let sequence = fold_isoleucine_text(sequence);
+        let sequence = sequence.as_str();
         let Some(&i) = self.peptide_group.get(sequence) else {
             return GroupAt::NoGroup;
         };
@@ -254,7 +264,7 @@ fn group_evidence(
             .par_iter()
             .with_min_len(1024)
             .map(|&(id, p)| {
-                let &pep = pep_index.get(bare_sequence(&p.peptide).as_str())?;
+                let &pep = pep_index.get(peptide_key(&p.peptide).as_str())?;
                 let &g = pep_owner.get(&pep)?;
                 let kept: Vec<&str> = p
                     .proteins
@@ -352,7 +362,7 @@ pub fn infer_protein_groups(
                         .filter(|a| !knockoff(a))
                         .map(|a| family_of(&a))
                         .collect();
-                    (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
+                    (!fams.is_empty()).then(|| (peptide_key(&p.peptide), score, fams))
                 })
                 .collect();
             for (pep, score, fams) in found.into_iter().flatten() {
@@ -648,6 +658,28 @@ mod tests {
             },
             "XXX",
         )
+    }
+
+    #[test]
+    fn i_l_twins_are_one_peptide_with_the_proteins_of_both() {
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 5.0, "K.LDLK.R", "A"),
+            psm("2", 4.0, "K.IDLK.R", "B"),
+            psm("3", 3.0, "K.AAAK.R", "A"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &index(), |_| true);
+        assert_eq!(inf.groups.len(), 1, "B adds no peptide A lacks: subsumed");
+        let a = &inf.groups[0];
+        assert_eq!(a.families, vec!["A"]);
+        assert_eq!(a.subsumed, vec!["B"]);
+        assert_eq!((a.peptides, a.psms), (2, 3), "the twin pair counts once");
+        assert_eq!(inf.group_of(&targets["2"]), inf.group_of(&targets["1"]));
+        assert!(matches!(
+            inf.group_at("IDLK", 0.01),
+            GroupAt::Group { unique: true, .. }
+        ));
     }
 
     #[test]

@@ -677,5 +677,69 @@ fn a_secondary_i_l_twin_tie_reports_the_lower_sequence_whatever_the_database_ord
             winner.peptide.residues, lower.residues,
             "twins first in the database: {twins_first}"
         );
+        let mut accessions: Vec<&str> = psm
+            .candidate_idxs
+            .iter()
+            .map(|&i| {
+                idx.db.proteins[candidates[i as usize].protein_index]
+                    .accession
+                    .as_str()
+            })
+            .collect();
+        accessions.sort_unstable();
+        assert_eq!(accessions, ["P2", "P3"], "the row names the proteins of both twins");
     }
+}
+
+#[test]
+fn an_i_l_twin_of_the_primary_is_not_a_secondary() {
+    let protein = |accession: &str, sequence: &[u8]| Protein {
+        accession: accession.into(),
+        description: "".into(),
+        sequence: sequence.to_vec(),
+        annotation: None,
+    };
+    let idx = SearchIndex::from_target_db(
+        &ProteinDb {
+            proteins: vec![
+                protein("P1", b"MKWVTFISLLRK"),
+                protein("P2", b"GGGKWVTFLSLLRKGGG"),
+            ],
+        },
+        "XXX",
+    );
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = SearchParams::default_tryptic(aa_set);
+    let scorer = ion_scorer();
+    let frag_tol = 0.02_f64;
+    let prepared =
+        PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
+    let (candidates, bucket_index) = whole_db_pool(&prepared);
+    let primary = peptide(b"WVTFISLLR", b'K', b'K');
+    let twin = peptide(b"WVTFLSLLR", b'K', b'K');
+    let (spec, co) = planted_secondary_spectrum(&twin, &primary);
+    let found = search_secondary(
+        &spec,
+        &primary,
+        &std::collections::HashSet::new(),
+        co,
+        &candidates,
+        &bucket_index,
+        &scorer,
+        &prepared.aa_set_for_scoring,
+        &params,
+        frag_tol,
+    );
+    if let Some((psm, _)) = found {
+        let winner = &candidates[psm.primary_candidate_idx() as usize];
+        assert_ne!(
+            model::isomers::fold_isoleucine_bytes(&residue_bytes(&winner.peptide)),
+            model::isomers::fold_isoleucine_bytes(&residue_bytes(&primary)),
+            "the primary's I/L twin was reported as a co-isolated peptide"
+        );
+    }
+}
+
+fn residue_bytes(p: &model::Peptide) -> Vec<u8> {
+    p.residues.iter().map(|aa| aa.residue).collect()
 }

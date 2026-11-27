@@ -119,16 +119,16 @@ pub fn coisolation_pass(
                 Some((PepDedupKey::from_peptide(&peptide), p.charge_used, is_decoy))
             })
             .collect();
-        for (mut psm, cand) in secondaries {
+        for (mut psm, cands) in secondaries {
             let key = (
-                PepDedupKey::from_peptide(&cand.peptide),
+                PepDedupKey::from_peptide(&cands[0].peptide),
                 psm.charge_used,
-                cand.is_decoy,
+                cands[0].is_decoy,
             );
             if !emitted.insert(key) {
                 continue;
             }
-            psm.candidate_idxs = smallvec::smallvec![accum.intern(&cand)];
+            psm.candidate_idxs = cands.iter().map(|c| accum.intern(c)).collect();
             psm.spectrum_idx = offset + spec_idx;
             q.force_push(psm);
         }
@@ -143,13 +143,13 @@ pub(super) fn mmap_secondaries(
     spectra: &[Spectrum],
     scans: &[Option<Pass2Scan>],
     params: &SearchParams,
-) -> Vec<Vec<(PsmMatch, Candidate)>> {
-    type Hit = (PsmMatch, Candidate, std::collections::HashSet<i64>);
+) -> Vec<Vec<(PsmMatch, Vec<Candidate>)>> {
+    type Hit = (PsmMatch, Vec<Candidate>, std::collections::HashSet<i64>);
     type Item = (usize, CoIsolated, (i32, i32));
 
     let mut claimed: Vec<std::collections::HashSet<i64>> =
         vec![std::collections::HashSet::new(); scans.len()];
-    let mut found: Vec<Vec<(PsmMatch, Candidate)>> = vec![Vec::new(); scans.len()];
+    let mut found: Vec<Vec<(PsmMatch, Vec<Candidate>)>> = vec![Vec::new(); scans.len()];
     let rounds = scans
         .iter()
         .flatten()
@@ -216,8 +216,12 @@ pub(super) fn mmap_secondaries(
                             prepared.fragment_tolerance_da,
                         )
                         .map(|(psm, winner_claimed)| {
-                            let cand = pool[psm.primary_candidate_idx() as usize].clone();
-                            (psm, cand, winner_claimed)
+                            let cands = psm
+                                .candidate_idxs
+                                .iter()
+                                .map(|&i| pool[i as usize].clone())
+                                .collect();
+                            (psm, cands, winner_claimed)
                         });
                         (spec_idx, hit)
                     })
@@ -225,9 +229,9 @@ pub(super) fn mmap_secondaries(
             })
             .collect();
         for (spec_idx, hit) in hits {
-            if let Some((psm, cand, winner_claimed)) = hit {
+            if let Some((psm, cands, winner_claimed)) = hit {
                 claimed[spec_idx].extend(winner_claimed);
-                found[spec_idx].push((psm, cand));
+                found[spec_idx].push((psm, cands));
             }
         }
     }
@@ -454,13 +458,15 @@ pub(crate) fn search_secondary(
     let mut strong_null = OnlineStats::default();
     let mut distinct: rustc_hash::FxHashMap<(u64, bool), PsmMatch> =
         rustc_hash::FxHashMap::default();
+    let primary_key = crate::engine::competitor_key(primary);
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
             if !in_secondary_mass_window(cand.peptide.mass(), co_neutral, tol_left, tol_right) {
                 continue;
             }
-            if cand.peptide == *primary {
+            let mkey = crate::engine::competitor_key(&cand.peptide);
+            if cand.peptide == *primary || mkey == primary_key {
                 continue;
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
@@ -472,7 +478,6 @@ pub(crate) fn search_secondary(
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
-            let mkey = crate::engine::competitor_key(&cand.peptide);
             if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;
@@ -511,7 +516,17 @@ pub(crate) fn search_secondary(
                         None => rank_desc_then_idx(&psm, kept) == std::cmp::Ordering::Less,
                     };
                     if replace {
-                        *kept = psm.clone();
+                        let mut survivor = psm.clone();
+                        crate::engine::merge_unique_candidate_idxs(
+                            &mut survivor.candidate_idxs,
+                            &kept.candidate_idxs,
+                        );
+                        *kept = survivor;
+                    } else {
+                        crate::engine::merge_unique_candidate_idxs(
+                            &mut kept.candidate_idxs,
+                            &psm.candidate_idxs,
+                        );
                     }
                 })
                 .or_insert(psm);

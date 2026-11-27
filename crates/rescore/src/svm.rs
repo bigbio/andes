@@ -995,6 +995,18 @@ pub(crate) fn warm_scores(x: &Rows, ex: &Examples, starts: &[&[f64]]) -> (Vec<Ve
     (os, nrm)
 }
 
+/// Time one fit spent in each phase, and its MFN iteration count, for the debug log.
+#[derive(Default)]
+struct FitTimes {
+    gram: std::time::Duration,
+    o_bar: std::time::Duration,
+    partition: std::time::Duration,
+    line: std::time::Duration,
+    iters: usize,
+    first_active: usize,
+    last_active: usize,
+}
+
 pub(crate) fn mfn_from(
     x: &Rows,
     ex: &Examples,
@@ -1003,6 +1015,34 @@ pub(crate) fn mfn_from(
     opts: &MfnOpts,
     start: Option<&[f64]>,
     pre: Option<(Vec<f64>, &[f32])>,
+) -> Vec<f64> {
+    let mut tm = FitTimes::default();
+    let w = mfn_timed(x, ex, cpos, cneg, opts, start, pre, &mut tm);
+    log::debug!(
+        target: "rescore",
+        "fit Cpos {cpos} Cneg {cneg}: {} MFN iterations, active {}->{} of {}, gram {:.1} s, o_bar {:.1} s, partition {:.1} s, line search {:.1} s",
+        tm.iters,
+        tm.first_active,
+        tm.last_active,
+        ex.rows.len(),
+        tm.gram.as_secs_f64(),
+        tm.o_bar.as_secs_f64(),
+        tm.partition.as_secs_f64(),
+        tm.line.as_secs_f64()
+    );
+    w
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mfn_timed(
+    x: &Rows,
+    ex: &Examples,
+    cpos: f64,
+    cneg: f64,
+    opts: &MfnOpts,
+    start: Option<&[f64]>,
+    pre: Option<(Vec<f64>, &[f32])>,
+    tm: &mut FitTimes,
 ) -> Vec<f64> {
     let t = Train {
         x,
@@ -1054,6 +1094,7 @@ pub(crate) fn mfn_from(
     }
     let mut sc = screen.then(|| Screen::new(nrm, &w));
     let mut subset = vec![0usize; m];
+    let clock = std::time::Instant::now();
     let (mut active, mut f) = partition(
         &t,
         &o,
@@ -1061,6 +1102,8 @@ pub(crate) fn mfn_from(
         0.5 * lambda * ddot(&w[..n], &w[..n]),
         sc.as_ref(),
     );
+    tm.partition += clock.elapsed();
+    tm.first_active = active;
     let mut w_bar = vec![0.0f64; stride];
     let mut ws = Solve {
         b: vec![0.0; stride],
@@ -1073,9 +1116,14 @@ pub(crate) fn mfn_from(
     let mut recheck = false;
     while iter < opts.mfnitermax {
         iter += 1;
+        tm.iters = iter;
+        tm.last_active = active;
         if !recheck {
             w_bar.copy_from_slice(&w);
+            let clock = std::time::Instant::now();
             opt = direct(&t, lambda, &subset[..active], &mut w_bar, &mut ws);
+            tm.gram += clock.elapsed();
+            let clock = std::time::Instant::now();
             if !opt {
                 w_bar.copy_from_slice(&w);
             }
@@ -1099,6 +1147,7 @@ pub(crate) fn mfn_from(
                     },
                 );
             }
+            tm.o_bar += clock.elapsed();
         }
         recheck = false;
         let mut opt2 = true;
@@ -1135,8 +1184,10 @@ pub(crate) fn mfn_from(
             w_bar.truncate(n);
             return w_bar;
         }
+        let clock = std::time::Instant::now();
         let (mut delta, mut need) =
             line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, sc.as_ref());
+        tm.line += clock.elapsed();
         if let Some(sc) = sc.as_mut() {
             loop {
                 let within = need <= sc.lim * (1.0 - 1e-6);
@@ -1173,6 +1224,7 @@ pub(crate) fn mfn_from(
                 }
             }
         }
+        let clock = std::time::Instant::now();
         let (a, fl) = partition(
             &t,
             &o,
@@ -1180,6 +1232,7 @@ pub(crate) fn mfn_from(
             0.5 * lambda * ddot(&w[..n], &w[..n]),
             sc.as_ref(),
         );
+        tm.partition += clock.elapsed();
         active = a;
         f = fl;
         if (f - f_old).abs() < opts.relative_stop_eps * f_old.abs() {

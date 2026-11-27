@@ -729,19 +729,7 @@ pub(super) fn write_pin_and_rescore(
         &params,
         &pin_index,
     )?;
-    let mut true_charges: HashMap<String, u8> = if cli.add_entrapment && cli.rescore {
-        spectra
-            .iter()
-            .zip(&queues)
-            .flat_map(|(spectrum, queue)| {
-                output::emitted_row_candidates(spectrum, queue, &pin_candidates)
-                    .into_iter()
-                    .map(|(id, _, charge)| (id, charge))
-            })
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let mut true_charges = collect_true_charges(&cli, &spectra, &queues, &pin_candidates);
     log::info!(
         target: "output",
         "Wrote PIN: {} in {:.2} s",
@@ -944,6 +932,26 @@ pub(super) fn write_pin_and_rescore(
         true_charges,
         trace,
     })
+}
+
+fn collect_true_charges(
+    cli: &Cli,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    pin_candidates: &[search::candidates::Candidate],
+) -> HashMap<String, u8> {
+    if !(cli.add_entrapment && cli.rescore) {
+        return HashMap::new();
+    }
+    spectra
+        .iter()
+        .zip(queues)
+        .flat_map(|(spectrum, queue)| {
+            output::emitted_row_candidates(spectrum, queue, pin_candidates)
+                .into_iter()
+                .map(|(id, _, charge)| (id, charge))
+        })
+        .collect()
 }
 
 /// The spectra, their PSM queues and the refine output, as the search leaves them.

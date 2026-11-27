@@ -310,8 +310,8 @@ fn feature_records_leave_out_below_threshold_rows() {
     };
     let inf = Inference {
         groups: vec![group(1, "Q1", 0.0), group(2, "Q2", 0.05)],
-        peptide_group: [("PEPTIDEK".into(), 0), ("PEPTMIDEK".into(), 1)].into(),
-        shared_peptides: ["PEPTIDEK".to_string()].into(),
+        peptide_group: [("PEPTLDEK".into(), 0), ("PEPTMLDEK".into(), 1)].into(),
+        shared_peptides: ["PEPTLDEK".to_string()].into(),
         decoy_groups: Vec::new(),
     };
     let groups = ProteinGroups {

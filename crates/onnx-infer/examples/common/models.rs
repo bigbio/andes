@@ -192,9 +192,9 @@ impl Prosit {
     pub fn peptide(f: &Form) -> Option<PrositPeptide<'_>> {
         let mut states = vec![ResidueState::Plain; f.seq.len()];
         for (site, m) in &f.mods {
-            states[site.checked_sub(1)?] = match m {
-                Mod::Carbamidomethyl => ResidueState::Carbamidomethyl,
-                Mod::Oxidation => ResidueState::Oxidation,
+            states[site.checked_sub(1)?] = match *m {
+                Mod::CARBAMIDOMETHYL => ResidueState::Carbamidomethyl,
+                Mod::OXIDATION => ResidueState::Oxidation,
                 _ => return None,
             };
         }

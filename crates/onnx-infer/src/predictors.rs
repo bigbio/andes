@@ -425,7 +425,7 @@ impl DeepLc {
 
     pub fn peptide(f: &Form) -> DeepLcPeptide<'_> {
         let site = |s: usize, m: Mod| match m {
-            Mod::GlnPyroGlu | Mod::GluPyroGlu => 1,
+            m if m.nterm_residues().is_some() => 1,
             _ => s,
         };
         DeepLcPeptide {

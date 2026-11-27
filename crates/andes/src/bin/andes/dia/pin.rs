@@ -23,6 +23,7 @@ pub(crate) fn read_pin(
     let mut by_peptide: FxHashMap<String, u32> = FxHashMap::default();
     let mut rows = Vec::new();
     let mut unlocated = 0usize;
+    let mut unencoded: Vec<String> = Vec::new();
     crate::dia::blocks::read_blocks(
         pin,
         |header| {
@@ -56,6 +57,9 @@ pub(crate) fn read_pin(
             let parsed_fresh: Vec<Option<(Form, Mass)>> =
                 fresh.par_iter().map(|p| parse_peptide(p)).collect();
             for (p, fm) in fresh.iter().zip(parsed_fresh) {
+                if fm.is_none() {
+                    unencoded.push((*p).to_string());
+                }
                 let f = fm.map_or(NONE, |(f, m)| {
                     *form_ix.entry(f.clone()).or_insert_with(|| {
                         forms.push((f, m));
@@ -87,11 +91,38 @@ pub(crate) fn read_pin(
             "{unlocated} PIN rows match no searched spectrum; they are marked missing"
         );
     }
+    report_unencoded(&unencoded, &rows, forms.len());
     Ok(PinTable {
         rows,
         forms,
         peptide_col: layout.c_pep,
     })
+}
+
+/// Examples of unencodable peptidoforms named in the [`report_unencoded`] warning.
+const UNENCODED_EXAMPLES: usize = 3;
+
+/// One warning per run for the peptidoforms the predictors cannot encode (a modification missing
+/// from the Unimod table of `onnx_infer::rt::mods`, or a residue outside the 20), with how
+/// many PIN rows they cover and a few of them.
+fn report_unencoded(unencoded: &[String], rows: &[PinRow], encoded: usize) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if unencoded.is_empty() || ONCE.is_completed() {
+        return;
+    }
+    ONCE.call_once(|| ());
+    let n_rows = rows.iter().filter(|r| r.form == NONE).count();
+    let mut examples: Vec<&str> = unencoded.iter().map(String::as_str).collect();
+    examples.sort_unstable();
+    examples.truncate(UNENCODED_EXAMPLES);
+    log::warn!(
+        target: "predict",
+        "{} of {} peptidoforms ({n_rows} PIN rows) carry a modification or residue the \
+         predictors do not encode, e.g. {}; those rows get no predicted RT or MS2 features",
+        unencoded.len(),
+        unencoded.len() + encoded,
+        examples.join(", ")
+    );
 }
 
 /// The columns of a PIN header that [`read_pin`] reads.

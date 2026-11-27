@@ -729,15 +729,19 @@ pub(super) fn write_pin_and_rescore(
         &params,
         &pin_index,
     )?;
-    let mut true_charges: HashMap<String, u8> = spectra
-        .iter()
-        .zip(&queues)
-        .flat_map(|(spectrum, queue)| {
-            output::emitted_row_candidates(spectrum, queue, &pin_candidates)
-                .into_iter()
-                .map(|(id, _, charge)| (id, charge))
-        })
-        .collect();
+    let mut true_charges: HashMap<String, u8> = if cli.add_entrapment && cli.rescore {
+        spectra
+            .iter()
+            .zip(&queues)
+            .flat_map(|(spectrum, queue)| {
+                output::emitted_row_candidates(spectrum, queue, &pin_candidates)
+                    .into_iter()
+                    .map(|(id, _, charge)| (id, charge))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     log::info!(
         target: "output",
         "Wrote PIN: {} in {:.2} s",

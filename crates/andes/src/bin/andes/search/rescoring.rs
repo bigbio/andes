@@ -185,12 +185,14 @@ pub(super) fn rescore_pin(
                 learned,
             ) {
                 Ok(r) => {
-                    dia_precursor_charges = t
-                        .spec_id
-                        .iter()
-                        .cloned()
-                        .zip(t.charge.iter().copied())
-                        .collect();
+                    if cli.add_entrapment && cli.rescore {
+                        dia_precursor_charges = t
+                            .spec_id
+                            .iter()
+                            .cloned()
+                            .zip(t.charge.iter().copied())
+                            .collect();
+                    }
                     log::info!(
                         target: "dia",
                         "precursor PIN used: {} target precursors at q <= 0.01 (pass 1: \

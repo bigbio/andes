@@ -99,3 +99,68 @@ fn chargeless_spectrum_is_searched_per_charge() {
         "the merged charge queues keep the top PSM and its ties only"
     );
 }
+
+#[test]
+fn top_only_search_keeps_the_psms_of_the_full_search() {
+    use crate::params::ScoreMode;
+    let db = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"GKDAFLGSFLYEYSRKSAFLWEYSPLLTNNGVRKLVNELTEFAKTCVADESHAGCEK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&db, "XXX");
+    let truth = peptide(b"DAFLGSFLYEYSR");
+    let bait = peptide(b"SAFLWEYSPLLTNNGVR");
+    let other = peptide(b"LVNELTEFAK");
+    let mz3 = (truth.mass() + 3.0 * PROTON) / 3.0;
+    let mz2 = (other.mass() + 2.0 * PROTON) / 2.0;
+    let spectra = [
+        spectrum(mz3, Some(3), &[&truth, &bait]),
+        spectrum(mz3, None, &[&truth, &bait]),
+        spectrum(mz2, Some(2), &[&other]),
+        spectrum(mz2, None, &[&other, &truth]),
+    ];
+    let key = |q: TopNQueue| -> Vec<(u32, u8, u32, u32, i32)> {
+        q.into_sorted_vec()
+            .iter()
+            .map(|p| {
+                (
+                    p.primary_candidate_idx(),
+                    p.charge_used,
+                    p.score.to_bits(),
+                    p.rank_score.to_bits(),
+                    p.edge_score,
+                )
+            })
+            .collect()
+    };
+    for (mode, top_k) in [
+        (ScoreMode::Rank, 0),
+        (ScoreMode::Rank, 1),
+        (ScoreMode::Strong, 1),
+    ] {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.charge_range = 2..=4;
+        params.fragment_index_top_k = top_k;
+        params.score_mode = mode;
+        let scorer = crate::engine::coisolation::tests::tiny_scorer();
+        let full = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let top = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let a: Vec<_> = full.run_chunk(&spectra, 3).into_iter().map(key).collect();
+        let b: Vec<_> = top
+            .run_chunk_for_top(&spectra, 3, &params)
+            .into_iter()
+            .map(key)
+            .collect();
+        assert!(a.iter().any(|q| !q.is_empty()), "{mode:?} {top_k}");
+        assert_eq!(a, b, "{mode:?} top_k {top_k}");
+        assert_eq!(full.materialized_len(), top.materialized_len());
+        for i in 0..full.materialized_len() as u32 {
+            assert_eq!(full.candidate_peptide(i), top.candidate_peptide(i));
+        }
+    }
+}

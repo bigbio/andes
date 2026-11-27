@@ -137,7 +137,7 @@ pub fn learn_calibration_stats(
         return CalibrationStats::default();
     }
 
-    let queues = prepared.run_chunk_with_params(&prepass_spectra, 0, &prepass_params);
+    let queues = prepared.run_chunk_for_top(&prepass_spectra, 0, &prepass_params);
     prepared.sync_materialized_candidates();
     let (residuals, filter) = extract_residuals(
         &sampled,

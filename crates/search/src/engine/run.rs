@@ -42,6 +42,7 @@ struct ChunkScoring<'c> {
     params: &'c SearchParams,
     spectrum_idx_offset: usize,
     complete_later: bool,
+    top_only: bool,
 }
 
 /// A spectrum's DIA isolation windows: (charge, lowest and highest neutral mass) per charge.
@@ -137,7 +138,24 @@ impl<'a> PreparedSearch<'a> {
         spectrum_idx_offset: usize,
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
-        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params);
+        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params, false);
+        for q in &mut queues {
+            q.shrink_to_fit();
+        }
+        queues
+    }
+
+    /// [`Self::run_chunk_with_params`] for a caller that reads only each queue's top PSM (its
+    /// candidate, charge and scores), as the calibration searches do: the features that only
+    /// the PIN reads (fragment-intensity battery, rich-ion LLR, modification-site features and
+    /// site evidence) are left unset. The PSMs, their order and their candidates are the same.
+    pub fn run_chunk_for_top(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
+        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params, true);
         for q in &mut queues {
             q.shrink_to_fit();
         }
@@ -149,6 +167,7 @@ impl<'a> PreparedSearch<'a> {
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
+        top_only: bool,
     ) -> Vec<TopNQueue> {
         let shifted;
         let spectra = match recentred_spectra(spectra, self.scorer.fragment_recentre_ppm()) {
@@ -164,7 +183,7 @@ impl<'a> PreparedSearch<'a> {
             || spectra.iter().all(has_charge)
         {
             let queues = self
-                .run_chunk_inner(spectra, spectrum_idx_offset, params, false)
+                .run_chunk_inner(spectra, spectrum_idx_offset, params, top_only, top_only)
                 .into_iter()
                 .map(|(queue, _pool)| queue)
                 .collect();
@@ -217,7 +236,7 @@ impl<'a> PreparedSearch<'a> {
                     unit
                 })
                 .collect();
-            let got = self.run_chunk_inner(&chunk, 0, params, complete_later);
+            let got = self.run_chunk_inner(&chunk, 0, params, complete_later, top_only);
             merge_units(got, &owners, &mut merged, &mut pools, spectrum_idx_offset);
         }
         merged
@@ -227,7 +246,7 @@ impl<'a> PreparedSearch<'a> {
                 queue.trim_to_capacity(params.top_n_psms_per_spectrum);
                 recalibrate_strong_over_spectrum(queue, pool);
             });
-        if complete_later {
+        if complete_later && !top_only {
             self.complete_kept_features(spectra, &mut merged);
         }
         self.frag_pred_cache.clear();
@@ -358,13 +377,15 @@ impl<'a> PreparedSearch<'a> {
     /// calibrated against (empty when the spectrum was skipped).
     /// With `complete_later` (strong mode) the full-pass-only features of the retained PSMs are
     /// left unset for the caller to complete with [`complete_psm_features`] once it knows which
-    /// PSMs it keeps.
+    /// PSMs it keeps. With `top_only` the site evidence is left unset too (see
+    /// [`Self::run_chunk_for_top`]).
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
         complete_later: bool,
+        top_only: bool,
     ) -> Vec<(TopNQueue, Vec<f32>)> {
         let scorer_set = self.scorer_set(spectra);
 
@@ -493,6 +514,7 @@ impl<'a> PreparedSearch<'a> {
             params,
             spectrum_idx_offset,
             complete_later,
+            top_only,
         };
         let queues: Vec<(TopNQueue, Vec<f32>)> = spectra
             .par_iter()
@@ -910,6 +932,7 @@ impl<'a> PreparedSearch<'a> {
         let ChunkScoring {
             params,
             complete_later,
+            top_only,
             ..
         } = *chunk;
         let fragment_tolerance_da = self.fragment_tolerance_da;
@@ -1037,7 +1060,7 @@ impl<'a> PreparedSearch<'a> {
             features
         };
         queue.fill_post_topn(|psm| {
-            psm.features = make_features(psm, !strong_mode);
+            psm.features = make_features(psm, !strong_mode && !top_only);
         });
 
         let retained_strong: Vec<f32> =
@@ -1076,7 +1099,7 @@ impl<'a> PreparedSearch<'a> {
             });
         }
 
-        {
+        if !top_only {
             let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
             let rows: Vec<crate::sites::Row<'_>> = psms
                 .iter()

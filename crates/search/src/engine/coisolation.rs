@@ -504,7 +504,13 @@ pub(crate) fn search_secondary(
             distinct
                 .entry((mkey, cand.is_decoy))
                 .and_modify(|kept| {
-                    if rank_desc_then_idx(&psm, kept) == std::cmp::Ordering::Less {
+                    let twin = Some(crate::engine::residue_order(&psm, kept, candidates))
+                        .filter(|o| psm.rank_cmp(kept).is_eq() && o.is_ne());
+                    let replace = match twin {
+                        Some(order) => order.is_lt(),
+                        None => rank_desc_then_idx(&psm, kept) == std::cmp::Ordering::Less,
+                    };
+                    if replace {
                         *kept = psm.clone();
                     }
                 })

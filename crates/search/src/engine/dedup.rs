@@ -60,17 +60,25 @@ fn survives(psm: &PsmMatch, existing: &PsmMatch, candidates: &[Candidate]) -> bo
     match psm.rank_score.total_cmp(&existing.rank_score) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => {
-            let residues = |p: &PsmMatch| {
-                candidates[p.primary_candidate_idx() as usize]
-                    .peptide
-                    .residues
-                    .iter()
-                    .map(|aa| aa.residue)
-            };
-            residues(psm).lt(residues(existing))
-        }
+        std::cmp::Ordering::Equal => residue_order(psm, existing, candidates).is_lt(),
     }
+}
+
+/// The order of the database sequences of two PSMs' primary candidates; at an equal rank score
+/// the lower sequence of an I/L twin pair reports.
+pub(crate) fn residue_order(
+    a: &PsmMatch,
+    b: &PsmMatch,
+    candidates: &[Candidate],
+) -> std::cmp::Ordering {
+    let residues = |p: &PsmMatch| {
+        candidates[p.primary_candidate_idx() as usize]
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| aa.residue)
+    };
+    residues(a).cmp(residues(b))
 }
 
 #[inline]

@@ -158,10 +158,7 @@ impl<'a> PreparedSearch<'a> {
         )
     }
     pub fn sync_materialized_candidates(&mut self) {
-        let mut accum = self.mmap_accum.lock().unwrap();
-        let materialized = std::mem::take(&mut accum.candidates);
-        accum.index_of = Default::default();
-        drop(accum);
+        let materialized = self.mmap_accum.lock().unwrap().take_all();
         self.candidates = materialized;
     }
 
@@ -170,7 +167,6 @@ impl<'a> PreparedSearch<'a> {
         self.mmap_accum
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .candidates
             .len()
     }
 
@@ -178,17 +174,10 @@ impl<'a> PreparedSearch<'a> {
     /// Only for a calibration search whose queues are dropped: a PSM that still holds one of
     /// these global indices would read another candidate.
     pub fn truncate_materialized(&self, len: usize) {
-        let mut accum = self
-            .mmap_accum
+        self.mmap_accum
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if accum.candidates.len() <= len {
-            return;
-        }
-        accum.candidates.truncate(len);
-        accum.candidates.shrink_to_fit();
-        accum.index_of.retain(|_, idx| (*idx as usize) < len);
-        accum.index_of.shrink_to_fit();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .truncate(len);
     }
 
     pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {

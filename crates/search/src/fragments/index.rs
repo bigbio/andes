@@ -19,11 +19,28 @@ struct GroupPass1 {
     counts: Vec<u32>,
 }
 
-type VoteBuffers = (Vec<(u16, f32)>, Vec<u32>);
+/// The per-thread buffers of [`ChunkFragmentIndex::vote`]: one partition's counts, the
+/// matches in vote order, the same matches grouped by partition, and the partition ends.
+struct VoteBuffers {
+    counts: Vec<(u16, f32)>,
+    pairs: Vec<(u32, f32)>,
+    grouped: Vec<(u32, f32)>,
+    ends: Vec<usize>,
+}
+
+/// log2 of the form ids per vote partition: a partition's counts (8 bytes per form) fill
+/// 32 KiB, so they stay in the L1 data cache while its matches are summed.
+const VOTE_PARTITION_BITS: u32 = 12;
 
 thread_local! {
-    static VOTE_BUF: std::cell::RefCell<VoteBuffers> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    static VOTE_BUF: std::cell::RefCell<VoteBuffers> = const {
+        std::cell::RefCell::new(VoteBuffers {
+            counts: Vec::new(),
+            pairs: Vec::new(),
+            grouped: Vec::new(),
+            ends: Vec::new(),
+        })
+    };
 }
 
 pub struct ChunkFragmentIndex {
@@ -518,17 +535,19 @@ impl ChunkFragmentIndex {
         let row_len = self.n_blocks + 1;
         VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
-            let (counts, touched) = &mut *buf;
-            if counts.len() < width {
-                counts.resize(width, (0, 0.0));
+            let VoteBuffers {
+                counts,
+                pairs,
+                grouped,
+                ends,
+            } = &mut *buf;
+            let part_len = 1usize << VOTE_PARTITION_BITS;
+            if counts.len() < part_len {
+                counts.resize(part_len, (0, 0.0));
             }
-            touched.clear();
+            pairs.clear();
             let floor = vote_intensity_floor(&spec.peaks, vote_peaks);
-            let vote = |mz: f64,
-                            intensity: f32,
-                            counts: &mut Vec<(u16, f32)>,
-                            touched: &mut Vec<u32>,
-                            clip: bool| {
+            let vote = |mz: f64, intensity: f32, pairs: &mut Vec<(u32, f32)>, clip: bool| {
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
                 if clip && b >= n_bins {
@@ -555,12 +574,7 @@ impl ChunkFragmentIndex {
                                 break;
                             }
                             if ((e.1 as f64) - mz).abs() <= tol_da {
-                                let slot = &mut counts[(e.0 - id_lo) as usize];
-                                if slot.0 == 0 {
-                                    touched.push(e.0);
-                                }
-                                slot.0 += 1;
-                                slot.1 += intensity;
+                                pairs.push((e.0 - id_lo, intensity));
                             }
                         }
                     }
@@ -570,7 +584,7 @@ impl ChunkFragmentIndex {
                 if intensity < floor {
                     continue;
                 }
-                vote(mz, intensity, counts, touched, false);
+                vote(mz, intensity, pairs, false);
             }
             for &base in complement_masses {
                 for &(mz, intensity) in &spec.peaks {
@@ -581,16 +595,55 @@ impl ChunkFragmentIndex {
                     if q <= 0.0 {
                         continue;
                     }
-                    vote(q, intensity, counts, touched, true);
+                    vote(q, intensity, pairs, true);
                 }
             }
-            let mut sel = Vec::new();
-            for &id in touched.iter() {
-                let slot = &mut counts[(id - id_lo) as usize];
-                if slot.0 >= min_matched {
-                    sel.push((id, slot.0, slot.1));
+            let n_parts = (width >> VOTE_PARTITION_BITS) + 1;
+            ends.clear();
+            let src: &[(u32, f32)] = if n_parts == 1 {
+                ends.push(pairs.len());
+                pairs
+            } else {
+                ends.resize(n_parts, 0);
+                for &(rel, _) in pairs.iter() {
+                    ends[(rel >> VOTE_PARTITION_BITS) as usize] += 1;
                 }
-                *slot = (0, 0.0);
+                let mut at = 0;
+                for e in ends.iter_mut() {
+                    let n = *e;
+                    *e = at;
+                    at += n;
+                }
+                grouped.clear();
+                grouped.resize(pairs.len(), (0, 0.0));
+                for &p in pairs.iter() {
+                    let slot = &mut ends[(p.0 >> VOTE_PARTITION_BITS) as usize];
+                    grouped[*slot] = p;
+                    *slot += 1;
+                }
+                grouped
+            };
+            let mask = (part_len - 1) as u32;
+            let mut sel = Vec::new();
+            let mut lo = 0;
+            for &hi in ends.iter() {
+                let part = &src[lo..hi];
+                lo = hi;
+                for &(rel, intensity) in part {
+                    let slot = &mut counts[(rel & mask) as usize];
+                    slot.0 += 1;
+                    slot.1 += intensity;
+                }
+                for &(rel, _) in part {
+                    let slot = &mut counts[(rel & mask) as usize];
+                    if slot.0 == 0 {
+                        continue;
+                    }
+                    if slot.0 >= min_matched {
+                        sel.push((id_lo + rel, slot.0, slot.1));
+                    }
+                    *slot = (0, 0.0);
+                }
             }
             sel
         })

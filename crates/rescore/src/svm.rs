@@ -1211,26 +1211,25 @@ fn mfn_timed(
             tm.o_bar += clock.elapsed();
         }
         recheck = false;
-        let mut opt2 = true;
-        match sc.as_ref() {
+        let opt2 = match sc.as_ref() {
             Some(sc) => {
-                opt2 = subset[..active]
+                subset[..active]
                     .iter()
                     .all(|&ii| t.y(ii) * o_bar[ii] <= 1.0 + epsilon)
                     && sc.live.iter().all(|&i| {
                         let i = i as usize;
                         act[i] || t.y(i) * o_bar[i] >= 1.0 - epsilon
-                    });
+                    })
             }
             None => {
-                opt2 = subset[..active]
+                subset[..active]
                     .par_iter()
                     .all(|&ii| t.y(ii) * o_bar[ii] <= 1.0 + epsilon)
                     && subset[active..]
                         .par_iter()
-                        .all(|&ii| t.y(ii) * o_bar[ii] >= 1.0 - epsilon);
+                        .all(|&ii| t.y(ii) * o_bar[ii] >= 1.0 - epsilon)
             }
-        }
+        };
         if opt && opt2 {
             if epsilon == opts.big_epsilon {
                 epsilon = opts.epsilon;

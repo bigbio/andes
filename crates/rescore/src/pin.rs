@@ -32,7 +32,7 @@ pub struct MemLimit {
 /// Per-PSM metadata that stays in memory for every row. Packed (25 bytes, not 32 with padding):
 /// on 500 M-row studies the padding alone is 3.5 GB of the storage budget. Fields are read by
 /// value only.
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct RowMeta {
     pub label: i8,
     pub file: u32,

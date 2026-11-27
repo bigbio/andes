@@ -62,7 +62,12 @@ struct TrainSet {
     negatives: usize,
 }
 
-pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = 96;
+/// Bytes one SVM fit holds per training example: `o`, `o_bar`, `subset`, a `deltas` entry, and
+/// when screening the `act` flag and the row norm.
+pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = (3 * std::mem::size_of::<f64>()
+    + std::mem::size_of::<(f64, usize, f64)>()
+    + std::mem::size_of::<bool>()
+    + std::mem::size_of::<f32>()) as u64;
 
 fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
     let nf = pin.rows.nfeat();

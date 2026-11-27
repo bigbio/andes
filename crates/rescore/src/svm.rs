@@ -424,7 +424,6 @@ impl Train<'_> {
                 body,
             ),
             RowData::Spill(path, codec) => {
-                let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
                 let file = File::open(path).expect("open rows spill file");
                 out[..subset.len()]
                     .par_chunks_mut(CHUNK)
@@ -432,7 +431,39 @@ impl Train<'_> {
                     .map(|(c, outs)| {
                         let mut part = init();
                         let first = c * CHUNK;
-                        read_rows(&file, codec, &ids[first..first + outs.len()], |j, row| {
+                        let ids: Vec<usize> = subset[first..first + outs.len()]
+                            .iter()
+                            .map(|&i| self.rows[i])
+                            .collect();
+                        read_rows(&file, codec, &ids, |j, row| {
+                            body(&mut part, first + j, row, &mut outs[j]);
+                        });
+                        part
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// `pass` over every example in order, without an index vector of them.
+    fn pass_all<P, I, B>(&self, out: &mut [f64], init: I, body: B) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+    {
+        let m = self.len();
+        match &self.x.data {
+            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[k]), &mut out[..m], init, body),
+            RowData::Spill(path, codec) => {
+                let file = File::open(path).expect("open rows spill file");
+                out[..m]
+                    .par_chunks_mut(CHUNK)
+                    .enumerate()
+                    .map(|(c, outs)| {
+                        let mut part = init();
+                        let first = c * CHUNK;
+                        read_rows(&file, codec, &self.rows[first..first + outs.len()], |j, row| {
                             body(&mut part, first + j, row, &mut outs[j]);
                         });
                         part
@@ -963,10 +994,8 @@ pub(crate) fn warm_scores(x: &Rows, ex: &Examples, starts: &[&[f64]]) -> (Vec<Ve
         cpos: 0.0,
         cneg: 0.0,
     };
-    let all: Vec<usize> = (0..m).collect();
     let mut first = vec![0.0f64; m];
-    let parts = t.pass(
-        &all,
+    let parts = t.pass_all(
         &mut first,
         || (Vec::new(), Vec::new()),
         |p: &mut (Vec<f64>, Vec<f32>), _, row, o0| {
@@ -1058,7 +1087,6 @@ fn mfn_timed(
     let mut epsilon = opts.big_epsilon;
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
-    let all: Vec<usize> = (0..m).collect();
     let mut o_bar = vec![0.0f64; m];
     let screen = !x.is_spilled() && m > 0;
     let mut nrm = Cow::Owned(Vec::new());
@@ -1069,8 +1097,7 @@ fn mfn_timed(
     } else if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
         let wv: &[f64] = &w;
-        let parts = t.pass(
-            &all,
+        let parts = t.pass_all(
             &mut o,
             || Vec::with_capacity(if screen { CHUNK } else { 0 }),
             |p, _, row, ok| {
@@ -1083,8 +1110,7 @@ fn mfn_timed(
         nrm = Cow::Owned(parts.concat());
     } else if screen {
         nrm = Cow::Owned(
-            t.pass(
-                &all,
+            t.pass_all(
                 &mut o_bar,
                 || Vec::with_capacity(CHUNK),
                 |p, _, row, _| p.push(norm_up(row)),
@@ -1109,7 +1135,7 @@ fn mfn_timed(
         b: vec![0.0; stride],
         g: vec![0.0; stride * stride],
     };
-    let mut act = vec![false; m];
+    let mut act = if screen { vec![false; m] } else { Vec::new() };
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
     let mut iter = 0usize;
     let mut opt = false;
@@ -1127,19 +1153,18 @@ fn mfn_timed(
             if !opt {
                 w_bar.copy_from_slice(&w);
             }
-            act.fill(false);
-            for &ii in &subset[..active] {
-                act[ii] = true;
-            }
             if let Some(sc) = sc.as_mut() {
+                act.fill(false);
+                for &ii in &subset[..active] {
+                    act[ii] = true;
+                }
                 sc.lim = (1.25 * sc.last).clamp(REACH_MIN, REACH_MAX);
                 sc.redo = false;
                 sc.bound(&w_bar);
                 screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar);
             } else {
                 let wb: &[f64] = &w_bar;
-                t.pass(
-                    &all,
+                t.pass_all(
                     &mut o_bar,
                     || (),
                     |_, _, row, ob| {

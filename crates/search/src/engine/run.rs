@@ -254,11 +254,8 @@ impl<'a> PreparedSearch<'a> {
                             .map(|p| {
                                 let idx = p.primary_candidate_idx() as usize;
                                 accum
-                                    .candidates
-                                    .get(idx)
-                                    .unwrap_or_else(|| &self.candidates[idx])
-                                    .peptide
-                                    .clone()
+                                    .peptide(idx)
+                                    .unwrap_or_else(|| self.candidates[idx].peptide.clone())
                             })
                             .collect()
                     })

@@ -2,6 +2,8 @@
 //! chunk over the spectra; preparation, setup, DIA MS1, the search loop and candidate lookups are
 //! child modules.
 
+mod accumulator;
+use accumulator::MmapAccumulator;
 pub(crate) mod coisolation;
 mod dedup;
 mod features;
@@ -210,61 +212,6 @@ pub struct PreparedSearch<'a> {
     dia_rt_prior: RwLock<Option<Arc<crate::dia::DiaRtPrior>>>,
     form_rt_cache: crate::dia::FormRtCache,
     frag_pred_cache: crate::fragments::predictions::FragPredCache,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct GlobalCandKey {
-    protein_index: u32,
-    start_offset: u32,
-    residues: Box<[u8]>,
-    mod_units: Box<[i32]>,
-    is_decoy: bool,
-    is_protein_n_term: bool,
-    is_protein_c_term: bool,
-}
-
-impl GlobalCandKey {
-    fn from_candidate(c: &Candidate) -> Self {
-        let mut residues = Vec::with_capacity(c.peptide.residues.len());
-        let mut mod_units = Vec::with_capacity(c.peptide.residues.len());
-        for aa in &c.peptide.residues {
-            residues.push(aa.residue);
-            mod_units.push(
-                aa.mod_
-                    .as_ref()
-                    .map(|m| (m.mass_delta * 100_000.0).round() as i32)
-                    .unwrap_or(0),
-            );
-        }
-        Self {
-            protein_index: c.protein_index as u32,
-            start_offset: c.start_offset_in_protein as u32,
-            residues: residues.into_boxed_slice(),
-            mod_units: mod_units.into_boxed_slice(),
-            is_decoy: c.is_decoy,
-            is_protein_n_term: c.is_protein_n_term,
-            is_protein_c_term: c.is_protein_c_term,
-        }
-    }
-}
-
-#[derive(Default)]
-struct MmapAccumulator {
-    candidates: Vec<Candidate>,
-    index_of: FxHashMap<GlobalCandKey, u32>,
-}
-
-impl MmapAccumulator {
-    fn intern(&mut self, cand: &Candidate) -> u32 {
-        let key = GlobalCandKey::from_candidate(cand);
-        if let Some(&idx) = self.index_of.get(&key) {
-            return idx;
-        }
-        let idx = self.candidates.len() as u32;
-        self.candidates.push(cand.clone());
-        self.index_of.insert(key, idx);
-        idx
-    }
 }
 
 fn enumeration_pass(cand: &Candidate, copy: u32) -> u32 {

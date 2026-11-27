@@ -109,15 +109,14 @@ pub fn coisolation_pass(
             .iter_psms()
             .filter_map(|p| {
                 let i = p.primary_candidate_idx() as usize;
-                let c = accum
-                    .candidates
-                    .get(i)
-                    .or_else(|| prepared.candidates.get(i))?;
-                Some((
-                    PepDedupKey::from_peptide(&c.peptide),
-                    p.charge_used,
-                    c.is_decoy,
-                ))
+                let (peptide, is_decoy) = match accum.get(i) {
+                    Some(c) => (c.peptide, c.is_decoy),
+                    None => {
+                        let c = prepared.candidates.get(i)?;
+                        (c.peptide.clone(), c.is_decoy)
+                    }
+                };
+                Some((PepDedupKey::from_peptide(&peptide), p.charge_used, is_decoy))
             })
             .collect();
         for (mut psm, cand) in secondaries {

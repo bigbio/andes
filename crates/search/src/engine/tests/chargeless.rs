@@ -63,8 +63,7 @@ fn chargeless_spectrum_is_searched_per_charge() {
     params.charge_range = 2..=5;
     params.fragment_index_top_k = 1;
     let scorer = crate::engine::coisolation::tests::tiny_scorer();
-    let prepared =
-        PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+    let prepared = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
 
     let truth = peptide(b"DAFLGSFLYEYSR");
     let bait = peptide(b"SAFLWEYSPLLTNNGVR");
@@ -84,7 +83,9 @@ fn chargeless_spectrum_is_searched_per_charge() {
         assert_eq!(best.spectrum_idx, 7 + i);
         assert_eq!(best.charge_used, 3, "spectrum {i}");
         let accum = prepared.mmap_accum.lock().unwrap();
-        let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
+        let pep = accum
+            .peptide(best.primary_candidate_idx() as usize)
+            .expect("materialised");
         assert_eq!(pep.residues, truth.residues, "spectrum {i}");
     }
 

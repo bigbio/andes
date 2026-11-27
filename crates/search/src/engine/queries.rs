@@ -71,16 +71,16 @@ impl<'a> PreparedSearch<'a> {
 
     pub fn candidate_peptide(&self, global_idx: u32) -> Peptide {
         let accum = self.mmap_accum.lock().unwrap();
-        match accum.candidates.get(global_idx as usize) {
-            Some(c) => c.peptide.clone(),
+        match accum.peptide(global_idx as usize) {
+            Some(p) => p,
             None => self.candidates[global_idx as usize].peptide.clone(),
         }
     }
 
     pub fn candidate_is_decoy(&self, global_idx: u32) -> bool {
         let accum = self.mmap_accum.lock().unwrap();
-        match accum.candidates.get(global_idx as usize) {
-            Some(c) => c.is_decoy,
+        match accum.is_decoy(global_idx as usize) {
+            Some(d) => d,
             None => self.candidates[global_idx as usize].is_decoy,
         }
     }

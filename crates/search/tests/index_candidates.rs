@@ -703,6 +703,55 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
 }
 
 #[test]
+fn fragment_index_keeps_a_precursor_match_that_a_form_between_the_windows_outvotes() {
+    use model::tolerance::Tolerance;
+    use search::fragments::index::ChunkFragmentIndex;
+    let light = Peptide::new(residues(b"GGASGGASGGAK"), b'K', b'W');
+    let heavy = Peptide::new(residues(b"WWYWWFK"), b'K', b'-');
+    let (m_light, m_heavy) = (light.mass(), heavy.mass());
+    assert!(
+        m_light > m_heavy * 2.0 / 3.0 + 1.0 && m_light < m_heavy - 3.0,
+        "the light peptide lies between the 2+ and 3+ windows"
+    );
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "light and heavy".into(),
+            sequence: b"KGGASGGASGGAKWWYWWFK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = with_reversed_decoys(&target);
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.min_peaks = 0;
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let fi = ChunkFragmentIndex::build(
+        prepared.mmap_index.records(),
+        &idx,
+        &params,
+        Tolerance::Da(0.05),
+        0.0,
+        5000.0,
+    );
+    let mut spec = spectrum_for(&heavy, 3, "scan=mixed");
+    spec.precursor_charge = None;
+    spec.peaks.extend(peaks_for(&light));
+    spec.peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let sel = fi.query(&spec, &[2, 3], &params, Tolerance::Da(0.05), 1, 3, 0);
+    let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+    let seqs: Vec<Vec<u8>> = mats
+        .iter()
+        .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+        .collect();
+    assert_eq!(seqs, vec![b"WWYWWFK".to_vec()], "votes {sel:?}");
+}
+
+#[test]
 fn match_spectra_keeps_input_order_and_finds_the_enumeration_top_hit() {
     let (mut spectra, idx, params) = small_search_fixture();
     spectra.sort_by(|a, b| {

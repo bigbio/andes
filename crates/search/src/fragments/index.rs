@@ -363,7 +363,6 @@ impl ChunkFragmentIndex {
             vote_peaks,
             &|_| true,
             None,
-            false,
         )
     }
 
@@ -379,11 +378,8 @@ impl ChunkFragmentIndex {
         vote_peaks: usize,
         keep: &dyn Fn(f64) -> bool,
         rt: Option<&FormRtSource<'_>>,
-        windows_only: bool,
     ) -> Vec<(u32, u16)> {
         let shift_ppm = params.precursor_mass_shift_ppm;
-        let mut lo = f64::MAX;
-        let mut hi = f64::MIN;
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
             if params.dia {
@@ -394,8 +390,6 @@ impl ChunkFragmentIndex {
                     params.chimeric_isolation_halfwidth_da,
                     shift_ppm,
                 );
-                lo = lo.min(w_lo);
-                hi = hi.max(w_hi);
                 exact.push((
                     w_lo - PRECURSOR_GATE_MARGIN_DA,
                     w_hi + PRECURSOR_GATE_MARGIN_DA,
@@ -411,15 +405,13 @@ impl ChunkFragmentIndex {
                     c - params.precursor_tolerance.left.as_da(c),
                     c + params.precursor_tolerance.right.as_da(c),
                 );
-                lo = lo.min(w_lo);
-                hi = hi.max(w_hi);
                 exact.push((
                     w_lo - PRECURSOR_GATE_MARGIN_DA,
                     w_hi + PRECURSOR_GATE_MARGIN_DA,
                 ));
             }
         }
-        if lo > hi {
+        if exact.is_empty() {
             return Vec::new();
         }
         let complement_masses: Vec<f64> = match (params.open_search.is_some(), charges.len()) {
@@ -433,11 +425,7 @@ impl ChunkFragmentIndex {
             }
             _ => Vec::new(),
         };
-        let ranges: smallvec::SmallVec<[(f64, f64); 16]> = if windows_only {
-            merged_ranges(&exact)
-        } else {
-            smallvec::smallvec![(lo, hi)]
-        };
+        let ranges = merged_ranges(&exact);
         let mut sel = self.vote(
             spec,
             &ranges,
@@ -465,13 +453,7 @@ impl ChunkFragmentIndex {
                 select_top_k(&mut sel, top_k)
             }
         }
-        sel.into_iter()
-            .filter(|&(id, _, _)| {
-                let m = self.form_mass[id as usize];
-                exact.iter().any(|&(a, b)| m >= a && m <= b)
-            })
-            .map(|(id, v, _)| (id, v))
-            .collect()
+        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
 
     #[allow(clippy::too_many_arguments)]

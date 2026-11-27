@@ -1187,17 +1187,12 @@ fn mfn_timed(
                     });
             }
             None => {
-                for (k, &ii) in subset.iter().enumerate() {
-                    let yo = t.y(ii) * o_bar[ii];
-                    opt2 = if k < active {
-                        yo <= 1.0 + epsilon
-                    } else {
-                        yo >= 1.0 - epsilon
-                    };
-                    if !opt2 {
-                        break;
-                    }
-                }
+                opt2 = subset[..active]
+                    .par_iter()
+                    .all(|&ii| t.y(ii) * o_bar[ii] <= 1.0 + epsilon)
+                    && subset[active..]
+                        .par_iter()
+                        .all(|&ii| t.y(ii) * o_bar[ii] >= 1.0 - epsilon);
             }
         }
         if opt && opt2 {
@@ -1244,9 +1239,9 @@ fn mfn_timed(
                 sc.record(&w_bar, delta, &w);
             }
             None => {
-                for (oi, &ob) in o.iter_mut().zip(&o_bar) {
-                    *oi += delta * (ob - *oi);
-                }
+                o.par_iter_mut()
+                    .zip(o_bar.par_iter())
+                    .for_each(|(oi, &ob)| *oi += delta * (ob - *oi));
             }
         }
         let clock = std::time::Instant::now();

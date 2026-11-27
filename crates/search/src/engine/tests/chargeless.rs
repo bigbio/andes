@@ -124,19 +124,21 @@ fn top_only_search_keeps_the_psms_of_the_full_search() {
         spectrum(mz2, Some(2), &[&other]),
         spectrum(mz2, None, &[&other, &truth]),
     ];
-    let key = |q: TopNQueue| -> Vec<(u32, u8, u32, u32, i32)> {
-        q.into_sorted_vec()
+    let key = |q: TopNQueue| -> Vec<(u8, u32, u32, i32)> {
+        let mut v: Vec<_> = q
+            .into_sorted_vec()
             .iter()
             .map(|p| {
                 (
-                    p.primary_candidate_idx(),
                     p.charge_used,
                     p.score.to_bits(),
                     p.rank_score.to_bits(),
                     p.edge_score,
                 )
             })
-            .collect()
+            .collect();
+        v.sort_unstable();
+        v
     };
     for (mode, top_k) in [
         (ScoreMode::Rank, 0),

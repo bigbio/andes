@@ -280,7 +280,7 @@ const READ_SPAN_BYTES: usize = 4 << 20;
 /// order. `ids` must not decrease; nearby rows are read together with positioned reads, so
 /// several threads can read one file at once.
 fn read_rows(file: &File, codec: &RowCodec, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
-    use std::os::unix::fs::FileExt;
+    use crate::pread::ReadAt;
     let width = codec.width();
     let span_rows = (READ_SPAN_BYTES / width.max(1)).max(1);
     let gap_rows = (READ_GAP_BYTES / width.max(1)).max(1);

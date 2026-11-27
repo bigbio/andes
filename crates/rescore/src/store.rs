@@ -2,7 +2,7 @@ use crate::budget::{Budget, Reservation};
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::os::unix::fs::FileExt;
+use crate::pread::ReadAt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -164,8 +164,16 @@ impl Drop for Columns {
     }
 }
 
+/// Write buffer of one column file when the budget holds it.
+const COLUMN_WRITE_MAX: u64 = 1 << 20;
+/// Write buffer of one column file when the budget is short; these few KiB per column are the
+/// only memory of the column pass outside the budget.
+const COLUMN_WRITE_MIN: u64 = 64 << 10;
+
 impl Store {
-    /// Writes every feature column to its own file in the spill directory, in one pass.
+    /// Writes every feature column to its own file in the spill directory, in one pass. Each
+    /// column's write buffer and staging bytes are charged to the budget; when the budget is
+    /// short the write buffers shrink, down to `COLUMN_WRITE_MIN`.
     pub(crate) fn columns(&self) -> Result<Columns, String> {
         let nf = self.nfeat;
         let k = SPILL_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -173,6 +181,12 @@ impl Store {
             paths: Vec::with_capacity(nf),
             nrows: self.nrows,
         };
+        let stage = (self.block_rows * 4) as u64;
+        let mut held = Reservation::none();
+        held.grow_up_to(&self.budget, nf as u64 * (COLUMN_WRITE_MAX + stage));
+        let capacity = (held.bytes() / nf.max(1) as u64)
+            .saturating_sub(stage)
+            .clamp(COLUMN_WRITE_MIN, COLUMN_WRITE_MAX) as usize;
         let mut sinks: Vec<(BufWriter<File>, Vec<u8>)> = Vec::with_capacity(nf);
         for j in 0..nf {
             let path = self
@@ -182,7 +196,7 @@ impl Store {
             let file = File::create(&path)
                 .map_err(|e| format!("create column file {}: {e}", path.display()))?;
             cols.paths.push(path);
-            sinks.push((BufWriter::with_capacity(1 << 20, file), Vec::new()));
+            sinks.push((BufWriter::with_capacity(capacity, file), Vec::new()));
         }
         let mut failed: Option<String> = None;
         self.for_each_block(|_, block| {
@@ -214,6 +228,7 @@ impl Store {
             }
         }
         drop(sinks);
+        drop(held);
         match failed {
             Some(e) => Err(e),
             None => Ok(cols),
@@ -412,6 +427,21 @@ mod tests {
         }
         drop(cols);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn column_pass_charges_its_buffers_to_the_budget_and_returns_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = build(200, dir.path(), 10, 4);
+        assert!(spill.is_spilled());
+        assert_eq!(spill.budget.available(), 200);
+        let cols = spill.columns().unwrap();
+        assert_eq!(spill.budget.peak(), 200);
+        assert_eq!(spill.budget.available(), 200);
+        let mut got = Vec::new();
+        cols.for_each_value(3, |x| got.push(x)).unwrap();
+        let want: Vec<f32> = (0..10).map(|r| (r * 100 + 3) as f32 + 0.5).collect();
+        assert_eq!(got, want);
     }
 
     fn block_sums(s: &Store, threads: usize, live: &AtomicU64, peak: &AtomicU64) -> Vec<u64> {

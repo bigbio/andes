@@ -14,6 +14,7 @@ mod merge;
 mod normalize;
 mod pep;
 mod pin;
+mod pread;
 mod run;
 mod scores;
 mod store;

@@ -294,6 +294,19 @@ fn with_entrapment(
         );
     };
     let s = built.stats;
+    if let Some(p) = built.proteins.proteins.iter().find(|p| {
+        search::decoy::is_decoy_accession_affix(
+            &p.accession,
+            &cli.db.decoy_prefix,
+            cli.db.decoy_suffix.as_deref(),
+        )
+    }) {
+        return Err(format!(
+            "--add-entrapment generated accession {} that matches the configured decoy prefix or \
+             suffix; choose a different --decoy-prefix or --decoy-suffix",
+            p.accession
+        ));
+    }
     log::info!(target: "database",
         "{} entrapment proteins (seed {}; {} variant, isoform, chain or knockoff entries have \
          none); {} entrapment peptides against {} target peptides (r = {:.3}); {} equalled a \
@@ -308,19 +321,6 @@ fn with_entrapment(
         output::statistics::thousands(s.left),
         t0.elapsed().as_secs_f64()
     );
-    if let Some(p) = built.proteins.proteins.iter().find(|p| {
-        search::decoy::is_decoy_accession_affix(
-            &p.accession,
-            &cli.db.decoy_prefix,
-            cli.db.decoy_suffix.as_deref(),
-        )
-    }) {
-        return Err(format!(
-            "--add-entrapment generated accession {} that matches the configured decoy prefix or \
-             suffix; choose a different --decoy-prefix or --decoy-suffix",
-            p.accession
-        ));
-    }
     target_db.proteins.extend(built.proteins.proteins);
     Ok(target_db)
 }

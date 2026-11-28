@@ -1,5 +1,8 @@
 //! Per-project error of a pooled crosslink FDR: at each q cut of the pooled list, the target and
-//! decoy counts of every project's share, and the decoy estimate of that share.
+//! decoy counts of every project's share, and the decoy estimate of that share. The table of
+//! quantified cross-link features is in `features`.
+
+pub mod features;
 
 use std::path::Path;
 use std::sync::Arc;

@@ -504,6 +504,40 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) xl_linear_only: bool,
 
+    /// With --xl --lfq: q-value threshold of the quantified cross-links
+    ///
+    /// A cross-linked precursor is quantified when a target cross-link spectrum match of it
+    /// has a q-value at or below this, and the residue pair of that match too. The q-values
+    /// are those of this search (<base>.xl.tsv and <base>.xl.residue_pairs.tsv), or those of
+    /// --xl-cohort-fdr. With few cross-links, as from one purified protein or complex, the
+    /// pair score alone accepts little at 1 %: run `andes cohort xl-fdr` on the search's
+    /// table first and pass its output as --xl-cohort-fdr.
+    #[arg(
+        long = "xl-fdr",
+        value_name = "FDR",
+        default_value = "0.01",
+        value_parser = parse_unit_fraction,
+        requires = "xl",
+        hide_short_help = true,
+        help_heading = H_MODES
+    )]
+    pub(crate) xl_fdr: f64,
+
+    /// With --xl --lfq: take the q-values of the quantified cross-links from `andes cohort xl-fdr --output <BASE>`
+    ///
+    /// Reads <BASE>.xl.tsv and <BASE>.xl.residue_pairs.tsv, which hold the q-values of the
+    /// matches and residue pairs of all runs together after rescoring, and applies --xl-fdr
+    /// to them instead of to this search's own q-values. The runs of that stage must be the
+    /// --spectrum inputs of this search, searched with the same database and settings.
+    #[arg(
+        long = "xl-cohort-fdr",
+        value_name = "BASE",
+        requires = "xl",
+        hide_short_help = true,
+        help_heading = H_MODES
+    )]
+    pub(crate) xl_cohort_fdr: Option<PathBuf>,
+
     /// With --xl: rescore the intra-link CSMs with Percolator (comparison only)
     ///
     /// Trains a Percolator model on the intra-link rows alone (<base>.xl.intra.pin) and
@@ -556,7 +590,10 @@ pub(crate) struct SearchArgs {
     /// time and integrated. Writes <stem>.lfq.parquet and, with --output-parquet, the QPX
     /// quantms.feature.parquet. mzML, Thermo .raw and Bruker .d input (a .d's MS1 frames
     /// are summed over ion mobility). With --glyco it quantifies intact glycopeptides
-    /// instead (see --glyco).
+    /// instead (see --glyco). With --xl it quantifies the cross-linked peptide pairs
+    /// instead: the precursors of the cross-link spectrum matches at --xl-fdr, on their
+    /// whole isotope envelope, into <base>.xl.features.parquet and
+    /// <base>.xl.residue_pairs.quant.tsv (DOCS.md, cross-link quantification).
     #[arg(long, help_heading = H_QUANT)]
     pub(crate) lfq: bool,
 
@@ -598,6 +635,14 @@ pub(crate) struct SearchArgs {
     /// input on the glycopeptides both runs identified, and the transfers are scored in
     /// their own target/decoy competition. Transferred rows say so in the Evidence column of
     /// .glyco.lfq.tsv. Details: DOCS.md §9.
+    ///
+    /// With --xl --lfq (no --rescore needed): every quantified cross-link is measured in
+    /// each run that did not identify it, around the retention time that a joint alignment
+    /// of the runs predicts. The alignment is fitted on the MS1 features of the cross-links
+    /// and of the linear peptides identified in the same spectra. Each transfer competes
+    /// with a decoy feature (the same isotope envelope at a shifted mass, or the same mass
+    /// at a shifted retention time); its q-value is `quant_q` in <base>.xl.features.parquet
+    /// and --quant-transfer-fdr the threshold of an accepted quantity.
     #[arg(long, help_heading = H_QUANT)]
     pub(crate) mbr: bool,
 

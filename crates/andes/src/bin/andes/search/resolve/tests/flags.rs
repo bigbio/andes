@@ -145,15 +145,35 @@ fn xl_rejects_the_flags_it_does_not_support() {
             "DSSO",
             "--output-tsv",
             "out.tsv",
-            "--lfq",
+            "--chimeric",
             "--refine",
         ],
-        "--xl does not support: --output-tsv, --refine, --lfq",
+        "--xl does not support: --output-tsv, --refine, --chimeric",
     );
     rejected(
         &["--xl", "DSSO", "--tmt", "tmt10plex"],
         "--xl does not support: --tmt",
     );
+}
+
+#[test]
+fn xl_quantification_is_lfq_with_optional_match_between_runs() {
+    accepted(&["--xl", "DSSO", "--lfq"]);
+    accepted(&["--xl", "DSSO", "--lfq", "--mbr"]);
+    accepted(&[
+        "--xl",
+        "BS3",
+        "--lfq",
+        "--mbr",
+        "--xl-fdr",
+        "0.05",
+        "--xl-cohort-fdr",
+        "out/cohort",
+    ]);
+    rejected(&["--xl", "DSSO", "--mbr"], "--xl --mbr needs --lfq");
+    let cli = args(&["--xl", "DSSO", "--lfq"]);
+    assert_eq!(cli.xl_fdr, 0.01);
+    assert_eq!(cli.xl_cohort_fdr, None);
 }
 
 #[test]

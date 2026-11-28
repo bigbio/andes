@@ -1,6 +1,7 @@
 pub(crate) mod ambiguity;
 pub(crate) mod fdr;
 pub(crate) mod ms2;
+pub(crate) mod quantities;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -596,6 +597,7 @@ pub(crate) fn run_xl(
     spectrum_paths: &[PathBuf],
     run_ends: &[usize],
     acquisition: &crate::acquisition::Acquisition,
+    quant: Option<&crate::quant::run::QuantCollector>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let linkers = cli.xl.clone().ok_or("--xl: no crosslinker")?.0;
@@ -681,7 +683,11 @@ pub(crate) fn run_xl(
     let ms2_rows = ms2_model.as_ref().map(|m| {
         let t = std::time::Instant::now();
         let rows = m.rows(spectra_for_xl, &results, &runs);
-        let missing = rows.iter().flatten().filter(|r| r[r.len() - 1] > 0.0).count();
+        let missing = rows
+            .iter()
+            .flatten()
+            .filter(|r| r[r.len() - 1] > 0.0)
+            .count();
         log::info!(
             target: "xl",
             "fragment-intensity features for {} CSMs ({missing} with a peptide the model \
@@ -769,6 +775,30 @@ pub(crate) fn run_xl(
         csm_path.display(),
         t_total.elapsed().as_secs_f64()
     );
+    if let Some(collector) = quant {
+        let ms1_runs = collector.run_ms1();
+        if ms1_runs.is_empty() {
+            return Err(
+                "--xl --lfq: no run's MS1 scans were captured, so no cross-link can be \
+                 quantified. Label-free quantification needs input that carries MS1 scans \
+                 (mzML, Thermo .raw or Bruker .d; not MGF)"
+                    .into(),
+            );
+        }
+        crate::xl::quantities::run(
+            report_base,
+            &crate::xl::quantities::Search {
+                spectra: spectra_for_xl,
+                results: &results,
+                score: &score,
+                levels: &levels,
+                linkers: &runs,
+                prepared,
+            },
+            &ms1_runs,
+            cli,
+        )?;
+    }
     Ok(())
 }
 
@@ -1036,10 +1066,7 @@ mod tests {
         let d = xl_default_variable_mods(None, std::slice::from_ref(&x))
             .unwrap()
             .0;
-        assert_eq!(
-            d.len(),
-            crate::models::default_variable_mods().len() + 2
-        );
+        assert_eq!(d.len(), crate::models::default_variable_mods().len() + 2);
         assert!(d.iter().any(|m| m.name == "Xlink:DSS[156]"));
         let explicit = crate::cli::parse_variable_mods("Oxidation (M)").unwrap();
         assert!(xl_default_variable_mods(Some(&explicit), std::slice::from_ref(&x)).is_none());

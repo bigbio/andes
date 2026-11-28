@@ -69,14 +69,14 @@ pub(super) fn quant_collector(
                 .into());
             }
         }
-        if !cli.glyco && !cli.rescore && (s.plex.is_some() || s.lfq) {
+        if !cli.glyco && cli.xl.is_none() && !cli.rescore && (s.plex.is_some() || s.lfq) {
             log::warn!(
                 "--tmt/--lfq without --rescore: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
                  or add --rescore so only PSMs at q<=--psm-fdr are quantified."
             );
         }
-        if !cli.glyco {
+        if !cli.glyco && cli.xl.is_none() {
             log::info!(target: "quant", "{}", s.describe());
         }
     }

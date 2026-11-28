@@ -185,6 +185,54 @@ const ELEMENTS: &[(&str, f64)] = &[
     ("P", crate::mass::P),
 ];
 
+/// The signed element counts of a composition: `H(-2) O(-1)` removes atoms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Elements {
+    pub h: i32,
+    pub c: i32,
+    pub n: i32,
+    pub o: i32,
+    pub s: i32,
+    pub p: i32,
+}
+
+impl Elements {
+    pub fn monoisotopic_mass(&self) -> f64 {
+        f64::from(self.h) * crate::mass::H
+            + f64::from(self.c) * crate::mass::C
+            + f64::from(self.n) * crate::mass::N
+            + f64::from(self.o) * crate::mass::O
+            + f64::from(self.s) * crate::mass::S
+            + f64::from(self.p) * crate::mass::P
+    }
+}
+
+/// The element counts of a composition written as `H(10) C(8) O(2)`; `None` for an element
+/// outside H, C, N, O, S and P or a count that is not a whole number.
+pub fn composition_elements(composition: &str) -> Option<Elements> {
+    let mut e = Elements::default();
+    for tok in composition.split_whitespace() {
+        let (el, n) = match tok.find('(') {
+            Some(i) => {
+                let n: i32 = tok[i + 1..].strip_suffix(')')?.parse().ok()?;
+                (&tok[..i], n)
+            }
+            None => (tok, 1),
+        };
+        let slot = match el {
+            "H" => &mut e.h,
+            "C" => &mut e.c,
+            "N" => &mut e.n,
+            "O" => &mut e.o,
+            "S" => &mut e.s,
+            "P" => &mut e.p,
+            _ => return None,
+        };
+        *slot = slot.checked_add(n)?;
+    }
+    Some(e)
+}
+
 pub fn composition_mass(composition: &str) -> Option<f64> {
     let mut total = 0.0;
     for tok in composition.split_whitespace() {
@@ -249,6 +297,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn element_counts_give_the_mass_of_every_bundled_composition() {
+        let mut checked = 0;
+        for r in &table().reagents {
+            for p in parts(r) {
+                let c = p.composition.as_deref().expect("composition");
+                let e =
+                    composition_elements(c).unwrap_or_else(|| panic!("{} {}: {c}", r.name, p.name));
+                assert!(
+                    (e.monoisotopic_mass() - mass_of(p)).abs() < 1e-9,
+                    "{} {}: {e:?} vs {}",
+                    r.name,
+                    p.name,
+                    mass_of(p)
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "compositions checked: {checked}");
+    }
+
+    #[test]
+    fn element_counts_are_signed_and_reject_unknown_elements() {
+        let dss = composition_elements("H(10) C(8) O(2)").unwrap();
+        assert_eq!(
+            (dss.h, dss.c, dss.o, dss.n, dss.s, dss.p),
+            (10, 8, 2, 0, 0, 0)
+        );
+        assert!((dss.monoisotopic_mass() - 138.068_08).abs() < 1e-5);
+        let edc = composition_elements("H(-2) O(-1)").unwrap();
+        assert_eq!((edc.h, edc.o), (-2, -1));
+        assert_eq!(composition_elements("H(3) C(8) O(5) P").unwrap().p, 1);
+        assert_eq!(composition_elements("H(2) Se"), None);
+        assert_eq!(composition_elements("H(1.5)"), None);
     }
 
     #[test]

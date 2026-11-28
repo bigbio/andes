@@ -119,8 +119,6 @@ pub(crate) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
             (cli.refine, "--refine"),
             (cli.psm_fdr.is_some(), "--psm-fdr"),
             (cli.pep.is_some(), "--pep"),
-            (cli.lfq, "--lfq"),
-            (cli.mbr, "--mbr"),
             (cli.quant_dir.is_some(), "--quant-dir"),
             (cli.chimeric, "--chimeric"),
             (cli.localize.is_some(), "--localize"),
@@ -130,9 +128,17 @@ pub(crate) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
         if !unsupported.is_empty() {
             return Err(format!(
                 "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
-                 tables, scored by the pair score)",
+                 tables, scored by the pair score; its quantification is --xl --lfq, with \
+                 --mbr for match between runs)",
                 unsupported.join(", ")
             ));
+        }
+        if cli.mbr && !cli.lfq {
+            return Err(
+                "--xl --mbr needs --lfq: match-between-runs measures the identified \
+                 cross-links in the runs that did not identify them"
+                    .into(),
+            );
         }
     }
     if cli.glyco {

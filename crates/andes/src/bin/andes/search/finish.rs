@@ -1139,6 +1139,7 @@ pub(super) fn post_search(
             spectrum_paths,
             run_ends,
             acquisition,
+            quant.as_ref(),
             t_total,
         )?;
         return Ok(None);

@@ -39,7 +39,7 @@ Each stage and where it lives:
 | PIN | `crates/output` | `pin.rs` |
 | Rescoring | `crates/rescore` | `run.rs`, `svm.rs`, `pep.rs` |
 | Protein inference | `crates/output` | `protein_inference.rs` |
-| Quantification | `crates/quant` | `xic.rs`, `lfq.rs`, `isobaric.rs`, `library.rs` |
+| Quantification | `crates/quant` | `xic.rs`, `lfq.rs`, `envelope.rs`, `isobaric.rs`, `library.rs` |
 | Tables and views | `crates/output` | `qpx.rs`, `pg_parquet.rs`, `quant_out.rs` |
 
 ## 3. Crates
@@ -140,6 +140,7 @@ runs through `xl_run.rs`, `xl_fdr.rs`; glyco through `glyco_run.rs`.
 | TMT study table | `crates/output/src/tmt.rs` | Study-level isobaric table. |
 | MBR output | `crates/output/src/mbr.rs` | Transfers and their validation table. |
 | Cross-link projects | `crates/output/src/crosslinks.rs` | Per-project cross-link results. |
+| Cross-link features | `crates/output/src/crosslinks/features.rs` | `<base>.xl.features.parquet`: one row per quantified cross-linked precursor and run (`--xl --lfq`); the binary's `xl/quantities.rs` measures them. |
 
 Every Parquet table is versioned: `TableVersion` in `crates/output/src/versioned.rs`
 holds a schema key (`andes.<table>.schema`), a version and a major number, written to the file

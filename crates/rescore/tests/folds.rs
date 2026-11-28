@@ -57,8 +57,9 @@ fn folds_reproduce_percolator_training_sets() {
         let fold = folds_by_spectrum(&pin.meta, 3, seed);
         let got: Vec<(usize, usize, usize)> = (0..3u8)
             .map(|f| {
-                let train: Vec<usize> = (0..pin.meta.len()).filter(|&i| fold[i] != f).collect();
-                let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i].label < 0).collect();
+                let train: Vec<rescore::RowId> =
+                (0..pin.meta.len() as rescore::RowId).filter(|&i| fold[i as usize] != f).collect();
+                let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i as usize].label < 0).collect();
                 let w = init_direction(&pin, &norm, &train, 0.01, false).unwrap();
                 let feature = w.iter().position(|&v| v != 0.0).unwrap() + 1;
                 let s = score(&pin.rows, &train, &w, Some(&norm));
@@ -107,8 +108,9 @@ fn colliding_scan_hashes_split_as_percolator_at_any_thread_count() {
     let fold = folds_by_spectrum(&pin.meta, 3, 42);
     let got: Vec<Split> = (0..3u8)
         .map(|f| {
-            let train: Vec<usize> = (0..pin.meta.len()).filter(|&i| fold[i] != f).collect();
-            let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i].label < 0).collect();
+            let train: Vec<rescore::RowId> =
+                (0..pin.meta.len() as rescore::RowId).filter(|&i| fold[i as usize] != f).collect();
+            let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i as usize].label < 0).collect();
             let w = init_direction(&pin, &norm, &train, 0.01, false).unwrap();
             let feature = w.iter().position(|&v| v != 0.0).unwrap() + 1;
             let s = score(&pin.rows, &train, &w, Some(&norm));

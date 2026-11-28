@@ -22,6 +22,10 @@ mod svm;
 mod text;
 mod write;
 
+/// A PSM's row number in the PIN. A PIN holds fewer than 2^32 PSMs, so index lists that scale
+/// with the PSM count store 4 bytes a row.
+pub type RowId = u32;
+
 pub use budget::{Budget, Reservation};
 pub use cv::{train, CvConfig, CvResult};
 pub use direction::init_direction;

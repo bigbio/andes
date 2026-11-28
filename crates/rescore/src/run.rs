@@ -7,7 +7,8 @@ use crate::normalize::{score, stdv, Norm};
 use crate::pep::{estimate_pi0, pep_from_q, too_good_separation};
 use crate::pin::{read_pin, MemLimit, Pin};
 use crate::scores::{mix_max_q, psm_order, tdc_q, tdc_winners};
-use crate::write::{write_results, write_weights, Results};
+use crate::write::{write_ordered, write_weights, Results};
+use crate::RowId;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -222,8 +223,8 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
     let nf = pin.rows.nfeat();
     let norm = identity(nf);
     let fold = folds_by_spectrum(&pin.meta, FOLDS, a.seed);
-    let test: Vec<Vec<usize>> = (0..FOLDS)
-        .map(|f| (0..n).filter(|&i| fold[i] as usize == f).collect())
+    let test: Vec<Vec<RowId>> = (0..FOLDS)
+        .map(|f| (0..n as RowId).filter(|&i| fold[i as usize] as usize == f).collect())
         .collect();
     let all_sets = (1u8 << FOLDS) - 1;
     let mask: Vec<u8> = fold.iter().map(|&f| all_sets & !(1u8 << f)).collect();
@@ -242,12 +243,12 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
     let mut scores = vec![0.0f64; n];
     for (rows, wf) in test.iter().zip(&w) {
         for (&i, s) in rows.iter().zip(score(&pin.rows, rows, wf, None)) {
-            scores[i] = s;
+            scores[i as usize] = s;
         }
     }
     for rows in &test {
-        let s: Vec<f64> = rows.iter().map(|&i| scores[i]).collect();
-        let d: Vec<bool> = rows.iter().map(|&i| is_decoy[i]).collect();
+        let s: Vec<f64> = rows.iter().map(|&i| scores[i as usize]).collect();
+        let d: Vec<bool> = rows.iter().map(|&i| is_decoy[i as usize]).collect();
         check_separation(&s, &d)?;
     }
     check_separation(&scores, is_decoy)?;
@@ -287,12 +288,13 @@ fn finish(
         q: &q,
         pep: &pep,
     };
-    write_results(
+    write_ordered(
         &a.target,
         &a.decoy,
         &pin.meta,
         &pin.texts,
         &pin.file_names,
         &res,
+        &order,
     )
 }

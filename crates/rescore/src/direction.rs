@@ -18,13 +18,13 @@ pub(crate) fn pin_direction(pin: &Pin) -> Option<&[f64]> {
 pub fn init_direction(
     pin: &Pin,
     norm: &Norm,
-    rows: &[usize],
+    rows: &[crate::RowId],
     fdr: f64,
     overrule: bool,
 ) -> Result<Vec<f64>, String> {
     let mut mask = vec![0u8; pin.meta.len()];
     for &r in rows {
-        mask[r] = 1;
+        mask[r as usize] = 1;
     }
     let mut w = init_directions(pin, norm, &mask, 1, fdr, overrule)?;
     Ok(w.remove(0))

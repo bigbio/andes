@@ -2,6 +2,7 @@ use crate::budget::{Budget, Reservation};
 use crate::codec::{normalised, RowCodec};
 use crate::normalize::Norm;
 use crate::store::Store;
+use crate::RowId;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::fs::File;
@@ -53,7 +54,7 @@ pub(crate) fn stride_for(ncols: usize) -> usize {
 pub(crate) fn fill(
     store: &Store,
     norm: &Norm,
-    idx: &[usize],
+    idx: &[RowId],
     mut put: impl FnMut(usize, &[f32], &[f32]),
 ) {
     let nf = store.nfeat();
@@ -69,14 +70,14 @@ pub(crate) fn fill(
         }
         return;
     }
-    let mut order: Vec<usize> = (0..idx.len()).collect();
-    order.sort_by_key(|&p| idx[p]);
+    let mut order: Vec<RowId> = (0..idx.len() as RowId).collect();
+    order.sort_by_key(|&p| idx[p as usize]);
     let mut next = 0usize;
     store.for_each_block(|start, block| {
         let end = start + block.len() / nf;
-        while next < order.len() && idx[order[next]] < end {
-            let p = order[next];
-            let r = idx[p] - start;
+        while next < order.len() && (idx[order[next] as usize] as usize) < end {
+            let p = order[next] as usize;
+            let r = idx[p] as usize - start;
             let src = &block[r * nf..(r + 1) * nf];
             for (((d, &x), &m), &sd) in buf[..nf]
                 .iter_mut()
@@ -94,13 +95,13 @@ pub(crate) fn fill(
         next,
         order.len(),
         "Rows::gather: row {} not in a store of {} rows",
-        idx[order[next.min(order.len() - 1)]],
+        idx[order[next.min(order.len() - 1)] as usize],
         store.len()
     );
 }
 
 impl Rows {
-    pub fn gather(store: &Store, norm: &Norm, idx: &[usize]) -> Rows {
+    pub fn gather(store: &Store, norm: &Norm, idx: &[RowId]) -> Rows {
         let ncols = store.nfeat() + 1;
         let stride = stride_for(ncols);
         let mut data = vec![0.0f32; idx.len() * stride];
@@ -168,7 +169,7 @@ impl Rows {
     pub(crate) fn gather_within(
         store: &Store,
         norm: &Norm,
-        idx: &[usize],
+        idx: &[RowId],
         budget: &Arc<Budget>,
         codec: &Arc<RowCodec>,
     ) -> Result<Rows, String> {
@@ -394,16 +395,17 @@ impl Default for MfnOpts {
 }
 
 pub(crate) struct Examples {
-    pub(crate) rows: Vec<usize>,
+    pub(crate) rows: Vec<RowId>,
     pub(crate) pos: Vec<bool>,
 }
 
 impl Examples {
     pub(crate) fn from_lists(idx_pos: &[usize], idx_neg: &[usize]) -> Examples {
-        let mut ex: Vec<(usize, bool)> = idx_neg
+        let id = |r: usize| r as RowId;
+        let mut ex: Vec<(RowId, bool)> = idx_neg
             .iter()
-            .map(|&r| (r, false))
-            .chain(idx_pos.iter().map(|&r| (r, true)))
+            .map(|&r| (id(r), false))
+            .chain(idx_pos.iter().map(|&r| (id(r), true)))
             .collect();
         ex.sort_unstable();
         Examples {
@@ -415,7 +417,7 @@ impl Examples {
 
 struct Train<'a> {
     x: &'a Rows,
-    rows: &'a [usize],
+    rows: &'a [RowId],
     pos: &'a [bool],
     cpos: f64,
     cneg: f64,
@@ -475,14 +477,15 @@ impl Train<'_> {
         E: Fn(usize) -> usize + Sync,
     {
         match &self.x.data {
-            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[example(k)]), &mut out[..n], init, body),
+            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[example(k)] as usize), &mut out[..n], init, body),
             RowData::Coded(data, codec) => out[..n]
                 .par_chunks_mut(CHUNK)
                 .enumerate()
                 .map(|(c, outs)| {
                     let mut part = init();
                     let first = c * CHUNK;
-                    let ids: Vec<usize> = (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                    let ids: Vec<usize> =
+                        (first..first + outs.len()).map(|k| self.rows[example(k)] as usize).collect();
                     decode_rows(data, codec, &ids, |j, row| {
                         body(&mut part, first + j, row, &mut outs[j]);
                     });
@@ -498,7 +501,7 @@ impl Train<'_> {
                         let mut part = init();
                         let first = c * CHUNK;
                         let ids: Vec<usize> =
-                            (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                            (first..first + outs.len()).map(|k| self.rows[example(k)] as usize).collect();
                         read_rows(&file, codec, &ids, |j, row| {
                             body(&mut part, first + j, row, &mut outs[j]);
                         });
@@ -837,7 +840,7 @@ fn screened_pass(
                 return;
             }
         }
-        let row = t.x.row(t.rows[k]);
+        let row = t.x.row(t.rows[k] as usize);
         if *s != FRESH {
             for (wb, &d) in w_bar_at[r..u].iter().zip(&delta_at[r..u]) {
                 let v = dot_row(row, wb);
@@ -1316,7 +1319,7 @@ mod tests {
             mean: vec![0.0; 3],
             inv_sd: vec![1.0; 3],
         };
-        let all: Vec<usize> = (0..6).collect();
+        let all: Vec<RowId> = (0..6).collect();
         let ram = Rows::gather(&store, &norm, &all);
         let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
         let spilled = Rows::gather_within(
@@ -1356,7 +1359,7 @@ mod tests {
             mean: vec![1.5; nf],
             inv_sd: vec![0.25; nf],
         };
-        let all: Vec<usize> = (0..n).collect();
+        let all: Vec<RowId> = (0..n as RowId).collect();
         let ram = Rows::gather(&store, &norm, &all);
         let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
         let spilled = Rows::gather_within(
@@ -1368,7 +1371,7 @@ mod tests {
         )
         .unwrap();
         assert!(spilled.is_spilled());
-        let rows: Vec<usize> = (0..n).filter(|r| r % 3 != 1 || r % 41 == 0).collect();
+        let rows: Vec<RowId> = (0..n as RowId).filter(|r| r % 3 != 1 || r % 41 == 0).collect();
         let pos: Vec<bool> = rows.iter().map(|r| r % 5 == 0).collect();
         let subset: Vec<usize> = (0..rows.len())
             .filter(|k| ((k / 2500) % 2 == 0 && k % 97 < 60) || k % 1777 == 0)

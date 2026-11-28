@@ -1,5 +1,6 @@
 use crate::pin::Pin;
 use crate::store::Store;
+use crate::RowId;
 use std::sync::Mutex;
 
 pub struct Norm {
@@ -67,7 +68,7 @@ pub fn raw_weights(norm: &Norm, w: &[f64]) -> Vec<f64> {
     out
 }
 
-pub(crate) fn per_row_sorted<F>(rows: &Store, idx: &[usize], k: usize, f: F) -> Vec<Vec<f64>>
+pub(crate) fn per_row_sorted<F>(rows: &Store, idx: &[RowId], k: usize, f: F) -> Vec<Vec<f64>>
 where
     F: Fn(&[f32], &mut [f64], &mut Vec<f64>) + Sync,
 {
@@ -80,7 +81,7 @@ where
     let br = rows.block_rows();
     let nblocks = rows.len().div_ceil(br);
     let bounds: Vec<usize> = (0..=nblocks)
-        .map(|b| idx.partition_point(|&r| r < b * br))
+        .map(|b| idx.partition_point(|&r| (r as usize) < b * br))
         .collect();
     let mut per_block: Vec<Vec<&mut [f64]>> = (0..nblocks).map(|_| Vec::with_capacity(k)).collect();
     for o in out.iter_mut() {
@@ -98,7 +99,8 @@ where
         let mut vals = vec![0.0f64; k];
         let mut scratch = Vec::new();
         for (p, &r) in idx[bounds[b]..bounds[b + 1]].iter().enumerate() {
-            let row = &block[(r - start) * nf..(r - start + 1) * nf];
+            let r = r as usize - start;
+            let row = &block[r * nf..(r + 1) * nf];
             f(row, &mut vals, &mut scratch);
             for (o, &v) in dst.iter_mut().zip(&vals) {
                 o[p] = v;
@@ -108,7 +110,7 @@ where
     out
 }
 
-pub fn score(rows: &Store, idx: &[usize], w: &[f64], norm: Option<&Norm>) -> Vec<f64> {
+pub fn score(rows: &Store, idx: &[RowId], w: &[f64], norm: Option<&Norm>) -> Vec<f64> {
     let nf = rows.nfeat();
     let one = |row: &[f32], out: &mut [f64], _: &mut Vec<f64>| {
         let mut s = w[nf];
@@ -129,13 +131,13 @@ pub fn score(rows: &Store, idx: &[usize], w: &[f64], norm: Option<&Norm>) -> Vec
     if idx.windows(2).all(|p| p[0] <= p[1]) {
         return per_row_sorted(rows, idx, 1, one).swap_remove(0);
     }
-    let mut order: Vec<usize> = (0..idx.len()).collect();
-    order.sort_by_key(|&p| idx[p]);
-    let sorted: Vec<usize> = order.iter().map(|&p| idx[p]).collect();
+    let mut order: Vec<RowId> = (0..idx.len() as RowId).collect();
+    order.sort_by_key(|&p| idx[p as usize]);
+    let sorted: Vec<RowId> = order.iter().map(|&p| idx[p as usize]).collect();
     let got = per_row_sorted(rows, &sorted, 1, one).swap_remove(0);
     let mut out = vec![0.0f64; idx.len()];
     for (&p, v) in order.iter().zip(got) {
-        out[p] = v;
+        out[p as usize] = v;
     }
     out
 }

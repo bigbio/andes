@@ -14,8 +14,12 @@ use std::sync::Arc;
 /// How the engine's storage budget is chosen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sizing {
-    /// The budget is `MemLimit::bytes`, as given.
+    /// The budget is `MemLimit::bytes`, as given, for the engine's stores, training rows and
+    /// fits; it may be smaller than what the PSMs themselves need.
     Fixed,
+    /// `MemLimit::bytes` bounds the engine's memory: the budget also carries the memory every
+    /// PSM keeps for the whole run, and reading a PIN whose PSMs need more is an error.
+    Cap,
     /// `MemLimit::bytes` is the memory the job or machine allows; the budget is what the PIN
     /// needs to stay in memory, never above `cap` nor above the allowance. `why` says where the
     /// allowance comes from.
@@ -376,7 +380,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         path,
     };
     let reading_budget = match &limit.sizing {
-        Sizing::Fixed => limit.bytes,
+        Sizing::Fixed | Sizing::Cap => limit.bytes,
         Sizing::FitInput { cap, .. } => limit.bytes.min(*cap),
     };
     let budget = Budget::new(reading_budget, &limit.spill_dir);
@@ -386,6 +390,10 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let mut file_ids: HashMap<String, u32> = HashMap::new();
     let mut file_names: Vec<String> = Vec::new();
     let mut default_direction = None;
+    let row_charge = match &limit.sizing {
+        Sizing::Cap => PER_ROW_BYTES + UNBUDGETED_BYTES_PER_ROW,
+        Sizing::Fixed | Sizing::FitInput { .. } => PER_ROW_BYTES,
+    };
     let mut per_row = Reservation::none();
     let batch = chunks_in_flight(budget.available(), rayon::current_num_threads());
     let mut in_flight = Reservation::none();
@@ -421,7 +429,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
                         .collect();
                     let mut start = 0usize;
                     let rows = p.meta.len();
-                    per_row.grow_up_to(&budget, rows as u64 * PER_ROW_BYTES);
+                    per_row.grow_up_to(&budget, rows as u64 * row_charge);
                     for (i, mut m) in p.meta.into_iter().enumerate() {
                         if cols.file.is_some() {
                             m.file = map[m.file as usize];
@@ -439,6 +447,16 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         chunks = next?;
     }
     drop(in_flight);
+    if meta.len() > crate::RowId::MAX as usize {
+        return Err(format!(
+            "Error: the PIN holds {} PSMs; the rescorer handles at most {} in one run.",
+            thousands(meta.len()),
+            thousands(crate::RowId::MAX as usize)
+        ));
+    }
+    if limit.sizing == Sizing::Cap {
+        check_capped_budget(&budget, &per_row, meta.len() as u64 * row_charge, meta.len())?;
+    }
     log::debug!(
         target: "rescore",
         "after reading the PIN: {:.2} GiB of the {:.2} GiB storage budget free, {:.2} GiB charged to {} rows",
@@ -463,13 +481,38 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     Ok(pin)
 }
 
+/// Fails when a capped budget could not hold the per-PSM charge of every row read: the memory
+/// each PSM keeps for the whole run would then come on top of the budget. The error names the
+/// budget that holds it alongside what the stores took while the PIN was read.
+fn check_capped_budget(
+    budget: &Budget,
+    per_row: &Reservation,
+    needed: u64,
+    psms: usize,
+) -> Result<(), String> {
+    if per_row.bytes() >= needed {
+        return Ok(());
+    }
+    let others = budget.total() - budget.available() - per_row.bytes();
+    let gib = (needed + others).div_ceil(1 << 30);
+    Err(format!(
+        "Error: --rescore-memory-gb {} is too small for this PIN: the rescorer keeps about {} bytes in memory for each of its {} PSMs. Use --rescore-memory-gb {gib} or more, or leave it unset to size the budget to the PIN.",
+        budget.total() >> 30,
+        needed / psms.max(1) as u64,
+        thousands(psms)
+    ))
+}
+
 /// SVM fits the automatic budget leaves room for at once. Each fit is itself parallel, so
 /// more at once mostly adds memory.
 const AUTO_CONCURRENT_FITS: u64 = 4;
 
-/// Bytes per PSM the engine allocates outside the storage budget (fold row lists, label and
-/// score vectors); the automatic budget leaves them room in the allowance.
-const UNBUDGETED_BYTES_PER_ROW: u64 = 96;
+/// Bytes per PSM the engine allocates outside its stores (fold row lists, training examples,
+/// label, score and order vectors). The automatic budget leaves them room in the allowance; a
+/// capped budget charges them as the rows are read, so it bounds the whole process. Measured on
+/// a 542 M-PSM PIN under an 80 GiB cap: peak RSS 92 bytes a PSM in all, of which `PER_ROW_BYTES`
+/// are already charged.
+const UNBUDGETED_BYTES_PER_ROW: u64 = 64;
 
 /// The storage budget at which the PIN's stores, the normalised training rows and
 /// `AUTO_CONCURRENT_FITS` SVM fits all stay in memory: the stores take at most half of the

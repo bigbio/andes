@@ -2,11 +2,98 @@
 
 use super::{DIA_MS1_GATE_SCANS, PreparedSearch};
 
+/// Mean number of peaks per bin of [`Ms1MzBins`]: a lookup then searches about two cache
+/// lines of peaks. It sets only speed and the index size (4 bytes per bin).
+const PEAKS_PER_BIN: usize = 16;
+
+/// Equal-width m/z bins over one MS1 scan's sorted peaks with the first peak index at or above
+/// each bin's lower edge, so a lookup searches only the peaks of one bin. The width follows
+/// the scan's own peak density. `starts` is empty when the peaks are not finite and sorted.
+#[derive(Debug, Default)]
+pub(super) struct Ms1MzBins {
+    first: f64,
+    width: f64,
+    starts: Vec<u32>,
+}
+
+impl Ms1MzBins {
+    pub(super) fn new(peaks: &[(f64, f32)]) -> Self {
+        let (Some(a), Some(b)) = (peaks.first(), peaks.last()) else {
+            return Self::default();
+        };
+        let sorted = peaks.iter().all(|p| p.0.is_finite())
+            && peaks.windows(2).all(|w| w[0].0 <= w[1].0)
+            && u32::try_from(peaks.len()).is_ok();
+        let n = peaks.len() / PEAKS_PER_BIN;
+        let width = (b.0 - a.0) / n as f64;
+        if !sorted || n < 2 || !width.is_finite() || width <= 0.0 {
+            return Self::default();
+        }
+        let mut bins = Self {
+            first: a.0,
+            width,
+            starts: Vec::new(),
+        };
+        bins.starts = (0..=n + 1)
+            .map(|k| peaks.partition_point(|p| p.0 < bins.edge(k)) as u32)
+            .collect();
+        bins
+    }
+
+    #[inline]
+    fn edge(&self, k: usize) -> f64 {
+        self.first + k as f64 * self.width
+    }
+
+    /// `peaks.partition_point(|p| p.0 < x)`, for the `peaks` this index was built from.
+    #[inline]
+    pub(super) fn lower_bound(&self, peaks: &[(f64, f32)], x: f64) -> usize {
+        let Some(last) = self.starts.len().checked_sub(1) else {
+            return peaks.partition_point(|p| p.0 < x);
+        };
+        if x.is_nan() || x <= self.first {
+            return 0;
+        }
+        if x >= self.edge(last) {
+            let lo = self.starts[last] as usize;
+            return lo + peaks[lo..].partition_point(|p| p.0 < x);
+        }
+        let mut k = (((x - self.first) / self.width) as usize).min(last - 1);
+        while k > 0 && self.edge(k) > x {
+            k -= 1;
+        }
+        while self.edge(k + 1) <= x {
+            k += 1;
+        }
+        let (lo, hi) = (self.starts[k] as usize, self.starts[k + 1] as usize);
+        lo + peaks[lo..hi].partition_point(|p| p.0 < x)
+    }
+}
+
 impl<'a> PreparedSearch<'a> {
     pub fn set_dia_ms1(&mut self, mut scans: Vec<model::scan::Ms1Scan>) {
         scans.retain(|s| s.rt.is_finite());
         scans.sort_by(|a, b| a.rt.total_cmp(&b.rt));
         self.dia_ms1 = scans;
+        self.index_dia_ms1();
+    }
+
+    fn index_dia_ms1(&mut self) {
+        self.dia_ms1_bins = self
+            .dia_ms1
+            .iter()
+            .map(|s| Ms1MzBins::new(&s.peaks))
+            .collect();
+    }
+
+    /// The index of the first peak of scan `k` at or above m/z `x`.
+    #[inline]
+    fn ms1_lower_bound(&self, k: usize, x: f64) -> usize {
+        let peaks = &self.dia_ms1[k].peaks;
+        match self.dia_ms1_bins.get(k) {
+            Some(bins) => bins.lower_bound(peaks, x),
+            None => peaks.partition_point(|p| p.0 < x),
+        }
     }
 
     /// Installs per-DIA-window 1/K0 tables for the mobility term of the MS1 gate.
@@ -45,11 +132,11 @@ impl<'a> PreparedSearch<'a> {
         let (lo, hi) = self.slice_k0(spec)?;
         let scans = self.dia_ms1_scans(spec.rt_seconds)?;
         let tol = mz * tol_ppm * 1e-6;
-        self.dia_ms1[scans]
-            .iter()
-            .filter(|s| s.mobility.len() == s.peaks.len())
-            .flat_map(|s| {
-                let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+        scans
+            .map(|k| (k, &self.dia_ms1[k]))
+            .filter(|(_, s)| s.mobility.len() == s.peaks.len())
+            .flat_map(|(k, s)| {
+                let i = self.ms1_lower_bound(k, mz - tol);
                 s.peaks[i..]
                     .iter()
                     .zip(&s.mobility[i..])
@@ -80,8 +167,10 @@ impl<'a> PreparedSearch<'a> {
             return self.dia_ms1_has(scans, mz, tol_ppm);
         };
         let tol = mz * tol_ppm * 1e-6;
-        self.dia_ms1[scans].iter().any(|s| {
-            let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+        let mut scans = scans;
+        scans.any(|k| {
+            let s = &self.dia_ms1[k];
+            let i = self.ms1_lower_bound(k, mz - tol);
             if s.mobility.len() != s.peaks.len() {
                 return s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol);
             }
@@ -94,6 +183,7 @@ impl<'a> PreparedSearch<'a> {
     }
 
     pub fn take_dia_ms1(&mut self) -> Vec<model::scan::Ms1Scan> {
+        self.dia_ms1_bins = Vec::new();
         std::mem::take(&mut self.dia_ms1)
     }
 
@@ -104,6 +194,7 @@ impl<'a> PreparedSearch<'a> {
                 p.0 *= f;
             }
         }
+        self.index_dia_ms1();
     }
 
     pub fn dia_ms1_error_ppm(&self, rt: Option<f64>, mz: f64, window_ppm: f64) -> Option<f64> {
@@ -111,7 +202,7 @@ impl<'a> PreparedSearch<'a> {
         self.dia_ms1_scans(rt)?
             .filter_map(|k| {
                 let s = &self.dia_ms1[k];
-                let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+                let i = self.ms1_lower_bound(k, mz - tol);
                 s.peaks[i..]
                     .iter()
                     .take_while(|p| p.0 <= mz + tol)
@@ -124,8 +215,10 @@ impl<'a> PreparedSearch<'a> {
 
     pub(super) fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64, tol_ppm: f64) -> bool {
         let tol = mz * tol_ppm * 1e-6;
-        self.dia_ms1[scans].iter().any(|s| {
-            let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+        let mut scans = scans;
+        scans.any(|k| {
+            let s = &self.dia_ms1[k];
+            let i = self.ms1_lower_bound(k, mz - tol);
             s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
         })
     }

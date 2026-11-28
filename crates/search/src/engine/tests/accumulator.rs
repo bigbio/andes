@@ -268,3 +268,38 @@ fn compact_store_keeps_candidates_whole_when_the_residue_table_is_full() {
         assert_eq!(a.protein_index, b.protein_index);
     }
 }
+
+#[test]
+fn ms1_bins_return_the_binary_search_index() {
+    let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    for n in [0usize, 1, 31, 32, 33, 500, 4000] {
+        let mut peaks: Vec<(f64, f32)> = (0..n)
+            .map(|_| (300.0 + (next() % 1_000_000) as f64 * 1.3e-3, 1.0))
+            .collect();
+        if n > 10 {
+            let d = peaks[3].0;
+            peaks[4].0 = d;
+            peaks[5].0 = d;
+        }
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let bins = super::ms1::Ms1MzBins::new(&peaks);
+        let mut probes: Vec<f64> = peaks.iter().map(|p| p.0).collect();
+        probes.extend(peaks.iter().map(|p| p.0.next_up()));
+        probes.extend(peaks.iter().map(|p| p.0.next_down()));
+        probes.extend((0..2000).map(|_| 250.0 + (next() % 2_000_000) as f64 * 1e-3));
+        probes.extend([f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.0, 1e300]);
+        for x in probes {
+            assert_eq!(
+                bins.lower_bound(&peaks, x),
+                peaks.partition_point(|p| p.0 < x),
+                "n={n} x={x}"
+            );
+        }
+    }
+}

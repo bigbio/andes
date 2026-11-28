@@ -8,7 +8,7 @@ on their downstream defaults:
    sum of the precursor quantities of a run.
 2. No normalisation unless the dataset asks for it (datasets.json `normalise`): in a dilution
    series of cross-linked protein the change is the signal, and a global normalisation would
-   remove it.
+   remove it. When it is on, `run_shifts` centres the runs by quant-eval's rule.
 3. The statistics of quant-eval: moderated t (empirical Bayes variance prior) and
    Benjamini-Hochberg.
 """
@@ -23,12 +23,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "quant-eval"))
 from quant_eval.de import de_table  # noqa: E402
-from quant_eval.rollup import median_polish, normalise  # noqa: E402
+from quant_eval.rollup import median_polish  # noqa: E402
 
 DE_Q = 0.05
 WITHIN = 1.0
 MIN_REPLICATES = 2
 QUANT_Q_LEVELS = (0.01, 0.05)
+NORMALISE_MIN_COMPLETE = 200
+NORMALISE_FALLBACK_SHARE = 0.9
 
 
 def _quiet(fn):
@@ -66,9 +68,26 @@ def precursor_matrix(df, runs):
     return np.log2(P.astype(float))
 
 
-def maybe_normalise(M, runs, enabled):
-    """quant-eval's per-run median normalisation, when the design allows it."""
-    return normalise(M.copy(), runs) if enabled else M
+@_quiet
+def run_shifts(M, runs):
+    """Per-run log2 shift that centres the runs of a residue pair x run matrix.
+
+    The rule of quant-eval's `normalise`, on a matrix: the run medians are taken over the rows with
+    a value in every run (in at least 90 % of the runs when fewer than 200 rows have all), and the
+    shift of a run is its median minus the median of the run medians. Subtract the result from the
+    residue-pair and the precursor matrices alike.
+    """
+    if M.empty:
+        return pd.Series(0.0, index=runs)
+    n = np.isfinite(M[runs].to_numpy(dtype=float)).sum(axis=1)
+    rows = n == len(runs)
+    if rows.sum() < NORMALISE_MIN_COMPLETE:
+        rows = n >= NORMALISE_FALLBACK_SHARE * len(runs)
+    if not rows.any():
+        raise ValueError("normalise: no residue pair has a value in at least 90 % of the runs")
+    med = M.loc[rows, runs].median(axis=0)
+    med = med.fillna(med.median())
+    return med - float(med.median())
 
 
 def depth(df, M):
@@ -121,19 +140,29 @@ def dilution(M, level_of, reference_level):
     For a residue pair with at least MIN_REPLICATES values at a level and at the reference, the
     observed log2 ratio is the difference of the replicate means and the expected one is
     log2(level / reference). Also: the least-squares slope of observed on expected (1 means no
-    ratio compression) and, per level, the share of residue pairs called changed at BH 5 % with
-    the expected sign.
+    ratio compression; a shift common to every level, such as a reference level that reads low,
+    goes into the intercept) and, per level, the share of residue pairs called changed at BH 5 %
+    with the expected sign. `run_offsets` shows whether an injection differs from its replicates.
     """
     runs = list(M.columns)
-    ref = [r for r in runs if level_of[r] == reference_level]
-    levels = sorted({level_of[r] for r in runs} - {reference_level})
+    per_level_runs = {}
+    for r in runs:
+        per_level_runs.setdefault(level_of[r], []).append(r)
+    if reference_level not in per_level_runs:
+        raise ValueError(f"dilution: no run has the reference level {reference_level:g} "
+                         f"(levels: {', '.join(f'{v:g}' for v in sorted(per_level_runs))})")
+    thin = [f"{lvl:g}" for lvl, rs in sorted(per_level_runs.items()) if len(rs) < MIN_REPLICATES]
+    if thin:
+        raise ValueError(f"dilution: fewer than {MIN_REPLICATES} runs at level(s) {', '.join(thin)}")
+    ref = per_level_runs[reference_level]
+    levels = sorted(set(per_level_runs) - {reference_level})
     X = M.to_numpy(dtype=float)
     ref_cols = [runs.index(r) for r in ref]
     ok_ref = np.isfinite(X[:, ref_cols]).sum(axis=1) >= MIN_REPLICATES
     mean_ref = _row_mean(X[:, ref_cols])
     per_level, xs, ys, at_all = {}, [], [], ok_ref.copy()
     for lvl in levels:
-        lvl_runs = [r for r in runs if level_of[r] == lvl]
+        lvl_runs = per_level_runs[lvl]
         cols = [runs.index(r) for r in lvl_runs]
         ok = ok_ref & (np.isfinite(X[:, cols]).sum(axis=1) >= MIN_REPLICATES)
         at_all &= ok
@@ -168,30 +197,67 @@ def precision(M, groups):
         present = n > 0
         complete = n == len(runs)
         cv = _row_cv(V)
+        with_cv = complete & (n >= MIN_REPLICATES)
         out[name] = {
             "runs": len(runs),
             "quantified": int(present.sum()),
             "complete": int(complete.sum()),
             "completeness": round(float(complete.sum() / present.sum()), 4) if present.any() else None,
-            "median_cv_complete": round(float(np.median(cv[complete])), 4) if complete.any() else None,
+            "median_cv_complete": round(float(np.median(cv[with_cv])), 4) if with_cv.any() else None,
             "median_cv_2plus": round(float(np.median(cv[n >= MIN_REPLICATES])), 4) if (n >= MIN_REPLICATES).any() else None,
         }
     return out
 
 
 @_quiet
-def null_calls(M, groups):
-    """Differential calls between interleaved halves of each replicate group: all are false.
+def run_offsets(P, groups):
+    """Injection-to-injection offsets inside each group of replicate runs.
 
-    The runs of a group are split alternately (1st, 3rd, ... against 2nd, 4th, ...) rather than
-    first half against second half, so that drift over the injection order is not a difference
-    between the halves.
+    P is the precursor x run log2 matrix. The offset of a run is the median, over the precursors
+    with at least MIN_REPLICATES values in its group, of the run's value minus that precursor's
+    mean over the group. `spread` is the largest minus the smallest offset of the group: a large
+    spread names an injection whose amount or signal differed from its replicates.
+    """
+    out = {}
+    for name, runs in groups.items():
+        X = P[runs].to_numpy(dtype=float)
+        X = X[np.isfinite(X).sum(axis=1) >= MIN_REPLICATES]
+        if not len(X):
+            out[name] = {"offsets": {r: None for r in runs}, "spread": None}
+            continue
+        D = X - _row_mean(X)[:, None]
+        offsets = {}
+        for i, r in enumerate(runs):
+            col = D[np.isfinite(D[:, i]), i]
+            offsets[r] = round(float(np.median(col)), 4) if len(col) else None
+        seen = [v for v in offsets.values() if v is not None]
+        out[name] = {"offsets": offsets, "spread": round(max(seen) - min(seen), 4) if seen else None}
+    return out
+
+
+def split_halves(runs):
+    """Two halves of a list of runs in injection order: 1st, 4th, 5th, 8th, ... against 2nd, 3rd,
+    6th, 7th, ... (ABBA). A drift that is linear in the injection order cancels between them when
+    the number of runs is a multiple of four, and is a fifth of one injection step for ten runs;
+    an odd/even split would leave a whole step."""
+    first = [r for i, r in enumerate(runs) if i % 4 in (0, 3)]
+    second = [r for i, r in enumerate(runs) if i % 4 in (1, 2)]
+    return first, second
+
+
+@_quiet
+def null_calls(M, groups):
+    """Differential calls between two halves of each replicate group: all are false.
+
+    The halves are those of `split_halves`, so that drift over the injection order is not a
+    difference between them; the runs of a group must be listed in injection order.
     """
     out = {}
     for name, runs in groups.items():
         if len(runs) < 2 * MIN_REPLICATES:
             continue
-        T = de_table(M, runs[0::2], runs[1::2], {}, lambda _: np.nan)
+        first, second = split_halves(runs)
+        T = de_table(M, first, second, {}, lambda _: np.nan)
         out[name] = {"tested": int(len(T)), "false_calls": int((T["q"] <= DE_Q).sum())}
     return out
 

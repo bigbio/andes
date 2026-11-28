@@ -2,8 +2,9 @@
 $XLBENCH_DATA, score it against its truth, and write $XLBENCH_DATA/results/TAG/summary.json.
 ONLY=name1,name2 restricts the datasets. Thermo .raw input needs an andes built with
 --features thermo and the .NET 8 runtime (DOTNET_ROOT). Each dataset's entry also records the
-search's wall time, CPU time (user + system) and peak resident memory, read from the child
-process's resource usage."""
+search's wall time, taken when the andes process ends and before its result is scored, and its
+CPU time (user + system) and peak resident memory, read from the child process's resource
+usage."""
 import json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,13 +41,13 @@ for d in json.load(open(f'{HERE}/datasets.json')):
     t = time.time()
     with open(f'{out}/log.txt', 'w') as log:
         rc, usage = run_measured(cmd, log)
+    usage['wall_s'] = round(time.time() - t, 1)
     if rc != 0:
         summary[d['name']] = {'error': rc}
         print(d['name'], 'FAILED', rc, flush=True)
         json.dump(summary, open(summary_path, 'w'), indent=1)
         continue
     r = ev.evaluate(f'{out}/{d["name"]}.xl.tsv', d['truth'])
-    r['wall_s'] = round(time.time() - t, 1)
     r.update(usage)
     summary[d['name']] = r
     print(d['name'], json.dumps(r), flush=True)

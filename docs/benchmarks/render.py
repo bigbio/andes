@@ -16,7 +16,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 RESULTS = HERE / "results"
 SITE_JSON = ROOT / "website" / "benchmarks.json"
-PAGES = [ROOT / "README.md", ROOT / "website" / "pages" / "quantification.md", *sorted(HERE.glob("*.md"))]
+PAGES = [ROOT / "README.md", ROOT / "website" / "pages" / "quantification.md", *sorted(HERE.glob("*.md")),
+         HERE / "xl" / "quant" / "README.md"]
 BLOCK = re.compile(
     r"(<!-- BEGIN generated: (?P<id>[\w-]+) \(docs/benchmarks/render\.py\) -->\n)"
     r"(?P<body>.*?)"
@@ -182,6 +183,75 @@ def proteobench_plotted(data):
     return table(header, ["left", "left", "right", "right", "right"], rows)
 
 
+XLQ_ARMS = {
+    "skyline": "every peak (as published)",
+    "skyline_idotp0.7": "isotope dot product ≥ 0.7",
+    "skyline_idotp0.9": "isotope dot product ≥ 0.9",
+    "skyline_idotp0.95": "isotope dot product ≥ 0.95",
+    "skyline_identified": "identified peaks only",
+}
+
+
+def percent(v, decimals=0):
+    return "—" if v is None else f"{100 * v:.{decimals}f} %"
+
+
+def xlq_dilution(data):
+    """Cross-link quantification, HSA dilution: one row per arm of results/xl_quant_hsa_dilution.json."""
+    rows, levels, top = [], [], ""
+    for arm, a in data["xl_quant_hsa_dilution"]["arms"].items():
+        own = a["own"]
+        depth, dil = own["depth"], own["dilution"]
+        levels, top = list(dil["levels"]), f"{dil['reference_level']:g}"
+        low = dil["levels"][levels[0]]
+        rows.append([
+            XLQ_ARMS.get(arm, f"`{arm}`"), fmt(depth["residue_pairs"]), fmt(depth["rows"]),
+            percent(depth["rows_transferred"] / depth["rows"]), fmt(dil["residue_pairs_at_every_level"]),
+            fmt(dil["slope"], ".2f"), *[fmt(dil["levels"][k]["median_error"], "+.2f") for k in levels],
+            percent(own["precision"][top]["median_cv_2plus"]),
+            f"{low['de_called_expected_sign']} of {low['de_tested']}",
+        ])
+    header = ["Skyline values", "residue pairs", "values", "without identification", "at every level", "slope",
+              *[f"error {k}×" for k in levels], f"CV at {top}×", f"changed at {levels[0]}×"]
+    return table(header, ["left"] + ["right"] * (len(header) - 1), rows)
+
+
+def xlq_injections(data):
+    """The offsets of the injections of each dilution level, every-peak arm."""
+    groups = data["xl_quant_hsa_dilution"]["arms"]["skyline"]["own"]["run_offsets"]
+    rows = [[f"{level}×", ", ".join(fmt(v, "+.2f") for v in g["offsets"].values()), fmt(g["spread"], ".2f")]
+            for level, g in groups.items()]
+    return table(["level", "offsets of its injections (log2)", "spread"], ["left", "left", "right"], rows)
+
+
+def xlq_replicates(data):
+    """The published Skyline CV reports of the HSA replicates."""
+    rows = [[group, fmt(g["precursors"]),
+             *[percent(g["median_cv"].get(ion), 1) for ion in ("precursor", "precursor [M+1]", "precursor [M+2]")]]
+            for group, g in data["xl_quant_hsa_replicates_published"]["cv_reports"].items()]
+    header = ["replicates", "precursors", "median CV, monoisotopic peak", "M+1", "M+2"]
+    return table(header, ["left", "right", "right", "right", "right"], rows)
+
+
+def xlq_document(data):
+    """What the published Skyline document of the HSA dilution holds, and the checks of its reader."""
+    doc = data["xl_quant_hsa_dilution_published"]["skyline_document"]
+    read, iso, psm = doc["read"], doc["site_isomers"], doc["xifdr_psms"]
+    rows = [
+        ["cross-linked pseudo-peptides", fmt(read["peptides"] - read["decoy"] - read["not_crosslink"])],
+        ["precursors", fmt(iso["precursors"])],
+        ["peaks", fmt(read["peaks"])],
+        ["peaks with an area of zero (read as missing)", fmt(read["zero_area"])],
+        ["residue pairs in the document", fmt(psm["residue_pairs_document"])],
+        ["residue pairs of the target-target matches of the xiFDR file", fmt(psm["residue_pairs_xifdr"])],
+        ["residue pairs in both", fmt(psm["shared"])],
+        ["site-isomer sets", fmt(iso["site_isomer_sets"])],
+        ["precursors in site-isomer sets", fmt(iso["precursors_in_sets"])],
+        ["of these, with a peak that overlaps another site's peak in a run", fmt(iso["overlapping"])],
+    ]
+    return table(["", "count"], ["left", "right"], rows)
+
+
 TABLES = {
     "identification-summary": lambda d: summary(d, "identification"),
     "quantification-summary": lambda d: summary(d, "quantification"),
@@ -191,6 +261,10 @@ TABLES = {
     "proteobench-qexactive": lambda d: leaderboard(d, "QExactive"),
     "proteobench-astral": lambda d: leaderboard(d, "Astral"),
     "proteobench-plotted": proteobench_plotted,
+    "xl-quant-hsa-dilution": xlq_dilution,
+    "xl-quant-hsa-injections": xlq_injections,
+    "xl-quant-hsa-replicates": xlq_replicates,
+    "xl-quant-hsa-document": xlq_document,
 }
 
 

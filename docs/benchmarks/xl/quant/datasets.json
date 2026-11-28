@@ -112,6 +112,7 @@
    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA-Active.FASTA"
   },
   "normalise": false,
+  "run_order": "injection",
   "published": {
    "skyline_cv_injection": {
     "file": "ref/SkylinereportCVvaluesinjectionreplica.csv",
@@ -240,6 +241,7 @@
   "fasta": {
    "file": "db/Ribosome_EColi_SG_AND_human_abundant500excl-ribosomal_671sequences.fasta"
   },
+  "measures": "wrong identities among transfers",
   "runs": [
    {
     "dataset": "mat_dsso",
@@ -247,7 +249,7 @@
    },
    {
     "dataset": "mat_dsso_hek",
-    "truth": null
+    "truth": "lib:main_library"
    }
   ]
  },
@@ -258,6 +260,7 @@
   "fasta": {
    "file": "db/all_320_proteins_from_first_second_third_fourth_fifth_batch.fasta"
   },
+  "measures": "false transfers",
   "runs": [
    {
     "dataset": "cla_b1",

@@ -1,6 +1,6 @@
 {
  "dataset": "hsa_replicates",
- "groups": {
+ "cv_reports": {
   "injection": {
    "file": "SkylinereportCVvaluesinjectionreplica.csv",
    "sha256": "9f41789c56fce7cc00f476247d1ee9fa627558fcdb659fc09b741d55b6c6cba3",

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,8 +27,8 @@ def load(name, manifest=HERE / "datasets.json"):
 
 
 def run_key(name):
-    """Run names compared without directory, extension, case, `-` and `_`."""
-    stem = Path(str(name)).name
+    """Run names compared without directory (`/` or `\\`), extension, case, `-` and `_`."""
+    stem = re.split(r"[\\/]", str(name))[-1]
     for ext in (".raw", ".mzml", ".mgf", ".d"):
         if stem.lower().endswith(ext):
             stem = stem[: -len(ext)]
@@ -37,8 +38,19 @@ def run_key(name):
 def match_runs(df, dataset):
     """Rename the table's runs to the design's run names; rows of other runs are dropped.
 
-    Returns (table, dropped run names)."""
+    Returns (table, dropped run names). Two run names of the table that stand for one run of the
+    design are an error: their rows would be duplicates of one (precursor, run)."""
     by_key = {run_key(r["run"]): r["run"] for r in dataset["runs"]}
+    names = {}
+    for name in sorted(set(df["run"])):
+        target = by_key.get(run_key(name))
+        if target is not None:
+            names.setdefault(target, []).append(name)
+    clash = {t: n for t, n in names.items() if len(n) > 1}
+    if clash:
+        target, both = sorted(clash.items())[0]
+        raise ValueError(f"{len(clash)} run(s) of the design are named more than once in the table, "
+                         f"e.g. {both} are all {target!r}")
     mapped = df["run"].map(lambda r: by_key.get(run_key(r)))
     dropped = sorted(set(df.loc[mapped.isna(), "run"]))
     return df[mapped.notna()].assign(run=mapped[mapped.notna()]), dropped
@@ -53,12 +65,18 @@ def _xl_eval(data_dir):
 
 
 def absence(dataset, data_dir):
-    """`absent(row)` for the false-transfer designs, from the truth of docs/benchmarks/xl/eval.py.
+    """`absent(row)` for the transfer designs, from the truth of docs/benchmarks/xl/eval.py.
 
     A residue pair is absent from a run when that run's truth does not hold for it: for a
     peptide-library truth (`lib:`), its peptide pair is not a library pair linked at the
     designated residues; for the Clasen truth (`clasen:`), its proteins are not in one interaction
-    group of the run's batch. Runs whose truth is null contain everything and are not scored.
+    group of the run's batch. A run whose truth is null is not scored.
+
+    What a transferred row of an absent residue pair means depends on the design. Where the runs
+    hold different real cross-links (Clasen batches), it is a false transfer: a real precursor
+    placed in a sample that lacks it. Where every run has the same truth (the Matzinger library
+    alone and in a HEK background that carries no cross-links), it is a wrong identity carried into
+    another run.
     """
     ev = _xl_eval(data_dir)
     truths = {r["run"]: ev.truth_for(r["truth"]) for r in dataset["runs"] if r.get("truth")}

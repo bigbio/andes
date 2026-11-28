@@ -8,6 +8,7 @@ tables of different tools join on the same string.
 """
 
 SEP = " -- "
+UNIFY_EXAMPLES = 5
 
 
 def acc_of(token):
@@ -66,3 +67,53 @@ def normalise_key(key):
 def accessions(side_text):
     """The accessions of one key side (`ACC:pos;ACC:pos` or `ACC;ACC`)."""
     return {item.rpartition(":")[0] or item for item in side_text.split(";") if item}
+
+
+def _item_pairs(key):
+    a, b = key.split(SEP)
+    return {tuple(sorted((x, y))) for x in a.split(";") for y in b.split(";")}
+
+
+def unify(keys_by_arm):
+    """Bring the residue-pair keys of several arms to one spelling.
+
+    Tools can list different protein positions for one peptide: andes lists the positions of the
+    peptide's digestion occurrences, `side` every substring occurrence. Keys that mean the same
+    residue pair can then differ as strings and would not join. Two keys are linked when they
+    share one pair of `ACC:pos` items, one from each side. A set of linked keys is renamed to its
+    smallest key when no arm has more than one key in it; otherwise the residue pairs cannot be
+    told apart from the keys, the set is left as it is and counted as ambiguous.
+
+    Returns (mapping of each renamed key to its new key, report for the result file).
+    """
+    parent = {}
+
+    def find(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    owner = {}
+    for key in sorted(set().union(*keys_by_arm.values())) if keys_by_arm else []:
+        parent[key] = key
+        for pair in sorted(_item_pairs(key)):
+            if pair in owner:
+                parent[find(key)] = find(owner[pair])
+            else:
+                owner[pair] = key
+    sets = {}
+    for key in parent:
+        sets.setdefault(find(key), []).append(key)
+    mapping, ambiguous, examples = {}, 0, []
+    for members in sets.values():
+        if len(members) == 1:
+            continue
+        members.sort()
+        if any(sum(k in keys for k in members) > 1 for keys in keys_by_arm.values()):
+            ambiguous += 1
+            continue
+        mapping.update({k: members[0] for k in members[1:]})
+        if len(examples) < UNIFY_EXAMPLES:
+            examples.append(members)
+    return mapping, {"renamed_keys": len(mapping), "ambiguous_sets": ambiguous, "examples": examples}

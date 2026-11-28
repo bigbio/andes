@@ -154,14 +154,29 @@ A cross-link precursor is keyed by
   for. Its quantity is never assigned to one of those residue pairs.
 - **When a precursor is site-resolved.** Only when both of the following hold:
   - each peptide has one linkable residue, or every identification of the feature localises
-    the same site by a decisive margin of the site score (`gap_next`);
+    the same site by a decisive site margin (below);
   - no identification of another site of the same peptide pair falls inside the feature.
 
-  Otherwise it is a site-isomer group. The margin is an algorithm constant, set on the
-  peptide-library datasets, whose designated link residues give the true site.
-- **Measured in the reference.** In the published Skyline HSA document, 48 of the 638
-  precursors belong to 24 site-isomer sets. For 44 of them, the peak overlaps the isomer's
-  peak in at least one run.
+  Otherwise it is a site-isomer group.
+- **Site margin.** The score of a peptide's best link site minus the score of its
+  second-best site, for the same spectrum.
+  - andes does not keep it today. `score_peptide` (`crates/search/src/crosslinks.rs`) scores
+    every site of a peptide and keeps only the best one.
+  - The existing `gap_next` is not this margin: it is the gap to the best hit with a
+    different peptide sequence, so two sites of one peptide never enter it.
+  - P1 adds the margin to `PeptideHit` (the scores are already computed) and to the
+    spectrum-match table.
+  - The margin that counts as decisive is an algorithm constant, set on the peptide-library
+    datasets, whose designated link residues give the true site.
+- **Identification of a group.** A group claims the peptide pair, not a site. It is admitted
+  when at least one of its candidate residue pairs passes `--xl-fdr`, and its q-value is the
+  smallest of theirs. That is conservative for the group: a residue-pair q-value also counts
+  wrong sites as errors, and a wrong site inside the right peptide pair is not an error of
+  the group.
+- **Measured in the reference.** In the published Skyline HSA document, 64 of the 638
+  precursors belong to 32 site-isomer sets. For 60 of them, the peak overlaps the peak of
+  another site of the set in at least one run (`xlq.published`, in
+  `docs/benchmarks/results/xl_quant_hsa_dilution_published.json`).
 - **Conflicts between runs.** When runs assign one precursor to different peptide pairs, the
   best-scoring assignment wins, and the conflicts are counted in the log.
 
@@ -194,6 +209,7 @@ A cross-link precursor is keyed by
 
 - **Library.** The cross-link precursors whose residue pair passes the identification
   threshold, on the pooled cohort q-values, each with a consensus retention time.
+  Site-isomer groups enter by the rule of D2.
 - **Alignment.** `align.rs` on the joint anchors (linear and cross-link). Cross-links follow
   the maps the linear peptides define.
 - **Transfers.**
@@ -218,11 +234,14 @@ A cross-link precursor is keyed by
   precursors only.
 - **Site-isomer groups.** A group keeps its own quantity at its own level. It rolls up only
   into a higher level that all its candidate residue pairs share, never into one of them:
-  - the protein pair, when every candidate maps to the same protein pair (one protein for an
-    intra link);
-  - otherwise into nothing above the group.
+  - **Inter-protein group:** into the protein pair, when every candidate maps to the same
+    protein pair and that protein pair passes its own q-value.
+  - **Intra-protein group:** into nothing. andes has no intra-protein level above the
+    residue pair (protein-pair q-values exist for inter links only), so the group table is
+    its last level.
+  - **Candidates in different protein pairs:** into nothing.
 - **Protein pairs.** A protein-pair value comes from its inter-protein residue pairs and the
-  site-isomer groups that lie entirely inside it. It carries `n_residue_pairs`, `n_groups`
+  inter-protein site-isomer groups that lie entirely inside it. It carries `n_residue_pairs`, `n_groups`
   and a `heterogeneity` value, the spread of the residue-pair log-ratios. A high spread
   flags interfaces that change differently, which points to a change of conformation rather
   than of abundance.
@@ -306,12 +325,12 @@ There is one reviewable PR per phase, and each is measured on the benchmark befo
 
 | # | Change | Results changed? | Measured on |
 |---|---|---|---|
-| P0 | Benchmark harness in `docs/benchmarks/xl/quant`: dataset manifest, fetch, the long-table contract every tool's output is brought to, a Skyline reader, the §6 metrics, tests in CI; the published xiSEARCH + xiFDR + Skyline results scored; wall time, CPU time and peak memory of each cross-link search in `docs/benchmarks/xl/run.py`. Still open: running the reference workflow again where its areas are not published. | no | — |
-| P1 | Retention time, MS1-snapped precursor m/z, run and theoretical m/z on spectrum matches; `.xl.csms.parquet`; linker composition on `Crosslinker`; phosphorus in `Formula`; the composition test. | no; columns added | tests |
+| P0 | Benchmark harness in `docs/benchmarks/xl/quant`: dataset manifest, fetch, the long-table contract every tool's output is brought to, a Skyline reader, the §6 metrics, tests in CI; the published xiSEARCH + xiFDR + Skyline results scored, with their tables generated by `render.py`; wall time, CPU time and peak memory of each cross-link search in `docs/benchmarks/xl/run.py`. Still open: running the reference workflow again where its areas are not published. | no | — |
+| P1 | Retention time, MS1-snapped precursor m/z, run, theoretical m/z and the site margin (D2) on spectrum matches; `.xl.csms.parquet`; linker composition on `Crosslinker`; phosphorus in `Formula`; the composition test. | no; columns added | tests |
 | P2 | Linear co-search in quantified runs; per-run cross-link quantification (D3, D4); `.xl.features.parquet`; `--xl --lfq` allowed. | new outputs | replicate CV and completeness |
 | P3 | Match between runs (D5): joint library and alignment, class-stratified transfer q-values, `--mbr`, the staged `andes quant` path, the cohort `xl-quant` stage. | new outputs | false-transfer rate (§6) |
 | P4 | Roll-up and reporting (D6 to D9): `quant::rollup`, residue-pair, site-isomer-group and protein-pair tables, protein fold changes, MSstats export, SDRF condition, `statistics.log`, DOCS.md. The harness gains a `site_group` column and applies the same rule to every arm, the Skyline reference included. | new outputs | dilution accuracy, FDP of differential calls, the site-isomer counterexample (§6) |
-| P5 | andes numbers next to the reference in `docs/benchmarks/xl/quant/README.md`, a `render.py` block, README row. | docs | — |
+| P5 | andes numbers next to the reference in the generated tables of `docs/benchmarks/xl/quant/README.md`; README row. | docs | — |
 
 ## 6. Benchmarks and acceptance targets
 
@@ -328,7 +347,7 @@ The rules are those of `docs/dev/fdr-validation.md` and
 | PXD011036 | BS3 | HSA, DDA dilution at 0.1, 0.3, 0.5, 0.9 and 1×, three injections each (the seven-protein series of this project is DIA only) | ratio accuracy and compression, CV, share quantified, true positives of differential calls | tuning |
 | PXD007250 | BS3 | HSA, 10 reaction and 10 injection replicates (every ratio is 1) | CV, completeness; every differential call is false | held out |
 | Clasen batches (in `docs/benchmarks/xl`) | DSSO | recombinant interaction groups defined per batch | false transfers: a cross-link transferred into a run of a batch whose interaction groups do not contain its protein pair | false-transfer truth |
-| Matzinger library and library in HEK (in `docs/benchmarks/xl`) | DSSO, DSBU | library alone and library spiked into HEK | false transfers: a HEK cross-link transferred into a library-only run | false-transfer truth |
+| Matzinger library and library in HEK (in `docs/benchmarks/xl`) | DSSO | library alone and library spiked into HEK; the HEK background carries no cross-links, so in both runs anything outside the library is false | wrong identities among transfers: transferred values whose peptide pair is not a library pair | identification errors carried by transfers |
 | PXD059096 | PhoX | Cas9 dilution, Orbitrap Astral | accuracy and CV, once the data are public; needs phosphorus in `Formula` | held out |
 
 The reference results come with the data: the authors of both HSA sets deposited their xiFDR
@@ -341,9 +360,16 @@ and Skyline outputs. Scored by the harness (`docs/benchmarks/xl/quant/README.md`
 - **PXD007250.** The published reports give median CVs of 13.8 % (injection) and 33.0 %
   (reaction). The paper reports 14 % and 32 %. The areas behind them are not published.
 
-The false-transfer designs use cleavable linkers, but an MS1 transfer does not depend on the
-linker's chemistry. They would give the first measured false-transfer rate for cross-link
-match-between-runs.
+The two transfer designs measure different things:
+
+- **Clasen** is the only design where real cross-links are absent from a run. It measures
+  false transfers in the usual sense: a real precursor placed in a sample that lacks it. It
+  would give the first measured false-transfer rate for cross-link match-between-runs.
+- **Matzinger** has no real cross-link that one run contains and the other lacks. It
+  measures how many transferred values carry a wrong identity, that is identification
+  errors that match-between-runs spreads to other runs.
+
+Both use cleavable linkers, but an MS1 transfer does not depend on the linker's chemistry.
 
 No public two-proteome spike-in exists for a non-cleavable linker (for example
 DSS-crosslinked *E. coli* spiked 1:1, 1:2 and 1:4 into HEK). It would be the decisive
@@ -359,8 +385,8 @@ benchmark, and it needs a wet lab.
   - no residue-pair value for A or B comes from the shared precursor;
   - the group quantity (200 → 1000) appears only in the site-isomer group table;
   - neither A nor B is called changed, and the MSstats export carries no row of the group;
-  - the protein-pair value includes the group when A and B lie in one protein pair, and not
-    otherwise.
+  - the protein-pair value includes the group when A and B are inter-protein links of one
+    protein pair, and not otherwise (an intra-protein group rolls up into nothing).
 - **The same check on real data.** On the peptide-library datasets the true link residues
   are known. Measured there: the share of quantified residue pairs whose site is wrong, and
   how many precursors end up in site-isomer groups.
@@ -373,7 +399,8 @@ Targets, to be measured and not promised:
 - **Accuracy.** On PXD011036, a slope closer to 1 and a smaller median absolute log2 error than
   the best Skyline view at every level, on no fewer residue pairs.
 - **Transfer error.** Measured false-transfer rate at or below `--quant-transfer-fdr` on the
-  false-transfer designs. Transfers are always counted separately.
+  Clasen design, and a share of wrong identities among transfers on the Matzinger design no
+  higher than among identified values. Transfers are always counted separately.
 - **Differential calls.** FDP at or below the nominal 5 % on PXD007250 and on the known
   designs.
 

@@ -121,7 +121,8 @@ nothing is uploaded.
 
 The harness and its datasets are in [`xl/quant/`](xl/quant/README.md). The reference results
 there are computed from the published xiSEARCH + xiFDR + Skyline outputs alone, so only the
-references are downloaded:
+references are downloaded. The three commands write the `xl_quant_*.json` files of
+[`results/`](results), and `render.py` writes their tables into the page:
 
 ```bash
 cd xl/quant                                                    # docs/benchmarks/xl/quant
@@ -133,9 +134,12 @@ python3 -m xlq.evaluate --dataset hsa_dilution --data "$XLBENCH_DATA" \
     --arm skyline_idotp0.9:'skyline?min_isotope_dotp=0.9':$S \
     --arm skyline_idotp0.95:'skyline?min_isotope_dotp=0.95':$S \
     --arm skyline_identified:'skyline?evidence=identified':$S \
-    --out results/hsa_dilution.skyline_published.json
+    --out ../../results/xl_quant_hsa_dilution.json
+python3 -m xlq.published --dataset hsa_dilution --data "$XLBENCH_DATA" \
+    --out ../../results/xl_quant_hsa_dilution_published.json   # xiFDR match, site isomers
 python3 -m xlq.published --dataset hsa_replicates --data "$XLBENCH_DATA" \
-    --out results/hsa_replicates.published.json
+    --out ../../results/xl_quant_hsa_replicates_published.json # the published CV reports
+python3 -I ../../render.py                                     # tables of xl/quant/README.md
 ```
 
 ## TMT match between runs (commands, not a tested script)

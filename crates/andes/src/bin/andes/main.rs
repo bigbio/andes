@@ -197,7 +197,9 @@ fn main() -> ExitCode {
             }
             inference::run_inference(*args)
         }
-        Some(Command::Rescore(args)) => run_rescore(*args),
+        Some(Command::Rescore(args)) => misplaced_rescore_option(top.search.rescore_memory_gb)
+            .map_err(Into::into)
+            .and_then(|()| run_rescore(*args)),
         Some(Command::Database(args)) => database::run(*args),
         Some(Command::Cohort(cmd)) => cohort::command::run(cmd),
         None => {
@@ -308,6 +310,18 @@ fn print_config(dest: &std::path::Path, sources: &params::sources::ParamSources)
     }
 }
 
+/// `--rescore-memory-gb` given before the `rescore` subcommand lands on the search options, which
+/// `rescore` does not read; an error says where it goes instead of running at the default budget.
+fn misplaced_rescore_option(search_gb: Option<u64>) -> Result<(), String> {
+    match search_gb {
+        Some(gb) => Err(format!(
+            "--rescore-memory-gb is an option of the rescore subcommand: write \
+             `andes rescore --rescore-memory-gb {gb} ...`, after `rescore`"
+        )),
+        None => Ok(()),
+    }
+}
+
 fn run_rescore(args: cli::RescoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     cli::ensure_scratch_dir(&args.temp_dir)?;
     let limit = memory::rescore_memory(args.rescore_memory_gb, args.temp_dir);
@@ -345,6 +359,41 @@ fn missed_cleavages_explicit(
     in_config: bool,
 ) -> bool {
     in_config || matches!(cli_source, Some(clap::parser::ValueSource::CommandLine))
+}
+
+#[cfg(test)]
+mod misplaced_rescore_option_tests {
+    use super::{misplaced_rescore_option, Command, TopCli};
+    use clap::Parser;
+
+    #[test]
+    fn the_budget_before_rescore_is_an_error_that_names_its_place() {
+        let top = TopCli::try_parse_from([
+            "andes",
+            "--rescore-memory-gb",
+            "8",
+            "rescore",
+            "--temp-dir",
+            "t",
+            "x.pin",
+        ])
+        .unwrap();
+        assert!(matches!(top.command, Some(Command::Rescore(ref a)) if a.rescore_memory_gb.is_none()));
+        let err = misplaced_rescore_option(top.search.rescore_memory_gb).unwrap_err();
+        assert!(err.contains("andes rescore --rescore-memory-gb 8"), "{err}");
+        let top = TopCli::try_parse_from([
+            "andes",
+            "rescore",
+            "--rescore-memory-gb",
+            "8",
+            "--temp-dir",
+            "t",
+            "x.pin",
+        ])
+        .unwrap();
+        assert!(misplaced_rescore_option(top.search.rescore_memory_gb).is_ok());
+        assert!(matches!(top.command, Some(Command::Rescore(ref a)) if a.rescore_memory_gb == Some(8)));
+    }
 }
 
 #[cfg(test)]

@@ -212,7 +212,10 @@ fn output_identical_at_any_memory_limit() {
     let dir = tempfile::tempdir().unwrap();
     let pin = write_pin(dir.path());
     let mut runs = Vec::new();
-    for (i, limit) in [64u64 << 30, 1 << 20, 1].into_iter().enumerate() {
+    for (i, limit) in [64u64 << 30, 24 << 20, 6 << 20, 1 << 20, 1]
+        .into_iter()
+        .enumerate()
+    {
         let sub = dir.path().join(format!("train{i}"));
         std::fs::create_dir(&sub).unwrap();
         runs.push((sub.clone(), training(&pin, &sub, 3, limit), limit));

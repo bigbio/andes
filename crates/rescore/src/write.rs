@@ -1,3 +1,4 @@
+use crate::budget::Reservation;
 use crate::pin::RowMeta;
 use crate::scores::psm_order;
 use crate::text::{RowText, Texts};
@@ -124,7 +125,12 @@ fn write_one(
         cols,
     };
     let spilled = texts.is_spilled();
-    for window in order.chunks(LINES_PER_WINDOW) {
+    let (window_lines, _held) = if spilled {
+        texts.batch_rows(LINES_PER_WINDOW)
+    } else {
+        (LINES_PER_WINDOW, Reservation::none())
+    };
+    for window in order.chunks(window_lines) {
         let read: Vec<RowText> = if spilled {
             let ids: Vec<usize> = window
                 .iter()

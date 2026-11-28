@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 const NO_DIRECTION: &str = "Error in the input data: cannot find an initial direction with positive training examples. Consider setting/raising the initial training FDR threshold (--train-fdr-initial). Terminating.";
 
-const SORT_BYTES_PER_ROW: u64 = 16;
+/// Bytes per row of one feature's order keys, sorted in place.
+const SORT_BYTES_PER_ROW: u64 = 8;
 
 pub(crate) fn pin_direction(pin: &Pin) -> Option<&[f64]> {
     pin.default_direction
@@ -48,7 +49,7 @@ pub(crate) fn init_directions(
     if nf == 0 {
         return Ok(vec![vec![0.0f64; 1]; sets]);
     }
-    let counts = direction_counts(pin, norm, mask, sets, fdr);
+    let counts = direction_counts(pin, norm, mask, sets, fdr)?;
     counts
         .iter()
         .map(|c| {
@@ -87,32 +88,6 @@ fn order_key(x: f32) -> u32 {
 
 fn from_key(k: u32) -> f32 {
     f32::from_bits(if k >> 31 == 1 { k & 0x7fff_ffff } else { !k })
-}
-
-pub(crate) fn radix_sort_hi32(v: &mut Vec<u64>) {
-    let n = v.len();
-    let mut tmp = vec![0u64; n];
-    for shift in [32u32, 40, 48, 56] {
-        let mut count = [0usize; 256];
-        for &x in v.iter() {
-            count[((x >> shift) & 0xff) as usize] += 1;
-        }
-        if count.contains(&n) {
-            continue;
-        }
-        let mut sum = 0usize;
-        for c in count.iter_mut() {
-            let t = *c;
-            *c = sum;
-            sum += t;
-        }
-        for &x in v.iter() {
-            let d = ((x >> shift) & 0xff) as usize;
-            tmp[count[d]] = x;
-            count[d] += 1;
-        }
-        std::mem::swap(v, &mut tmp);
-    }
 }
 
 fn close_group(decoys: &[u64], targets: &[u64], best: &mut [u64], fdr: f64) {
@@ -159,13 +134,32 @@ fn walk<'a>(
     best
 }
 
+/// One feature's (low, high) direction counts per training set, from its order keys.
+fn column_counts(
+    mut col: Vec<u64>,
+    mean: f64,
+    inv_sd: f64,
+    sets: usize,
+    fdr: f64,
+) -> Vec<[usize; 2]> {
+    col.par_sort_unstable();
+    let high = walk(col.iter().rev(), mean, inv_sd, sets, fdr);
+    let low = walk(col.iter(), mean, inv_sd, sets, fdr);
+    (0..sets)
+        .map(|s| [low[s] as usize, high[s] as usize])
+        .collect()
+}
+
+/// For each training set and feature, the positives the feature separates at `fdr` read low
+/// and high. Features are sorted as many at a time as the budget holds; a spilled store is
+/// first written as one file per column, so each further pass reads only its features.
 fn direction_counts(
     pin: &Pin,
     norm: &Norm,
     mask: &[u8],
     sets: usize,
     fdr: f64,
-) -> Vec<Vec<[usize; 2]>> {
+) -> Result<Vec<Vec<[usize; 2]>>, String> {
     let nf = pin.rows.nfeat();
     let n = pin.meta.len();
     let flags: Vec<u8> = mask
@@ -181,53 +175,73 @@ fn direction_counts(
         .collect();
     let per_feature = (n as u64).max(1) * SORT_BYTES_PER_ROW;
     let chunk = ((pin.budget.available() / per_feature) as usize).clamp(1, nf);
+    let columns = if chunk < nf && pin.rows.is_spilled() {
+        Some(pin.rows.columns()?)
+    } else {
+        None
+    };
     let br = pin.rows.block_rows();
     let mut out = vec![vec![[0usize; 2]; nf]; sets];
     for j0 in (0..nf).step_by(chunk) {
         let j1 = (j0 + chunk).min(nf);
         let _held = Reservation::take(&pin.budget, (j1 - j0) as u64 * per_feature);
-        let mut cols: Vec<Vec<u64>> = (j0..j1).map(|_| vec![0u64; n]).collect();
-        {
-            let mut per_block: Vec<Vec<&mut [u64]>> = (0..n.div_ceil(br))
-                .map(|_| Vec::with_capacity(j1 - j0))
-                .collect();
-            for col in cols.iter_mut() {
-                for (b, c) in col.chunks_mut(br).enumerate() {
-                    per_block[b].push(c);
-                }
-            }
-            let per_block: Vec<Mutex<Vec<&mut [u64]>>> =
-                per_block.into_iter().map(Mutex::new).collect();
-            pin.rows.par_for_each_block(|start, block| {
-                let mut dst = per_block[start / br]
-                    .lock()
-                    .expect("direction column block lock");
-                for (r, row) in block.chunks_exact(nf).enumerate() {
-                    let fl = u64::from(flags[start + r]);
-                    for (d, &x) in dst.iter_mut().zip(&row[j0..j1]) {
-                        d[r] = (u64::from(order_key(x)) << 32) | fl;
+        let res: Vec<Vec<[usize; 2]>> = match &columns {
+            Some(columns) => (j0..j1)
+                .into_par_iter()
+                .map(|j| {
+                    let mut col = Vec::with_capacity(n);
+                    columns.for_each_value(j, |x| {
+                        let fl = flags.get(col.len()).copied().unwrap_or(0);
+                        col.push((u64::from(order_key(x)) << 32) | u64::from(fl));
+                    })?;
+                    if col.len() != n {
+                        return Err(format!(
+                            "column file of feature {}: {} values for {n} rows",
+                            j + 1,
+                            col.len()
+                        ));
                     }
+                    Ok(column_counts(col, norm.mean[j], norm.inv_sd[j], sets, fdr))
+                })
+                .collect::<Result<_, String>>()?,
+            None => {
+                let mut cols: Vec<Vec<u64>> = (j0..j1).map(|_| vec![0u64; n]).collect();
+                {
+                    let mut per_block: Vec<Vec<&mut [u64]>> = (0..n.div_ceil(br))
+                        .map(|_| Vec::with_capacity(j1 - j0))
+                        .collect();
+                    for col in cols.iter_mut() {
+                        for (b, c) in col.chunks_mut(br).enumerate() {
+                            per_block[b].push(c);
+                        }
+                    }
+                    let per_block: Vec<Mutex<Vec<&mut [u64]>>> =
+                        per_block.into_iter().map(Mutex::new).collect();
+                    pin.rows.par_for_each_block(|start, block| {
+                        let mut dst = per_block[start / br]
+                            .lock()
+                            .expect("direction column block lock");
+                        for (r, row) in block.chunks_exact(nf).enumerate() {
+                            let fl = u64::from(flags[start + r]);
+                            for (d, &x) in dst.iter_mut().zip(&row[j0..j1]) {
+                                d[r] = (u64::from(order_key(x)) << 32) | fl;
+                            }
+                        }
+                    });
                 }
-            });
-        }
-        let res: Vec<Vec<[usize; 2]>> = cols
-            .into_par_iter()
-            .enumerate()
-            .map(|(k, mut col)| {
-                radix_sort_hi32(&mut col);
-                let (m, sd) = (norm.mean[j0 + k], norm.inv_sd[j0 + k]);
-                let high = walk(col.iter().rev(), m, sd, sets, fdr);
-                let low = walk(col.iter(), m, sd, sets, fdr);
-                (0..sets)
-                    .map(|s| [low[s] as usize, high[s] as usize])
+                cols.into_par_iter()
+                    .enumerate()
+                    .map(|(k, col)| {
+                        column_counts(col, norm.mean[j0 + k], norm.inv_sd[j0 + k], sets, fdr)
+                    })
                     .collect()
-            })
-            .collect();
+            }
+        };
         for (k, r) in res.into_iter().enumerate() {
             for (s, pair) in r.into_iter().enumerate() {
                 out[s][j0 + k] = pair;
             }
         }
     }
-    out
+    Ok(out)
 }

@@ -6,6 +6,7 @@
 
 mod args;
 mod budget;
+mod codec;
 mod cv;
 mod direction;
 mod folds;
@@ -13,6 +14,7 @@ mod merge;
 mod normalize;
 mod pep;
 mod pin;
+mod pread;
 mod run;
 mod scores;
 mod store;

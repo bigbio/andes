@@ -1,10 +1,11 @@
 use crate::budget::{Budget, Reservation};
+use crate::codec::{normalised, RowCodec};
 use crate::normalize::Norm;
 use crate::store::Store;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,7 +20,9 @@ pub struct Rows {
 
 enum RowData {
     Ram(Vec<f32>),
-    Spill(PathBuf),
+    /// Rows in memory in `RowCodec`'s compact layout, decoded as the spill file is read.
+    Coded(Vec<u8>, Arc<RowCodec>),
+    Spill(PathBuf, Arc<RowCodec>),
 }
 
 static ROWS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +50,12 @@ pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
 }
 
-pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMut(usize, &[f32])) {
+pub(crate) fn fill(
+    store: &Store,
+    norm: &Norm,
+    idx: &[usize],
+    mut put: impl FnMut(usize, &[f32], &[f32]),
+) {
     let nf = store.nfeat();
     let stride = stride_for(nf + 1);
     let mut buf = vec![0.0f32; stride];
@@ -57,7 +65,7 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
     }
     if nf == 0 {
         for p in 0..idx.len() {
-            put(p, &buf);
+            put(p, &buf, &[]);
         }
         return;
     }
@@ -76,9 +84,9 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
                 .zip(&norm.mean)
                 .zip(&norm.inv_sd)
             {
-                *d = ((f64::from(x) - m) * sd) as f32;
+                *d = normalised(x, m, sd);
             }
-            put(p, &buf);
+            put(p, &buf, src);
             next += 1;
         }
     });
@@ -96,7 +104,7 @@ impl Rows {
         let ncols = store.nfeat() + 1;
         let stride = stride_for(ncols);
         let mut data = vec![0.0f32; idx.len() * stride];
-        fill(store, norm, idx, |p, row| {
+        fill(store, norm, idx, |p, row, _| {
             data[p * stride..(p + 1) * stride].copy_from_slice(row)
         });
         Rows {
@@ -155,11 +163,14 @@ impl Rows {
         })
     }
 
-    pub fn gather_within(
+    /// The normalised rows `idx` of `store`: in memory when the budget holds them, else in a
+    /// spill file written in `codec`'s layout.
+    pub(crate) fn gather_within(
         store: &Store,
         norm: &Norm,
         idx: &[usize],
         budget: &Arc<Budget>,
+        codec: &Arc<RowCodec>,
     ) -> Result<Rows, String> {
         let ncols = store.nfeat() + 1;
         let stride = stride_for(ncols);
@@ -169,12 +180,26 @@ impl Rows {
             rows._ram = ram;
             return Ok(rows);
         }
+        let width = codec.width();
+        if let Some(ram) = Reservation::take(budget, (idx.len() * width) as u64) {
+            let mut data = vec![0u8; idx.len() * width];
+            fill(store, norm, idx, |p, row, raw| {
+                codec.encode(raw, row, &mut data[p * width..(p + 1) * width]);
+            });
+            return Ok(Rows {
+                data: RowData::Coded(data, codec.clone()),
+                nrows: idx.len(),
+                ncols,
+                stride,
+                _ram: ram,
+            });
+        }
         let k = ROWS_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = budget
             .spill_dir()
             .join(format!("rescore-{}-{}.rows", std::process::id(), k));
         let rows = Rows {
-            data: RowData::Spill(path.clone()),
+            data: RowData::Spill(path.clone(), codec.clone()),
             nrows: idx.len(),
             ncols,
             stride,
@@ -182,26 +207,31 @@ impl Rows {
         };
         let file = File::create(&path)
             .map_err(|e| format!("create spill file {}: {e}", path.display()))?;
-        file.set_len(bytes)
+        let width = codec.width() as u64;
+        file.set_len(idx.len() as u64 * width)
             .map_err(|e| format!("size spill file {}: {e}", path.display()))?;
-        let mut file = file;
-        let mut bytes_row = vec![0u8; stride * 4];
+        let mut file = BufWriter::with_capacity(8 << 20, file);
+        let mut at = 0u64;
+        let mut bytes_row = vec![0u8; codec.width()];
         let mut failed = None;
-        fill(store, norm, idx, |p, row| {
+        fill(store, norm, idx, |p, row, raw| {
             if failed.is_some() {
                 return;
             }
-            for (c, v) in bytes_row.chunks_exact_mut(4).zip(row) {
-                c.copy_from_slice(&v.to_le_bytes());
+            codec.encode(raw, row, &mut bytes_row);
+            let to = p as u64 * width;
+            let res = if to == at {
+                Ok(0)
+            } else {
+                file.seek(SeekFrom::Start(to))
             }
-            let res = file
-                .seek(SeekFrom::Start((p * stride * 4) as u64))
-                .and_then(|_| file.write_all(&bytes_row));
+            .and_then(|_| file.write_all(&bytes_row));
+            at = to + width;
             if let Err(e) = res {
                 failed = Some(e);
             }
         });
-        if let Some(e) = failed {
+        if let Some(e) = failed.or_else(|| file.flush().err()) {
             return Err(format!("write spill file {}: {e}", path.display()));
         }
         Ok(rows)
@@ -228,17 +258,27 @@ impl Rows {
         }
     }
 
+    /// Whether the rows are only reachable through a pass (spilled to disk or held compact in
+    /// memory), not as `f32` slices.
     pub fn is_spilled(&self) -> bool {
-        matches!(self.data, RowData::Spill(_))
+        !matches!(self.data, RowData::Ram(_))
+    }
+
+    /// Whether the rows are spilled to disk, not held in memory in any layout.
+    pub fn on_disk(&self) -> bool {
+        matches!(self.data, RowData::Spill(..))
     }
 
     pub fn row(&self, i: usize) -> &[f32] {
         match &self.data {
             RowData::Ram(v) => &v[i * self.stride..(i + 1) * self.stride],
-            RowData::Spill(_) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
+            RowData::Spill(..) | RowData::Coded(..) => {
+                panic!("Rows::row: the rows are spilled or compact; use a scan")
+            }
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn scan(&self, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
         match &self.data {
             RowData::Ram(_) => {
@@ -246,38 +286,68 @@ impl Rows {
                     f(k, self.row(i));
                 }
             }
-            RowData::Spill(path) => {
+            RowData::Coded(data, codec) => decode_rows(data, codec, ids, f),
+            RowData::Spill(path, codec) => {
                 let file = File::open(path).expect("open rows spill file");
-                let mut r = BufReader::with_capacity(8 << 20, file);
-                let width = self.stride * 4;
-                let mut bytes = vec![0u8; width];
-                let mut vals = vec![0.0f32; self.stride];
-                let mut cur = 0usize;
-                for (k, &i) in ids.iter().enumerate() {
-                    if i + 1 == cur {
-                        f(k, &vals);
-                        continue;
-                    }
-                    assert!(i >= cur, "Rows::scan: ids must not decrease");
-                    if i > cur {
-                        r.seek_relative(((i - cur) * width) as i64)
-                            .expect("seek rows spill file");
-                    }
-                    r.read_exact(&mut bytes).expect("read rows spill file");
-                    for (v, c) in vals.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    }
-                    f(k, &vals);
-                    cur = i + 1;
-                }
+                read_rows(&file, codec, ids, f);
             }
         }
     }
 }
 
+/// Calls `f(j, row)` for each row `ids[j]` of compact rows held in memory in `codec`'s layout.
+fn decode_rows(data: &[u8], codec: &RowCodec, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
+    let width = codec.width();
+    let mut vals = codec.blank();
+    for (j, &i) in ids.iter().enumerate() {
+        codec.decode(&data[i * width..(i + 1) * width], &mut vals);
+        f(j, &vals);
+    }
+}
+
+/// Rows at most this many bytes apart are read with one `pread`, the bytes between them
+/// included: reading them costs less than another call.
+const READ_GAP_BYTES: usize = 64 << 10;
+
+/// Bytes one `pread` of spilled rows reads at most.
+const READ_SPAN_BYTES: usize = 4 << 20;
+
+/// Calls `f(j, row)` for each row `ids[j]` of a spilled row file in `codec`'s layout, in
+/// order. `ids` must not decrease; nearby rows are read together with positioned reads, so
+/// several threads can read one file at once.
+fn read_rows(file: &File, codec: &RowCodec, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
+    use crate::pread::ReadAt;
+    let width = codec.width();
+    let span_rows = (READ_SPAN_BYTES / width.max(1)).max(1);
+    let gap_rows = (READ_GAP_BYTES / width.max(1)).max(1);
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut vals = codec.blank();
+    let mut a = 0usize;
+    while a < ids.len() {
+        let lo = ids[a];
+        let mut b = a + 1;
+        while b < ids.len() {
+            assert!(ids[b] >= ids[b - 1], "Rows::pass: ids must not decrease");
+            if ids[b] - ids[b - 1] > gap_rows || ids[b] - lo >= span_rows {
+                break;
+            }
+            b += 1;
+        }
+        let hi = ids[b - 1] + 1;
+        bytes.resize((hi - lo) * width, 0);
+        file.read_exact_at(&mut bytes, (lo * width) as u64)
+            .expect("read rows spill file");
+        for (j, &i) in ids.iter().enumerate().take(b).skip(a) {
+            codec.decode(&bytes[(i - lo) * width..(i - lo + 1) * width], &mut vals);
+            f(j, &vals);
+        }
+        a = b;
+    }
+}
+
 impl Drop for Rows {
     fn drop(&mut self) {
-        if let RowData::Spill(p) = &self.data {
+        if let RowData::Spill(p, _) = &self.data {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -382,24 +452,59 @@ impl Train<'_> {
         I: Fn() -> P + Sync,
         B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
     {
+        self.pass_by(subset.len(), |k| subset[k], out, init, body)
+    }
+
+    /// `pass` over every example in order, without an index vector of them.
+    fn pass_all<P, I, B>(&self, out: &mut [f64], init: I, body: B) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+    {
+        self.pass_by(self.len(), |k| k, out, init, body)
+    }
+
+    /// One parallel pass over `n` examples, the `k`-th being example `example(k)`: `body` sees
+    /// each in order within its CHUNK, with the CHUNK's own partial state.
+    fn pass_by<P, I, B, E>(&self, n: usize, example: E, out: &mut [f64], init: I, body: B) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+        E: Fn(usize) -> usize + Sync,
+    {
         match &self.x.data {
-            RowData::Ram(_) => pass_ram(
-                |k| self.x.row(self.rows[subset[k]]),
-                &mut out[..subset.len()],
-                init,
-                body,
-            ),
-            RowData::Spill(_) => {
-                let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
-                let mut parts: Vec<P> = Vec::with_capacity(subset.len().div_ceil(CHUNK));
-                self.x.scan(&ids, |k, row| {
-                    if k % CHUNK == 0 {
-                        parts.push(init());
-                    }
-                    let part = parts.last_mut().expect("chunk partial");
-                    body(part, k, row, &mut out[k]);
-                });
-                parts
+            RowData::Ram(_) => pass_ram(|k| self.x.row(self.rows[example(k)]), &mut out[..n], init, body),
+            RowData::Coded(data, codec) => out[..n]
+                .par_chunks_mut(CHUNK)
+                .enumerate()
+                .map(|(c, outs)| {
+                    let mut part = init();
+                    let first = c * CHUNK;
+                    let ids: Vec<usize> = (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                    decode_rows(data, codec, &ids, |j, row| {
+                        body(&mut part, first + j, row, &mut outs[j]);
+                    });
+                    part
+                })
+                .collect(),
+            RowData::Spill(path, codec) => {
+                let file = File::open(path).expect("open rows spill file");
+                out[..n]
+                    .par_chunks_mut(CHUNK)
+                    .enumerate()
+                    .map(|(c, outs)| {
+                        let mut part = init();
+                        let first = c * CHUNK;
+                        let ids: Vec<usize> =
+                            (first..first + outs.len()).map(|k| self.rows[example(k)]).collect();
+                        read_rows(&file, codec, &ids, |j, row| {
+                            body(&mut part, first + j, row, &mut outs[j]);
+                        });
+                        part
+                    })
+                    .collect()
             }
         }
     }
@@ -925,10 +1030,8 @@ pub(crate) fn warm_scores(x: &Rows, ex: &Examples, starts: &[&[f64]]) -> (Vec<Ve
         cpos: 0.0,
         cneg: 0.0,
     };
-    let all: Vec<usize> = (0..m).collect();
     let mut first = vec![0.0f64; m];
-    let parts = t.pass(
-        &all,
+    let parts = t.pass_all(
         &mut first,
         || (Vec::new(), Vec::new()),
         |p: &mut (Vec<f64>, Vec<f32>), _, row, o0| {
@@ -957,6 +1060,18 @@ pub(crate) fn warm_scores(x: &Rows, ex: &Examples, starts: &[&[f64]]) -> (Vec<Ve
     (os, nrm)
 }
 
+/// Time one fit spent in each phase, and its MFN iteration count, for the debug log.
+#[derive(Default)]
+struct FitTimes {
+    gram: std::time::Duration,
+    o_bar: std::time::Duration,
+    partition: std::time::Duration,
+    line: std::time::Duration,
+    iters: usize,
+    first_active: usize,
+    last_active: usize,
+}
+
 pub(crate) fn mfn_from(
     x: &Rows,
     ex: &Examples,
@@ -965,6 +1080,34 @@ pub(crate) fn mfn_from(
     opts: &MfnOpts,
     start: Option<&[f64]>,
     pre: Option<(Vec<f64>, &[f32])>,
+) -> Vec<f64> {
+    let mut tm = FitTimes::default();
+    let w = mfn_timed(x, ex, cpos, cneg, opts, start, pre, &mut tm);
+    log::debug!(
+        target: "rescore",
+        "fit Cpos {cpos} Cneg {cneg}: {} MFN iterations, active {}->{} of {}, gram {:.1} s, o_bar {:.1} s, partition {:.1} s, line search {:.1} s",
+        tm.iters,
+        tm.first_active,
+        tm.last_active,
+        ex.rows.len(),
+        tm.gram.as_secs_f64(),
+        tm.o_bar.as_secs_f64(),
+        tm.partition.as_secs_f64(),
+        tm.line.as_secs_f64()
+    );
+    w
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mfn_timed(
+    x: &Rows,
+    ex: &Examples,
+    cpos: f64,
+    cneg: f64,
+    opts: &MfnOpts,
+    start: Option<&[f64]>,
+    pre: Option<(Vec<f64>, &[f32])>,
+    tm: &mut FitTimes,
 ) -> Vec<f64> {
     let t = Train {
         x,
@@ -980,7 +1123,6 @@ pub(crate) fn mfn_from(
     let mut epsilon = opts.big_epsilon;
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
-    let all: Vec<usize> = (0..m).collect();
     let mut o_bar = vec![0.0f64; m];
     let screen = !x.is_spilled() && m > 0;
     let mut nrm = Cow::Owned(Vec::new());
@@ -991,8 +1133,7 @@ pub(crate) fn mfn_from(
     } else if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
         let wv: &[f64] = &w;
-        let parts = t.pass(
-            &all,
+        let parts = t.pass_all(
             &mut o,
             || Vec::with_capacity(if screen { CHUNK } else { 0 }),
             |p, _, row, ok| {
@@ -1005,8 +1146,7 @@ pub(crate) fn mfn_from(
         nrm = Cow::Owned(parts.concat());
     } else if screen {
         nrm = Cow::Owned(
-            t.pass(
-                &all,
+            t.pass_all(
                 &mut o_bar,
                 || Vec::with_capacity(CHUNK),
                 |p, _, row, _| p.push(norm_up(row)),
@@ -1016,6 +1156,7 @@ pub(crate) fn mfn_from(
     }
     let mut sc = screen.then(|| Screen::new(nrm, &w));
     let mut subset = vec![0usize; m];
+    let clock = std::time::Instant::now();
     let (mut active, mut f) = partition(
         &t,
         &o,
@@ -1023,37 +1164,43 @@ pub(crate) fn mfn_from(
         0.5 * lambda * ddot(&w[..n], &w[..n]),
         sc.as_ref(),
     );
+    tm.partition += clock.elapsed();
+    tm.first_active = active;
     let mut w_bar = vec![0.0f64; stride];
     let mut ws = Solve {
         b: vec![0.0; stride],
         g: vec![0.0; stride * stride],
     };
-    let mut act = vec![false; m];
+    let mut act = if screen { vec![false; m] } else { Vec::new() };
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
     let mut iter = 0usize;
     let mut opt = false;
     let mut recheck = false;
     while iter < opts.mfnitermax {
         iter += 1;
+        tm.iters = iter;
+        tm.last_active = active;
         if !recheck {
             w_bar.copy_from_slice(&w);
+            let clock = std::time::Instant::now();
             opt = direct(&t, lambda, &subset[..active], &mut w_bar, &mut ws);
+            tm.gram += clock.elapsed();
+            let clock = std::time::Instant::now();
             if !opt {
                 w_bar.copy_from_slice(&w);
             }
-            act.fill(false);
-            for &ii in &subset[..active] {
-                act[ii] = true;
-            }
             if let Some(sc) = sc.as_mut() {
+                act.fill(false);
+                for &ii in &subset[..active] {
+                    act[ii] = true;
+                }
                 sc.lim = (1.25 * sc.last).clamp(REACH_MIN, REACH_MAX);
                 sc.redo = false;
                 sc.bound(&w_bar);
                 screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar);
             } else {
                 let wb: &[f64] = &w_bar;
-                t.pass(
-                    &all,
+                t.pass_all(
                     &mut o_bar,
                     || (),
                     |_, _, row, ob| {
@@ -1061,33 +1208,28 @@ pub(crate) fn mfn_from(
                     },
                 );
             }
+            tm.o_bar += clock.elapsed();
         }
         recheck = false;
-        let mut opt2 = true;
-        match sc.as_ref() {
+        let opt2 = match sc.as_ref() {
             Some(sc) => {
-                opt2 = subset[..active]
+                subset[..active]
                     .iter()
                     .all(|&ii| t.y(ii) * o_bar[ii] <= 1.0 + epsilon)
                     && sc.live.iter().all(|&i| {
                         let i = i as usize;
                         act[i] || t.y(i) * o_bar[i] >= 1.0 - epsilon
-                    });
+                    })
             }
             None => {
-                for (k, &ii) in subset.iter().enumerate() {
-                    let yo = t.y(ii) * o_bar[ii];
-                    opt2 = if k < active {
-                        yo <= 1.0 + epsilon
-                    } else {
-                        yo >= 1.0 - epsilon
-                    };
-                    if !opt2 {
-                        break;
-                    }
-                }
+                subset[..active]
+                    .par_iter()
+                    .all(|&ii| t.y(ii) * o_bar[ii] <= 1.0 + epsilon)
+                    && subset[active..]
+                        .par_iter()
+                        .all(|&ii| t.y(ii) * o_bar[ii] >= 1.0 - epsilon)
             }
-        }
+        };
         if opt && opt2 {
             if epsilon == opts.big_epsilon {
                 epsilon = opts.epsilon;
@@ -1097,8 +1239,10 @@ pub(crate) fn mfn_from(
             w_bar.truncate(n);
             return w_bar;
         }
+        let clock = std::time::Instant::now();
         let (mut delta, mut need) =
             line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, sc.as_ref());
+        tm.line += clock.elapsed();
         if let Some(sc) = sc.as_mut() {
             loop {
                 let within = need <= sc.lim * (1.0 - 1e-6);
@@ -1130,11 +1274,12 @@ pub(crate) fn mfn_from(
                 sc.record(&w_bar, delta, &w);
             }
             None => {
-                for (oi, &ob) in o.iter_mut().zip(&o_bar) {
-                    *oi += delta * (ob - *oi);
-                }
+                o.par_iter_mut()
+                    .zip(o_bar.par_iter())
+                    .for_each(|(oi, &ob)| *oi += delta * (ob - *oi));
             }
         }
+        let clock = std::time::Instant::now();
         let (a, fl) = partition(
             &t,
             &o,
@@ -1142,6 +1287,7 @@ pub(crate) fn mfn_from(
             0.5 * lambda * ddot(&w[..n], &w[..n]),
             sc.as_ref(),
         );
+        tm.partition += clock.elapsed();
         active = a;
         f = fl;
         if (f - f_old).abs() < opts.relative_stop_eps * f_old.abs() {
@@ -1172,8 +1318,15 @@ mod tests {
         };
         let all: Vec<usize> = (0..6).collect();
         let ram = Rows::gather(&store, &norm, &all);
-        let spilled =
-            Rows::gather_within(&store, &norm, &all, &Budget::new(0, dir.path())).unwrap();
+        let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
+        let spilled = Rows::gather_within(
+            &store,
+            &norm,
+            &all,
+            &Budget::new(0, dir.path()),
+            &codec,
+        )
+        .unwrap();
         assert!(spilled.is_spilled());
         let ids = [0, 0, 1, 3, 3, 3, 5];
         let collect = |rows: &Rows| {
@@ -1183,6 +1336,71 @@ mod tests {
         };
         assert_eq!(collect(&spilled), collect(&ram));
         assert_eq!(collect(&ram).len(), ids.len());
+    }
+
+    #[test]
+    fn a_spilled_pass_gives_the_ram_pass_partials_and_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let unlimited = Budget::new(u64::MAX, dir.path());
+        let nf = 5;
+        let mut b = crate::store::StoreBuilder::new(nf, &unlimited);
+        let n = 3 * CHUNK + 1234;
+        for r in 0..n {
+            let row: Vec<f32> = (0..nf)
+                .map(|c| ((r * 7919 + c * 104_729) % 1000) as f32 * 0.37 - 150.0)
+                .collect();
+            b.push_row(&row).unwrap();
+        }
+        let store = b.finish().unwrap();
+        let norm = Norm {
+            mean: vec![1.5; nf],
+            inv_sd: vec![0.25; nf],
+        };
+        let all: Vec<usize> = (0..n).collect();
+        let ram = Rows::gather(&store, &norm, &all);
+        let codec = Arc::new(RowCodec::scan(&store, &norm, ram.stride));
+        let spilled = Rows::gather_within(
+            &store,
+            &norm,
+            &all,
+            &Budget::new(0, dir.path()),
+            &codec,
+        )
+        .unwrap();
+        assert!(spilled.is_spilled());
+        let rows: Vec<usize> = (0..n).filter(|r| r % 3 != 1 || r % 41 == 0).collect();
+        let pos: Vec<bool> = rows.iter().map(|r| r % 5 == 0).collect();
+        let subset: Vec<usize> = (0..rows.len())
+            .filter(|k| ((k / 2500) % 2 == 0 && k % 97 < 60) || k % 1777 == 0)
+            .collect();
+        let w: Vec<f64> = (0..ram.stride).map(|j| 0.1 * j as f64 - 0.3).collect();
+        let run = |x: &Rows| {
+            let t = Train {
+                x,
+                rows: &rows,
+                pos: &pos,
+                cpos: 1.0,
+                cneg: 1.0,
+            };
+            let mut out = vec![0.0f64; subset.len()];
+            let parts = t.pass(
+                &subset,
+                &mut out,
+                || (0.0f64, Vec::new()),
+                |p, k, row, o| {
+                    *o = dot_row(row, &w);
+                    p.0 += *o;
+                    p.1.push(k);
+                },
+            );
+            let parts: Vec<(u64, Vec<usize>)> =
+                parts.into_iter().map(|(a, ks)| (a.to_bits(), ks)).collect();
+            let out: Vec<u64> = out.iter().map(|v| v.to_bits()).collect();
+            (parts, out)
+        };
+        let (a, b) = (run(&ram), run(&spilled));
+        assert_eq!(a.0.len(), subset.len().div_ceil(CHUNK));
+        assert!(a == b, "spilled pass differs from the RAM pass");
     }
 
     #[test]

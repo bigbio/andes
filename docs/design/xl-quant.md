@@ -270,12 +270,12 @@ There is one reviewable PR per phase, and each is measured on the benchmark befo
 
 | # | Change | Results changed? | Measured on |
 |---|---|---|---|
-| P0 | Benchmark harness: fetch, truth and evaluation for §6; a scripted xiSEARCH + xiFDR + Skyline reference; results JSON and a `render.py` block; cross-link search time and memory. | no | — |
+| P0 | Benchmark harness in `docs/benchmarks/xl/quant`: dataset manifest, fetch, the long-table contract every tool's output is brought to, a Skyline reader, the §6 metrics, tests in CI; the published xiSEARCH + xiFDR + Skyline results scored; wall time, CPU time and peak memory of each cross-link search in `docs/benchmarks/xl/run.py`. Still open: running the reference workflow again where its areas are not published. | no | — |
 | P1 | Retention time, MS1-snapped precursor m/z, run and theoretical m/z on spectrum matches; `.xl.csms.parquet`; linker composition on `Crosslinker`; phosphorus in `Formula`; the composition test. | no; columns added | tests |
 | P2 | Linear co-search in quantified runs; per-run cross-link quantification (D3, D4); `.xl.features.parquet`; `--xl --lfq` allowed. | new outputs | replicate CV and completeness |
 | P3 | Match between runs (D5): joint library and alignment, class-stratified transfer q-values, `--mbr`, the staged `andes quant` path, the cohort `xl-quant` stage. | new outputs | false-transfer rate (§6) |
 | P4 | Roll-up and reporting (D6 to D9): `quant::rollup`, residue-pair and protein-pair tables, protein fold changes, MSstats export, SDRF condition, `statistics.log`, DOCS.md. | new outputs | dilution accuracy, FDP of differential calls |
-| P5 | `docs/benchmarks/xl/quant.md`, README row, `reproduce.md` steps. | docs | — |
+| P5 | andes numbers next to the reference in `docs/benchmarks/xl/quant/README.md`, a `render.py` block, README row. | docs | — |
 
 ## 6. Benchmarks and acceptance targets
 
@@ -289,18 +289,21 @@ The rules are those of `docs/dev/fdr-validation.md` and
 
 | Dataset | Linker | Design | Measures | Role |
 |---|---|---|---|---|
-| PXD011036 | BS3 | 7 proteins, dilution 0.1–1× in triplicate; *E. coli* matrix series | ratio accuracy and compression, CV, share quantified, true positives of differential calls | tuning |
+| PXD011036 | BS3 | HSA, DDA dilution at 0.1, 0.3, 0.5, 0.9 and 1×, three injections each (the seven-protein series of this project is DIA only) | ratio accuracy and compression, CV, share quantified, true positives of differential calls | tuning |
 | PXD007250 | BS3 | HSA, 10 reaction and 10 injection replicates (every ratio is 1) | CV, completeness; every differential call is false | held out |
 | Clasen batches (in `docs/benchmarks/xl`) | DSSO | recombinant interaction groups defined per batch | false transfers: a cross-link transferred into a run of a batch whose interaction groups do not contain its protein pair | false-transfer truth |
 | Matzinger library and library in HEK (in `docs/benchmarks/xl`) | DSSO, DSBU | library alone and library spiked into HEK | false transfers: a HEK cross-link transferred into a library-only run | false-transfer truth |
 | PXD059096 | PhoX | Cas9 dilution, Orbitrap Astral | accuracy and CV, once the data are public; needs phosphorus in `Formula` | held out |
 
-Published figures to compare against:
+The reference results come with the data: the authors of both HSA sets deposited their xiFDR
+and Skyline outputs. Scored by the harness (`docs/benchmarks/xl/quant/README.md`):
 
-- PXD011036: 292 of 414 residue pairs quantified; replicate CV 42–76 % by DDA and 10–15 %
-  by DIA.
-- PXD007250: 106 of 196 residue pairs complete across replicates; median CV 14 % for
-  injection and 32 % for reaction replicates.
+- **PXD011036.** 90 residue pairs, each with a value in every run, but the ratios are
+  compressed to a slope of 0.38. 90 % of the values come from runs without an identification
+  of that precursor. With Skyline's isotope dot product of at least 0.9, the slope is 0.84 and
+  54 residue pairs have values at every level.
+- **PXD007250.** The published reports give median CVs of 13.8 % (injection) and 33.0 %
+  (reaction). The paper reports 14 % and 32 %. The areas behind them are not published.
 
 The false-transfer designs use cleavable linkers, but an MS1 transfer does not depend on the
 linker's chemistry. They would give the first measured false-transfer rate for cross-link
@@ -315,8 +318,8 @@ Targets, to be measured and not promised:
 - **Coverage.** At least as many quantified residue pairs as xiSEARCH + xiFDR + Skyline, at
   the same residue-pair FDR, on every dataset.
 - **Precision.** Median CV no higher than the Skyline workflow on PXD007250.
-- **Accuracy.** Median absolute log2 error of 0.2 or less on PXD011036 at 0.3–1×, with the
-  compression at 0.1× reported.
+- **Accuracy.** On PXD011036, a slope closer to 1 and a smaller median absolute log2 error than
+  the best Skyline view at every level, on no fewer residue pairs.
 - **Transfer error.** Measured false-transfer rate at or below `--quant-transfer-fdr` on the
   false-transfer designs. Transfers are always counted separately.
 - **Differential calls.** FDP at or below the nominal 5 % on PXD007250 and on the known

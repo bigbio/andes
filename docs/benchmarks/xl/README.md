@@ -35,7 +35,11 @@ python3 compare.py reference mytag
 
 `XL_SITES=" (K, S, T, Y, Protein N-term)"` appends sites to every dataset's linker, and
 `XLBENCH_PAIR_TRUTH=1` scores the library datasets by peptide pair alone, without the link
-site, for searches that may place links on S, T or Y.
+site, for searches that may place links on S, T or Y. Each dataset's entry in `summary.json`
+also holds the search's wall time (`wall_s`), CPU time (`cpu_s`) and peak resident memory
+(`max_rss_mb`).
+
+The quantification of cross-links has its own benchmark in [`quant/`](quant/README.md).
 
 `compare.py` prints, for every dataset:
 

@@ -1,0 +1,272 @@
+[
+ {
+  "name": "hsa_dilution",
+  "project": "PXD011036",
+  "design": "dilution",
+  "linker": "BS3",
+  "enzyme": "Trypsin",
+  "fasta": {
+   "file": "db/HSA-Active.FASTA",
+   "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA-Active.FASTA"
+  },
+  "reference_level": 1.0,
+  "normalise": false,
+  "published": {
+   "skyline_document": {
+    "file": "ref/HSA_BS3_DDA_dilution.sky",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_DDA_dilution.sky",
+    "spacer_mod": "Kxlink",
+    "site_mod": "LinkSite"
+   },
+   "xifdr_psms": {
+    "file": "ref/XiFDR_PSMfile_HSA_BS3_5linklevel.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/XiFDR_PSMfile_HSA_BS3_5linklevel.csv"
+   }
+  },
+  "runs": [
+   {
+    "run": "HSA_BS3_0.1x_DDA_001",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_001.raw"
+   },
+   {
+    "run": "HSA_BS3_0.1x_DDA_002",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_002.raw"
+   },
+   {
+    "run": "HSA_BS3_0.1x_DDA_003",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_003.raw"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_001",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_001.raw"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_002",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_002.raw"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_003",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_003.raw"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_001",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_001.raw"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_002",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_002.raw"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_003",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_003.raw"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_001",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_001.raw"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_002",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_002.raw"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_003",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_003.raw"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_001",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_001.raw"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_002",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_002.raw"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_003",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_003.raw"
+   }
+  ]
+ },
+ {
+  "name": "hsa_replicates",
+  "project": "PXD007250",
+  "design": "replicates",
+  "linker": "BS3",
+  "enzyme": "Trypsin",
+  "fasta": {
+   "file": "db/HSA-Active.FASTA",
+   "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA-Active.FASTA"
+  },
+  "normalise": false,
+  "published": {
+   "skyline_cv_injection": {
+    "file": "ref/SkylinereportCVvaluesinjectionreplica.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/SkylinereportCVvaluesinjectionreplica.csv"
+   },
+   "skyline_cv_reaction": {
+    "file": "ref/SkylinereportCVvaluesreactionreplica.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/SkylinereportCVvaluesreactionreplica.csv"
+   },
+   "xifdr_psms_injection": {
+    "file": "ref/HSA_BS3_injection_replica_01.08.16_PSM.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/HSA_BS3_injection_replica_01.08.16_PSM.csv"
+   },
+   "xifdr_psms_reaction": {
+    "file": "ref/HSA_BS3_reactionreplica_15.08.16_PSM.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/HSA_BS3_reactionreplica_15.08.16_PSM.csv"
+   }
+  },
+  "runs": [
+   {
+    "run": "B160801_02_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_001",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_02_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_001.raw"
+   },
+   {
+    "run": "B160801_03_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_002",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_03_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_002.raw"
+   },
+   {
+    "run": "B160801_04_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_003",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_04_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_003.raw"
+   },
+   {
+    "run": "B160801_05_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_004",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_05_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_004.raw"
+   },
+   {
+    "run": "B160801_06_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_005",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_06_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_005.raw"
+   },
+   {
+    "run": "B160801_07_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_006",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_07_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_006.raw"
+   },
+   {
+    "run": "B160801_08_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_007",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_08_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_007.raw"
+   },
+   {
+    "run": "B160801_09_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_008",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_09_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_008.raw"
+   },
+   {
+    "run": "B160801_10_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_009",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_10_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_009.raw"
+   },
+   {
+    "run": "B160801_11_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_010",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_11_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_010.raw"
+   },
+   {
+    "run": "B160815_02_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_001",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_02_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_001.raw"
+   },
+   {
+    "run": "B160815_03_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_002",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_03_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_002.raw"
+   },
+   {
+    "run": "B160815_04_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_003",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_04_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_003.raw"
+   },
+   {
+    "run": "B160815_05_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_004",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_05_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_004.raw"
+   },
+   {
+    "run": "B160815_06_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_005",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_06_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_005.raw"
+   },
+   {
+    "run": "B160815_07_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_006",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_07_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_006.raw"
+   },
+   {
+    "run": "B160815_08_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_007",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_08_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_007.raw"
+   },
+   {
+    "run": "B160815_09_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_008",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_09_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_008.raw"
+   },
+   {
+    "run": "B160815_10_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_009",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_10_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_009.raw"
+   },
+   {
+    "run": "B160815_11_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_010",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_11_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_010.raw"
+   }
+  ]
+ },
+ {
+  "name": "transfer_matzinger",
+  "design": "absence",
+  "linker": "DSSO",
+  "fasta": {
+   "file": "db/Ribosome_EColi_SG_AND_human_abundant500excl-ribosomal_671sequences.fasta"
+  },
+  "runs": [
+   {
+    "dataset": "mat_dsso",
+    "truth": "lib:main_library"
+   },
+   {
+    "dataset": "mat_dsso_hek",
+    "truth": null
+   }
+  ]
+ },
+ {
+  "name": "transfer_clasen",
+  "design": "absence",
+  "linker": "DSSO",
+  "fasta": {
+   "file": "db/all_320_proteins_from_first_second_third_fourth_fifth_batch.fasta"
+  },
+  "runs": [
+   {
+    "dataset": "cla_b1",
+    "truth": "clasen:batch1"
+   },
+   {
+    "dataset": "cla_b4",
+    "truth": "clasen:batch4"
+   }
+  ]
+ }
+]

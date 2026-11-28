@@ -1,0 +1,144 @@
+"""Score cross-link quantification tables on one dataset of datasets.json.
+
+    python3 -m xlq.evaluate --dataset hsa_dilution --data $XLBENCH_DATA \\
+        --arm skyline_published:skyline:ref/HSA_BS3_DDA_dilution.sky \\
+        --arm andes:table:/path/to/xl_quant.tsv --out results/hsa_dilution.json
+
+An arm is NAME:KIND:PATH. KIND `table` is the long table of xlq/table.py (TSV or Parquet); KIND
+`skyline` is a Skyline document with pseudo-peptide cross-links, read with the modification names
+of the dataset's `published.skyline_document` entry. A relative PATH is taken under --data. Every
+arm is scored on its own residue pairs and, with more than one arm, also on the residue pairs every
+arm quantifies (`common`).
+
+KIND takes row filters after `?`, joined by `&`: `evidence=identified` keeps the identified rows
+(the arm without transfers); `min_COL=X` and `max_COL=X` keep the rows whose column COL is at least
+or at most X. A filter on COL applies only to rows with a value in COL, so `max_quant_q=0.01` keeps
+identified rows that carry no quant_q. Example: `skyline?min_isotope_dotp=0.9`.
+"""
+import argparse
+import hashlib
+import json
+import sys
+import warnings
+from pathlib import Path
+
+import pandas as pd
+
+from . import design, metrics, skyline, table
+from .keys import read_fasta
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def parse_kind(kind):
+    """`skyline?min_isotope_dotp=0.9&evidence=identified` -> ('skyline', {filters})."""
+    base, _, opts = kind.partition("?")
+    filters = {}
+    for opt in filter(None, opts.split("&")):
+        key, sep, value = opt.partition("=")
+        if not sep:
+            raise ValueError(f"filter {opt!r} needs KEY=VALUE")
+        filters[key] = value
+    return base, filters
+
+
+def apply_filters(df, filters):
+    for key, value in filters.items():
+        if key == "evidence":
+            df = df[df["evidence"] == value]
+        elif key[:4] in ("min_", "max_"):
+            col = key[4:]
+            if col not in df.columns:
+                raise ValueError(f"filter {key}: the table has no column {col!r}")
+            x = pd.to_numeric(df[col], errors="coerce")
+            ok = x >= float(value) if key.startswith("min_") else x <= float(value)
+            df = df[x.isna() | ok]
+        else:
+            raise ValueError(f"unknown filter {key!r} (evidence, min_COL, max_COL)")
+    return df
+
+
+def read_arm(kind, path, dataset, data_dir):
+    base, filters = parse_kind(kind)
+    if base == "table":
+        df, counts = table.read(path), {}
+    elif base == "skyline":
+        doc = dataset["published"]["skyline_document"]
+        proteins = read_fasta(Path(data_dir) / dataset["fasta"]["file"])
+        df, counts = skyline.read_document(path, proteins, doc["spacer_mod"], doc["site_mod"])
+    else:
+        raise ValueError(f"unknown arm kind {base!r} (table, skyline)")
+    kept = apply_filters(df, filters)
+    if filters:
+        counts = dict(counts, rows_before_filters=int(len(df)), rows_after_filters=int(len(kept)))
+    return kept, counts
+
+
+def score(df, dataset, data_dir, rollup, keep=None):
+    """All metrics the dataset's design supports, for one arm's table."""
+    runs = [r["run"] for r in dataset["runs"]]
+    if keep is not None:
+        df = df[df["residue_pair"].isin(keep)]
+    M = metrics.log_matrix(df, runs, rollup)
+    M = metrics.maybe_normalise(M, runs, dataset.get("normalise", False))
+    out = {"depth": metrics.depth(df, M)}
+    if dataset["design"] == "dilution":
+        level_of = {r["run"]: r["level"] for r in dataset["runs"]}
+        out["dilution"] = metrics.dilution(M, level_of, dataset["reference_level"])
+        groups = {f"{lvl:g}": [r for r in runs if level_of[r] == lvl] for lvl in sorted(set(level_of.values()))}
+        out["precision"] = metrics.precision(M, groups)
+        out["precision_precursor"] = metrics.precision(metrics.precursor_matrix(df, runs), groups)
+    elif dataset["design"] == "replicates":
+        groups = {}
+        for r in dataset["runs"]:
+            groups.setdefault(r["group"], []).append(r["run"])
+        out["precision"] = metrics.precision(M, groups)
+        out["precision_precursor"] = metrics.precision(metrics.precursor_matrix(df, runs), groups)
+        out["null_calls"] = metrics.null_calls(M, groups)
+    elif dataset["design"] == "absence":
+        out["transfers"] = metrics.transfers(df, design.absence(dataset, data_dir))
+    return out
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--data", required=True, help="the benchmark data directory ($XLBENCH_DATA)")
+    ap.add_argument("--arm", action="append", required=True, help="NAME:KIND:PATH")
+    ap.add_argument("--rollup", default="median-polish", choices=["median-polish", "sum"])
+    ap.add_argument("--manifest", default=str(design.HERE / "datasets.json"))
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+
+    dataset = design.load(a.dataset, a.manifest)
+    tables, result = {}, {"dataset": a.dataset, "design": dataset["design"], "rollup": a.rollup, "arms": {}}
+    for spec in a.arm:
+        name, kind, path = spec.split(":", 2)
+        path = Path(path) if Path(path).is_absolute() else Path(a.data) / path
+        df, counts = read_arm(kind, path, dataset, a.data)
+        df, dropped = design.match_runs(df, dataset)
+        tables[name] = df
+        result["arms"][name] = {"kind": kind, "file": path.name, "sha256": sha256(path),
+                                "read": counts, "runs_dropped": dropped}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for name, df in tables.items():
+            result["arms"][name]["own"] = score(df, dataset, a.data, a.rollup)
+        if len(tables) > 1:
+            common = set.intersection(*(set(df["residue_pair"]) for df in tables.values()))
+            result["common_residue_pairs"] = len(common)
+            for name, df in tables.items():
+                result["arms"][name]["common"] = score(df, dataset, a.data, a.rollup, keep=common)
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text(json.dumps(result, indent=1) + "\n", encoding="utf-8")
+    print(f"wrote {a.out}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

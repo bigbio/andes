@@ -1,12 +1,26 @@
 """run.py TAG ANDES [extra andes args...]: search every dataset of datasets.json found under
 $XLBENCH_DATA, score it against its truth, and write $XLBENCH_DATA/results/TAG/summary.json.
 ONLY=name1,name2 restricts the datasets. Thermo .raw input needs an andes built with
---features thermo and the .NET 8 runtime (DOTNET_ROOT)."""
+--features thermo and the .NET 8 runtime (DOTNET_ROOT). Each dataset's entry also records the
+search's wall time, CPU time (user + system) and peak resident memory, read from the child
+process's resource usage."""
 import json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import eval as ev
+
+
+def run_measured(cmd, log):
+    """Run cmd with its output in log; return (exit code, {cpu_s, max_rss_mb}) of that process."""
+    if not hasattr(os, 'wait4'):
+        return subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode, {}
+    p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    _, status, ru = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)
+    rss_bytes = ru.ru_maxrss if sys.platform == 'darwin' else ru.ru_maxrss * 1024
+    return p.returncode, {'cpu_s': round(ru.ru_utime + ru.ru_stime, 1), 'max_rss_mb': round(rss_bytes / 2**20, 1)}
+
 
 B = os.environ.get('XLBENCH_DATA', '.')
 tag, binary, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -25,7 +39,7 @@ for d in json.load(open(f'{HERE}/datasets.json')):
            '--output-pin', f'{out}/{d["name"]}.pin'] + d.get('args', []) + extra
     t = time.time()
     with open(f'{out}/log.txt', 'w') as log:
-        rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode
+        rc, usage = run_measured(cmd, log)
     if rc != 0:
         summary[d['name']] = {'error': rc}
         print(d['name'], 'FAILED', rc, flush=True)
@@ -33,6 +47,7 @@ for d in json.load(open(f'{HERE}/datasets.json')):
         continue
     r = ev.evaluate(f'{out}/{d["name"]}.xl.tsv', d['truth'])
     r['wall_s'] = round(time.time() - t, 1)
+    r.update(usage)
     summary[d['name']] = r
     print(d['name'], json.dumps(r), flush=True)
     json.dump(summary, open(summary_path, 'w'), indent=1)

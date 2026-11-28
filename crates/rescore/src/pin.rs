@@ -509,8 +509,10 @@ const AUTO_CONCURRENT_FITS: u64 = 4;
 
 /// Bytes per PSM the engine allocates outside its stores (fold row lists, training examples,
 /// label, score and order vectors). The automatic budget leaves them room in the allowance; a
-/// capped budget charges them as the rows are read, so it bounds the whole process.
-const UNBUDGETED_BYTES_PER_ROW: u64 = 96;
+/// capped budget charges them as the rows are read, so it bounds the whole process. Measured on
+/// a 542 M-PSM PIN under an 80 GiB cap: peak RSS 92 bytes a PSM in all, of which `PER_ROW_BYTES`
+/// are already charged.
+const UNBUDGETED_BYTES_PER_ROW: u64 = 64;
 
 /// The storage budget at which the PIN's stores, the normalised training rows and
 /// `AUTO_CONCURRENT_FITS` SVM fits all stay in memory: the stores take at most half of the

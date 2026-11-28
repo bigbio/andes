@@ -611,7 +611,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Fixed storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory [default: what the PIN needs to stay in memory, at most 16 GB and at most the memory free to the job or machine less a margin]
+    /// Memory cap of the native Percolator engine in GB: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir so the engine stays within it; each PSM's metadata and working memory (about 93 bytes a PSM) always stay in memory and are charged to it, and a cap too small for them stops with the smallest cap that fits [default: what the PIN needs to stay in memory, at most 16 GB and at most the memory free to the job or machine less a margin]
     #[arg(long, value_name = "GB",
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]

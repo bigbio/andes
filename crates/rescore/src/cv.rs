@@ -64,8 +64,9 @@ struct TrainSet {
 }
 
 /// Bytes one SVM fit holds per training example: `o`, `o_bar`, `subset`, a `deltas` entry, and
-/// when screening the `act` flag and the row norm.
-pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = (3 * std::mem::size_of::<f64>()
+/// when screening the `act` flag and the row norm; plus the warm-start pass's copy of the fit's
+/// start scores, which `warm_scores` holds per chunk while it builds each fit's `o`.
+pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = (4 * std::mem::size_of::<f64>()
     + std::mem::size_of::<(f64, usize, f64)>()
     + std::mem::size_of::<bool>()
     + std::mem::size_of::<f32>()) as u64;

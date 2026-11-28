@@ -208,10 +208,7 @@ pub fn train(
 fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, String> {
     let n = pin.meta.len();
     let fold = folds_by_precursor(&pin.meta, FOLDS, cfg.seed);
-    let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
-    let folds = make_folds(&fold, &is_decoy);
-    let targets = is_decoy.iter().filter(|&&d| !d).count();
-    drop(is_decoy);
+    let (folds, targets) = folds_and_targets(pin, &fold);
     if targets == 0 {
         return Err("Error: no target PSMs were provided.".to_string());
     }
@@ -455,6 +452,13 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         test_scores,
         fold,
     })
+}
+
+/// The cross-validation folds of `fold` and the number of target PSMs.
+fn folds_and_targets(pin: &Pin, fold: &[u8]) -> (Vec<Fold>, usize) {
+    let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
+    let targets = is_decoy.iter().filter(|&&d| !d).count();
+    (make_folds(fold, &is_decoy), targets)
 }
 
 /// The `FOLDS` cross-validation folds: each fold's test rows are the rows assigned to it, its

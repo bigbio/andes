@@ -193,8 +193,8 @@ fn twins(n: usize) -> Vec<(i8, u64, Vec<f64>)> {
     rows
 }
 
-fn all_rows(pin: &Pin) -> Vec<usize> {
-    (0..pin.meta.len()).collect()
+fn all_rows(pin: &Pin) -> Vec<rescore::RowId> {
+    (0..pin.meta.len() as rescore::RowId).collect()
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn pin_direction_has_priority_and_overrule_keeps_each_fold_trained() {
     for i in 0..pin.meta.len() {
         let s = score(
             &pin.rows,
-            &[i],
+            &[i as rescore::RowId],
             &res.w_norm[res.fold[i] as usize],
             Some(&norm),
         )[0];
@@ -271,7 +271,7 @@ fn zero_decoys_or_targets_is_an_error() {
 fn init_direction_picks_best_feature_with_sign() {
     let (_d, pin) = load(&synthetic(600, &[0.0, -3.0, 1.0], 9), None);
     let norm = stdv(&pin);
-    let all: Vec<usize> = (0..pin.meta.len()).collect();
+    let all: Vec<rescore::RowId> = (0..pin.meta.len() as rescore::RowId).collect();
     assert_eq!(
         init_direction(&pin, &norm, &all, 0.01, false).unwrap(),
         vec![0.0, -1.0, 0.0, 0.0]
@@ -312,7 +312,7 @@ fn init_and_trained(pin: &Pin, res: &CvResult, cfg: &CvConfig) -> (usize, usize,
         let w0 = init_direction(pin, &norm, &tr, cfg.initial_selection_fdr, false).unwrap();
         let s0 = score(&pin.rows, &te, &w0, Some(&norm));
         init_pos += count_at(&tdc_q(&s0, &dec, false), &dec, cfg.test_fdr);
-        let s1: Vec<f64> = te.iter().map(|&i| res.test_scores[i]).collect();
+        let s1: Vec<f64> = te.iter().map(|&i| res.test_scores[i as usize]).collect();
         trained_pos += count_at(&tdc_q(&s1, &dec, false), &dec, cfg.test_fdr);
         moved |= res.w_norm[f][..3] != w0[..3];
     }

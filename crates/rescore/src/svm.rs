@@ -401,7 +401,7 @@ pub(crate) struct Examples {
 
 impl Examples {
     pub(crate) fn from_lists(idx_pos: &[usize], idx_neg: &[usize]) -> Examples {
-        let id = |r: usize| RowId::try_from(r).expect("row index below 2^32");
+        let id = |r: usize| r as RowId;
         let mut ex: Vec<(RowId, bool)> = idx_neg
             .iter()
             .map(|&r| (id(r), false))

@@ -268,3 +268,96 @@ fn compact_store_keeps_candidates_whole_when_the_residue_table_is_full() {
         assert_eq!(a.protein_index, b.protein_index);
     }
 }
+
+#[test]
+fn the_per_spectrum_ms1_gate_answers_as_the_per_scan_search() {
+    let db = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"MKWVTFISLLRK".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&db, "XXX");
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = SearchParams::default_tryptic(aa_set);
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
+    let mut prepared =
+        PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+    let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let mut unif = move || (next() >> 11) as f64 / (1u64 << 53) as f64;
+    let mut scans: Vec<model::scan::Ms1Scan> = (0..12)
+        .map(|i| {
+            let mut rows: Vec<(f64, f32, f32)> = (0..3000)
+                .map(|_| (400.0 + unif() * 200.0, 1.0, 0.6 + unif() as f32))
+                .collect();
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            rows[11].0 = rows[10].0;
+            model::scan::Ms1Scan {
+                rt: f64::from(i),
+                peaks: rows.iter().map(|r| (r.0, r.1)).collect(),
+                mobility: if i % 3 == 1 {
+                    Vec::new()
+                } else {
+                    rows.iter().map(|r| r.2).collect()
+                },
+                ..Default::default()
+            }
+        })
+        .collect();
+    scans[9].peaks.swap(5, 2000);
+    prepared.set_dia_ms1(scans);
+    let tol_ppm = 8.0;
+    let mut checked = 0usize;
+    for rt in 0..12 {
+        let rt = Some(f64::from(rt) + 0.3);
+        let scans = prepared.dia_ms1_scans(rt).unwrap();
+        for k0 in [None, Some((0.9_f32, 1.1_f32))] {
+            for _ in 0..4 {
+                let lo_mz = 410.0 + unif() * 160.0;
+                let windows: Vec<(u8, f64, f64)> = [2u8, 3]
+                    .iter()
+                    .map(|&z| {
+                        let zf = f64::from(z);
+                        (z, (lo_mz - PROTON) * zf, (lo_mz + 12.0 - PROTON) * zf)
+                    })
+                    .collect();
+                let gate = prepared.dia_ms1_gate(rt, &windows, tol_ppm, k0).unwrap();
+                for &(z, lo, hi) in &windows {
+                    let zf = f64::from(z);
+                    let mut masses: Vec<f64> = (0..400).map(|_| lo + unif() * (hi - lo)).collect();
+                    masses.extend([lo, hi, lo.next_up(), hi.next_down()]);
+                    for s in &prepared.dia_ms1[scans.clone()] {
+                        for p in &s.peaks {
+                            for mz in [
+                                p.0,
+                                p.0 / (1.0 + tol_ppm * 1e-6),
+                                p.0 / (1.0 - tol_ppm * 1e-6),
+                            ] {
+                                let m = (mz - PROTON) * zf;
+                                masses.extend([m, m.next_up(), m.next_down()]);
+                            }
+                        }
+                    }
+                    for mass in masses.into_iter().filter(|m| (lo..=hi).contains(m)) {
+                        let mz = mass / zf + PROTON;
+                        assert_eq!(
+                            prepared.dia_ms1_gate_has(&gate, mz, tol_ppm),
+                            prepared.dia_ms1_has_at(scans.clone(), mz, tol_ppm, k0),
+                            "rt={rt:?} k0={k0:?} z={z} mz={mz}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100_000, "{checked}");
+}

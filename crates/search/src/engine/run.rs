@@ -48,6 +48,26 @@ struct ChunkScoring<'c> {
 /// A spectrum's DIA isolation windows: (charge, lowest and highest neutral mass) per charge.
 type DiaWindows = SmallVec<[(u8, f64, f64); 4]>;
 
+/// The DIA isolation windows of `spec` for each charge of `charges` (empty outside `--dia`).
+fn dia_windows(spec: &Spectrum, charges: &[u8], params: &SearchParams) -> DiaWindows {
+    if !params.dia {
+        return SmallVec::new();
+    }
+    charges
+        .iter()
+        .map(|&z| {
+            let (lo, hi) = crate::precursor::matching::dia_neutral_window(
+                spec,
+                z,
+                &params.precursor_tolerance,
+                params.chimeric_isolation_halfwidth_da,
+                params.precursor_mass_shift_ppm,
+            );
+            (z, lo, hi)
+        })
+        .collect()
+}
+
 /// The scored spectrum of charge `z`; every candidate charge has one.
 fn scored_spec<'a, 's>(
     scored_per_charge: &'a [(u8, ScoredSpectrum<'s>)],
@@ -565,18 +585,25 @@ impl<'a> PreparedSearch<'a> {
         }
         let scored_spec_for_charge = |z: u8| scored_spec(&scored_per_charge, z);
 
+        let dia_windows = dia_windows(spec, &charges_to_try, params);
         let ms1_gate = if params.dia {
-            self.dia_ms1_scans(spec.rt_seconds)
+            self.dia_ms1_gate(
+                spec.rt_seconds,
+                &dia_windows,
+                params.dia_ms1_tol_ppm,
+                self.dia_slice_mobility(spec),
+            )
         } else {
             None
         };
-        let slice_k0 = if params.dia {
-            self.dia_slice_mobility(spec)
-        } else {
-            None
-        };
-        let (mmap_cands_owned, dia_windows) =
-            self.spectrum_candidates(chunk, spec, scorer, &charges_to_try, &ms1_gate, slice_k0);
+        let mmap_cands_owned = self.spectrum_candidates(
+            chunk,
+            spec,
+            scorer,
+            &charges_to_try,
+            &dia_windows,
+            ms1_gate.as_ref(),
+        );
         let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
         let mmap_cands: &[Candidate] = &mmap_cands_owned;
         let cand_slice: &[Candidate] = mmap_cands;
@@ -616,14 +643,8 @@ impl<'a> PreparedSearch<'a> {
             let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
             for &z in &charges_to_try {
                 let scored_spec = scored_spec_for_charge(z);
-                let iso_errs = self.precursor_errors(
-                    spec,
-                    cand,
-                    z,
-                    params,
-                    &dia_windows,
-                    (&ms1_gate, slice_k0),
-                );
+                let iso_errs =
+                    self.precursor_errors(spec, cand, z, params, &dia_windows, ms1_gate.as_ref());
                 if iso_errs.is_empty() {
                     continue;
                 }
@@ -765,9 +786,8 @@ impl<'a> PreparedSearch<'a> {
     }
 
     /// The precursor mass errors at which candidate `cand` matches the spectrum at charge `z`:
-    /// under `--dia` inside the charge's isolation window (and an MS1 peak when the MS1 gate is
-    /// on, within the learned mobility margin of the scan's slice `slice_k0` when the run has
-    /// MS1 mobility), otherwise at each isotope offset of the range within the precursor
+    /// under `--dia` inside the charge's isolation window (and an MS1 peak of `ms1_gate` when
+    /// the MS1 gate is on), otherwise at each isotope offset of the range within the precursor
     /// tolerance.
     fn precursor_errors(
         &self,
@@ -776,7 +796,7 @@ impl<'a> PreparedSearch<'a> {
         z: u8,
         params: &SearchParams,
         dia_windows: &DiaWindows,
-        (ms1_gate, slice_k0): (&Option<std::ops::Range<usize>>, Option<(f32, f32)>),
+        ms1_gate: Option<&super::ms1::DiaMs1Gate>,
     ) -> SmallVec<[MassError; 4]> {
         let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
         if params.dia {
@@ -787,9 +807,8 @@ impl<'a> PreparedSearch<'a> {
             let mass = cand.peptide.mass();
             let mono_mz = mass / z as f64 + PROTON;
             if (lo..=hi).contains(&mass)
-                && ms1_gate.clone().is_none_or(|r| {
-                    self.dia_ms1_has_at(r, mono_mz, params.dia_ms1_tol_ppm, slice_k0)
-                })
+                && ms1_gate
+                    .is_none_or(|g| self.dia_ms1_gate_has(g, mono_mz, params.dia_ms1_tol_ppm))
             {
                 iso_errs.push(MassError {
                     mass_error_da: 0.0,
@@ -815,18 +834,18 @@ impl<'a> PreparedSearch<'a> {
         iso_errs
     }
 
-    /// The candidates of one spectrum and its DIA isolation windows per charge: from the
-    /// fragment-ion index (gated by the windows and the DIA MS1 scans) or the precursor window of
-    /// the out-of-core index, then the candidate filter.
+    /// The candidates of one spectrum: from the fragment-ion index (gated by the DIA windows
+    /// and the DIA MS1 gate) or the precursor window of the out-of-core index, then the
+    /// candidate filter.
     fn spectrum_candidates(
         &self,
         chunk: &ChunkScoring<'_>,
         spec: &Spectrum,
         scorer: &RankScorer,
         charges_to_try: &[u8],
-        ms1_gate: &Option<std::ops::Range<usize>>,
-        slice_k0: Option<(f32, f32)>,
-    ) -> (Vec<Candidate>, DiaWindows) {
+        dia_windows: &DiaWindows,
+        ms1_gate: Option<&super::ms1::DiaMs1Gate>,
+    ) -> Vec<Candidate> {
         let ChunkScoring {
             rt_source,
             record_cache,
@@ -834,34 +853,15 @@ impl<'a> PreparedSearch<'a> {
             params,
             ..
         } = *chunk;
-        let shift_ppm = params.precursor_mass_shift_ppm;
-        let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
-            charges_to_try
-                .iter()
-                .map(|&z| {
-                    let (lo, hi) = crate::precursor::matching::dia_neutral_window(
-                        spec,
-                        z,
-                        &params.precursor_tolerance,
-                        params.chimeric_isolation_halfwidth_da,
-                        shift_ppm,
-                    );
-                    (z, lo, hi)
-                })
-                .collect()
-        } else {
-            SmallVec::new()
-        };
         let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
             let gate = |mass: f64| {
-                ms1_gate.clone().is_none_or(|r| {
+                ms1_gate.is_none_or(|g| {
                     dia_windows.iter().any(|&(z, lo, hi)| {
                         (lo..=hi).contains(&mass)
-                            && self.dia_ms1_has_at(
-                                r.clone(),
+                            && self.dia_ms1_gate_has(
+                                g,
                                 mass / z as f64 + PROTON,
                                 params.dia_ms1_tol_ppm,
-                                slice_k0,
                             )
                     })
                 })
@@ -895,7 +895,7 @@ impl<'a> PreparedSearch<'a> {
         if frag_index.is_some() && self.candidate_filter.is_some() {
             mmap_cands_owned.retain(|c| self.keeps(c));
         }
-        (mmap_cands_owned, dia_windows)
+        mmap_cands_owned
     }
 
     /// Ends scoring one spectrum once its candidates are scored: merges the per-charge queues,

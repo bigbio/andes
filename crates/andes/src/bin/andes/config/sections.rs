@@ -407,6 +407,8 @@ fn apply_quant(quant: QuantCfg, c: &mut ConfigApply<'_>) -> Result<(), String> {
         quant.lfq_gaussian_width
     );
     set!(c, "lfq_min_cosine", lfq_min_cosine, quant.lfq_min_cosine);
+    set!(c, "xl_fdr", xl_fdr, quant.xl_fdr);
+    set_opt!(c, "xl_cohort_fdr", xl_cohort_fdr, quant.xl_cohort_fdr);
     set_opt!(c, "label", label, quant.label);
     set!(c, "label_reference", label_reference, quant.label_reference);
     set!(c, "label_arg_pro", label_arg_pro, quant.label_arg_pro);
@@ -566,6 +568,7 @@ fn check_search_args(args: &SearchArgs) -> Result<(), String> {
         ));
     }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
+    check_unit_fraction("xl_fdr", args.xl_fdr)?;
     check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
     check_unit_fraction(
         "label_2h_enrichment_chemical",

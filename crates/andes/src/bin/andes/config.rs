@@ -162,6 +162,8 @@ pub struct QuantCfg {
     pub lfq_rt_window: Option<f64>,
     pub lfq_gaussian_width: Option<f64>,
     pub lfq_min_cosine: Option<f64>,
+    pub xl_fdr: Option<f64>,
+    pub xl_cohort_fdr: Option<PathBuf>,
     pub label: Option<String>,
     pub label_reference: Option<usize>,
     pub label_arg_pro: Option<bool>,

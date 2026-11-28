@@ -135,3 +135,7 @@ jobs:
       - name: Comparison
         run: python3 tests/test_compare.py
         working-directory: docs/benchmarks/quant-eval
+
+      - name: Cross-link quantification harness
+        run: python3 tests/test_xlq.py
+        working-directory: docs/benchmarks/xl/quant

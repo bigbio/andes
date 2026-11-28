@@ -271,6 +271,11 @@ pub fn from_reagent(
         name: r.name.clone(),
         accession,
         intact,
+        composition: r
+            .intact
+            .composition
+            .as_deref()
+            .and_then(model::crosslinkers::composition_elements),
         cleavage,
         ends: parse_ends(spec, sites.unwrap_or(&r.sites))?,
         monolinks,

@@ -5,6 +5,7 @@
 pub mod align;
 pub mod claims;
 pub mod decoys;
+pub mod envelope;
 pub mod evidence;
 pub mod formula;
 pub mod gaussian;

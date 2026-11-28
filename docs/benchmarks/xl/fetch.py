@@ -24,8 +24,14 @@ CHUNK = 64 * 1024 * 1024
 
 
 def size(url):
-    out = subprocess.run(['curl', '-sSIL', url], capture_output=True, text=True).stdout
-    return int([l for l in out.lower().splitlines() if l.startswith('content-length')][-1].split(':')[1])
+    """The file size from a HEAD request. An error response (it has a Content-Length too) is
+    retried and then an error, never taken for the size of the file."""
+    for _ in range(8):
+        r = subprocess.run(['curl', '-sSIL', '-f', '--max-time', '120', url], capture_output=True, text=True)
+        lengths = [l for l in r.stdout.lower().splitlines() if l.startswith('content-length')]
+        if r.returncode == 0 and lengths:
+            return int(lengths[-1].split(':')[1])
+    raise RuntimeError(f'{url}: no file size (HEAD request failed)')
 
 
 def part(url, path, lo, hi):

@@ -158,6 +158,8 @@ quant:
   # lfq_rt_window: 60                  # --lfq-rt-window (advanced): Retention-time half-window around the identifying PSM, in seconds [default: 60; 120 with --glyco] (example)
   # lfq_gaussian_width: 12             # --lfq-gaussian-width (advanced): Experimental: Gaussian peak width for peak detection, in seconds (eight sigma) [default: Savitzky-Golay smoothing] (example)
   # lfq_min_cosine: 0.7                # --lfq-min-cosine (advanced): Least isotope-envelope cosine of a feature marked accepted in lfq.parquet
+  # xl_fdr: 0.01                       # --xl-fdr (advanced): With --xl --lfq: q-value threshold of the quantified cross-links
+  # xl_cohort_fdr: cohort/hsa          # --xl-cohort-fdr (advanced): With --xl --lfq: take the q-values of the quantified cross-links from `andes cohort xl-fdr --output <BASE>` (example)
   # label_reference: 1                 # --label-reference (advanced): Reference channel of the --label ratios, 1-based
   # label_arg_pro: false               # --label-arg-pro (advanced): SILAC: fit the heavy proline made from heavy arginine and add it back to its channel
   # label_2h_enrichment_silac: 0.96    # --label-2h-enrichment-silac (advanced): 2H enrichment of metabolic deuterium labels (Lys4, Leu3)

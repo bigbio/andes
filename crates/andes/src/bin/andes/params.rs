@@ -272,6 +272,8 @@ pub const PARAMS: &[ParamSpec] = &[
     with_example(row("lfq_rt_window", Section::Quant, "lfq_rt_window", Unit::Seconds, Some("> 0"), Unset::Auto("60; 120 with --glyco"), None), "60"),
     with_example(row("lfq_gaussian_width", Section::Quant, "lfq_gaussian_width", Unit::Seconds, Some("> 0"), Unset::Auto("Savitzky-Golay smoothing"), None), "12"),
     row("lfq_min_cosine", Section::Quant, "lfq_min_cosine", Unit::Fraction, Some("0..1"), Unset::ClapDefault, None),
+    row("xl_fdr", Section::Quant, "xl_fdr", Unit::Fraction, Some("0..1"), Unset::ClapDefault, None),
+    with_example(row("xl_cohort_fdr", Section::Quant, "xl_cohort_fdr", Unit::Path, None, Unset::Off, None), "cohort/hsa"),
     row("label_reference", Section::Quant, "label_reference", Unit::Count, Some(">= 1"), Unset::ClapDefault, None),
     row("label_arg_pro", Section::Quant, "label_arg_pro", Unit::None, None, Unset::Off, None),
     row("label_2h_enrichment_silac", Section::Quant, "label_2h_enrichment_silac", Unit::Fraction, Some("0..1"), Unset::ClapDefault, None),

@@ -1,0 +1,31 @@
+{
+ "dataset": "hsa_dilution",
+ "skyline_document": {
+  "file": "HSA_BS3_DDA_dilution.sky",
+  "sha256": "033e06bc032fa6b0a6c891c365c3fa213e8d22d08217ce4c7734d2146a64c97f",
+  "read": {
+   "peptides": 447,
+   "decoy": 0,
+   "not_crosslink": 0,
+   "unmapped": 0,
+   "peaks": 9516,
+   "no_area": 0,
+   "zero_area": 604
+  },
+  "site_isomers": {
+   "precursors": 638,
+   "site_isomer_sets": 32,
+   "precursors_in_sets": 64,
+   "overlapping": 60
+  },
+  "xifdr_psms": {
+   "file": "XiFDR_PSMfile_HSA_BS3_5linklevel.csv",
+   "sha256": "3b95e6696256025ebfaf37fdcbbfbe6116569760de45624c53a560345fba758b",
+   "residue_pairs_document": 90,
+   "residue_pairs_xifdr": 90,
+   "shared": 90,
+   "only_document": [],
+   "only_xifdr": []
+  }
+ }
+}

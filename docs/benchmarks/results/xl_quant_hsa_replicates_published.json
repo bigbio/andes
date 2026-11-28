@@ -1,0 +1,25 @@
+{
+ "dataset": "hsa_replicates",
+ "cv_reports": {
+  "injection": {
+   "file": "SkylinereportCVvaluesinjectionreplica.csv",
+   "sha256": "9f41789c56fce7cc00f476247d1ee9fa627558fcdb659fc09b741d55b6c6cba3",
+   "precursors": 518,
+   "median_cv": {
+    "precursor": 0.138,
+    "precursor [M+1]": 0.1255,
+    "precursor [M+2]": 0.1195
+   }
+  },
+  "reaction": {
+   "file": "SkylinereportCVvaluesreactionreplica.csv",
+   "sha256": "a7333c06986a2024531a0a3a8ece0bc82fc0c777b7d80314d385f3125a9fa467",
+   "precursors": 533,
+   "median_cv": {
+    "precursor": 0.33,
+    "precursor [M+1]": 0.32,
+    "precursor [M+2]": 0.306
+   }
+  }
+ }
+}

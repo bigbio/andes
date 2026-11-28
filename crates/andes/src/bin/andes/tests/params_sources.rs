@@ -150,7 +150,11 @@ const EXEMPT: &[(&str, &str)] = &[];
 
 /// Arguments a parameter's sample needs beside it (clap `requires`), in the sample run and in
 /// the baseline it is replayed onto.
-const COMPANIONS: &[(&str, &[&str])] = &[("xl_linear_only", &["--xl", "DSSO"])];
+const COMPANIONS: &[(&str, &[&str])] = &[
+    ("xl_linear_only", &["--xl", "DSSO"]),
+    ("xl_fdr", &["--xl", "DSSO"]),
+    ("xl_cohort_fdr", &["--xl", "DSSO"]),
+];
 
 /// The arguments every sample run has, except the sampled flag itself.
 const BASE: [(&str, &str); 3] = [

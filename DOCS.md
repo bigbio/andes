@@ -125,6 +125,8 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--glyco` | — | *(off)* | — | Intact glycopeptide search into a .glyco.pin (needs a glycan database, e.g. --glyco-species) Glycans come from the glycan database (--glyco-species, --glyco-glycan-gdb or --glyco-glycan-wurcs); the backbone is solved as precursor minus glycan and filtered by the N-X-S/T sequon (any S/T with --glyco-core o). With --lfq the glycopeptides are quantified from MS1 as intact glycopeptides (peptide, glycan composition and charge) into <base>.glyco.lfq.tsv (per feature), .glyco.quant.tsv (per glycopeptide), .glyco.site.tsv (glycoform shares per site), .glyco.protein.tsv and the cross-run .glyco.matrix.tsv and .glyco.protein_matrix.tsv; --lfq-tol, --lfq-rt-window, --lfq-min-cosine and --quant-transfer-fdr apply, and --mbr is the glycopeptide match between runs. The isobaric options do not apply. | — |
 | `--xl` (advanced) | — | *(off)* | — | Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO"; several as "DSSO; DSBU" (experimental) The linker is written like a modification: a reagent name (DSSO, DSBU or BuUrBu, DSBSO, CDI; non-cleavable DSS or BS3, BS2G or DSG, EGS, DST, DSP or DTSSP, PhoX or DSPP, DMP, DTBP, DFDNB, BMOE, SMCC, SDA, EDC or DMTMM), its XLMOD accession (XLMOD:02126), or the UNIMOD name or accession of its intact cross-link (Xlink:DSS[138], UNIMOD:1898), then optionally its sites in parentheses: "DSSO (K, S, T, Y, Protein N-term)". Without sites the reagent's usual ones apply (Lys and the protein N-terminus for NHS esters); N-term adds every peptide N-terminus (synthetic peptide libraries), and a heterobifunctional reagent separates its two ends with /. The reagents and their masses (UNIMOD records, or cited compositions for reagents UNIMOD lacks) are the entries of resources/crosslinkers.yaml; a reagent the table lacks is an entry of the same schema in the config file (search.xl). An --sdrf comment[cross-linker] column sets the linker when neither the command line nor the config does. Monolinks are variable modifications, by UNIMOD record or as reagent:quencher (--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"). For an MS-cleavable linker each MS2 is searched for the reporter doublets; the doublet peptide masses and the precursor give the candidate peptide pairs. For a non-cleavable linker the fragment-ion index retrieves one peptide by its fragments that do not carry the link, and its partner is looked up by the remaining precursor mass. Each peptide is scored with the standard scorer carrying the cleaved stub or its partner on the link residue. Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does not change them) and the q-values, from the target-target, target-decoy and decoy-decoy counts split by intra-protein, homotypic (one peptide sequence on both sides, or two peptides linked at the same or the next residue of one protein) and inter-protein links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the doublet summary of every spectrum (<base>.xl.doublets.tsv). | — |
 | `--xl-linear-only` (advanced) | — | *(off)* | — | With --xl: search only linear and monolinked peptides and write their protein groups The search runs with the variable modifications --xl implies (the default ones plus the linker's water-quenched monolink) and no cross-link search; with --rescore it writes <stem>.protein_groups.tsv. | — |
+| `--xl-fdr` (advanced) | fraction | `0.01` | `0..1` | With --xl --lfq: q-value threshold of the quantified cross-links A cross-linked precursor is quantified when a target cross-link spectrum match of it has a q-value at or below this, and the residue pair of that match too. The q-values are those of this search (<base>.xl.tsv and <base>.xl.residue_pairs.tsv), or those of --xl-cohort-fdr. With few cross-links, as from one purified protein or complex, the pair score alone accepts little at 1 %: run `andes cohort xl-fdr` on the search's table first and pass its output as --xl-cohort-fdr. | — |
+| `--xl-cohort-fdr` (advanced) | path | *(off)* | — | With --xl --lfq: take the q-values of the quantified cross-links from `andes cohort xl-fdr --output <BASE>` Reads <BASE>.xl.tsv and <BASE>.xl.residue_pairs.tsv, which hold the q-values of the matches and residue pairs of all runs together after rescoring, and applies --xl-fdr to them instead of to this search's own q-values. The runs of that stage must be the --spectrum inputs of this search, searched with the same database and settings. | — |
 | `--glyco-species` | — | *(off)* | `human \| mouse \| mouse-large \| high-mannose` | Bundled N-glycan database of --glyco The databases and their attribution: crates/glyco/glycan-db/. | — |
 | `--chimeric-max-coisolated` (advanced) | count | `4` | — | Most co-isolated peptides searched per scan with --chimeric | — |
 | `--chimeric-max-kl` (advanced) | number | `0.3` | `>= 0` | Largest averagine-envelope KL divergence of an accepted co-isolated precursor (--chimeric) Lower is stricter: fewer spurious second peptides. | — |
@@ -135,9 +137,9 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | Flag | Unit | Default | Range | Description | Legacy form |
 |---|---|---|---|---|---|
 | `--tmt` | — | *(off)* | `tmt6 \| tmt10 \| tmt11 \| tmt16 \| tmt18 \| tmt32 \| tmt35 \| itraq4 \| itraq8` | Isobaric reporter-ion quantification with this labelling kit Writes <stem>.tmt.parquet and, with --output-parquet, the QPX quantms.feature.parquet. With --rescore only the PSMs at q <= --psm-fdr are quantified. Also accepted: the plex spellings (tmt10plex) and tmtpro, tmtpro16, tmtpro18, tmtpro32, tmtpro35, in any case. | — |
-| `--lfq` | — | *(off)* | — | Label-free MS1 quantification of the identified precursors Isotope chromatograms are extracted around each identified peptidoform's retention time and integrated. Writes <stem>.lfq.parquet and, with --output-parquet, the QPX quantms.feature.parquet. mzML, Thermo .raw and Bruker .d input (a .d's MS1 frames are summed over ion mobility). With --glyco it quantifies intact glycopeptides instead (see --glyco). | — |
+| `--lfq` | — | *(off)* | — | Label-free MS1 quantification of the identified precursors Isotope chromatograms are extracted around each identified peptidoform's retention time and integrated. Writes <stem>.lfq.parquet and, with --output-parquet, the QPX quantms.feature.parquet. mzML, Thermo .raw and Bruker .d input (a .d's MS1 frames are summed over ion mobility). With --glyco it quantifies intact glycopeptides instead (see --glyco). With --xl it quantifies the cross-linked peptide pairs instead: the precursors of the cross-link spectrum matches at --xl-fdr, on their whole isotope envelope, into <base>.xl.features.parquet and <base>.xl.residue_pairs.quant.tsv (DOCS.md, cross-link quantification). | — |
 | `--label` | — | *(off)* | `preset or one bracket per channel` | MS1 labelled-pair quantification (SILAC, dimethyl): a preset or one bracket per channel Presets: silac2, silac3, dimethyl2, dimethyl3. Channels are brackets in increasing mass order, as OpenMS FeatureFinderMultiplex writes them ([][Lys8,Arg10], [Dimethyl0][Dimethyl4][Dimethyl8]); a label is one of Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6 Dimethyl8, or <site>+<mass>[:[chem]<n>C<n>N<n>D] with the label's 13C, 15N and 2H atoms (chem: a chemical label that adds atoms; without atoms: a chemical shift of natural atoms). The labels are searched as variable modifications that every labelable site of a peptide carries alike, and each identified peptide is measured in every channel by one joint fit of their MS1 isotope traces; channels without an identification are matched at their exact position (match between channels), and with --mbr peptides are transferred between runs. Writes <stem>.label.parquet. mzML or .raw with high-resolution MS1; not with --lfq or --tmt. | — |
-| `--mbr` | — | *(off)* | — | Match between runs across two or more inputs (needs --rescore, and --lfq, --tmt or --label) Label-free: after the per-run quantification, builds the precursor library, aligns retention times across runs, measures every library precursor in every run and writes <base>.mbr.parquet and <base>.mbr_validation.parquet (with --output-parquet, quantms.feature.parquet holds these rows instead of the per-run features, without the transfers above the threshold). Uses --quant-dir for the per-run tables, or a temporary directory. With --rescore (Percolator) it gives the same result as `andes quant library`, `extract` and `finalize` on the same files and Percolator results. With --tmt: the reporter ions of unidentified MS2 scans at an identified peptide's m/z and aligned retention time are transferred into the runs that lack it, each with an evidence type and a quantification-quality q-value (`quant_q`) in tmt.parquet and the QPX feature view; high-resolution MS2 reporters only (not SPS-MS3 or ion-trap MS2); identified rows are unchanged. With --glyco --lfq: every accepted glycopeptide is measured in each run that did not identify it, around its predicted apex on a retention-time map fitted to the first input on the glycopeptides both runs identified, and the transfers are scored in their own target/decoy competition. Transferred rows say so in the Evidence column of .glyco.lfq.tsv. Details: DOCS.md §9. | — |
+| `--mbr` | — | *(off)* | — | Match between runs across two or more inputs (needs --rescore, and --lfq, --tmt or --label) Label-free: after the per-run quantification, builds the precursor library, aligns retention times across runs, measures every library precursor in every run and writes <base>.mbr.parquet and <base>.mbr_validation.parquet (with --output-parquet, quantms.feature.parquet holds these rows instead of the per-run features, without the transfers above the threshold). Uses --quant-dir for the per-run tables, or a temporary directory. With --rescore (Percolator) it gives the same result as `andes quant library`, `extract` and `finalize` on the same files and Percolator results. With --tmt: the reporter ions of unidentified MS2 scans at an identified peptide's m/z and aligned retention time are transferred into the runs that lack it, each with an evidence type and a quantification-quality q-value (`quant_q`) in tmt.parquet and the QPX feature view; high-resolution MS2 reporters only (not SPS-MS3 or ion-trap MS2); identified rows are unchanged. With --glyco --lfq: every accepted glycopeptide is measured in each run that did not identify it, around its predicted apex on a retention-time map fitted to the first input on the glycopeptides both runs identified, and the transfers are scored in their own target/decoy competition. Transferred rows say so in the Evidence column of .glyco.lfq.tsv. Details: DOCS.md §9. With --xl --lfq (no --rescore needed): every quantified cross-link is measured in each run that did not identify it, around the retention time that a joint alignment of the runs predicts. The alignment is fitted on the MS1 features of the cross-links and of the linear peptides identified in the same spectra. Each transfer competes with a decoy feature (the same isotope envelope at a shifted mass, or the same mass at a shifted retention time); its q-value is `quant_q` in <base>.xl.features.parquet and --quant-transfer-fdr the threshold of an accepted quantity. | — |
 | `--quant-dir` | path | *(off)* | — | Directory of the per-run tables of multi-run quantification For each input: <stem>.ms1.parquet (its MS1 scans, every FAIMS voltage), <stem>.ms2.parquet (its MS2 scans, reduced) and <stem>.quant.parquet (every rank-1 PSM, targets and decoys, unfiltered; with --chimeric also the best PSM of each co-isolated precursor). Input as for --lfq (mzML, .raw or .d); not with MGF or --glyco. | — |
 
 ### Rescoring
@@ -1851,6 +1853,68 @@ the intra residue pairs at q ≤ 5 % of a proteome-wide DSS search. The ground-t
 benchmark for these choices (eleven runs, four datasets) is in `docs/benchmarks/xl/`.
 
 ---
+
+### Cross-link quantification (`--xl --lfq`, experimental)
+
+`--xl --lfq` quantifies the cross-linked peptide pairs of a search from their MS1 signal, and
+`--mbr` adds the runs that did not identify them. It is label-free and works with any linker
+`--xl` searches. `--rescore` is not needed.
+
+**What is quantified.** A precursor is one cross-linked peptide pair with its modifications,
+link sites and charge. It is quantified when a target cross-link spectrum match of it and the
+residue pair of that match are both at or below `--xl-fdr` (default 0.01). The q-values are
+those of the search itself. A search of one purified protein or complex holds too few
+cross-links for the pair score alone to accept many of them, so there the q-values of
+`andes cohort xl-fdr`, which rescores the matches of all runs together, are the better
+source: run it on the search's `<base>.xl.tsv` and pass its output base as `--xl-cohort-fdr`.
+
+```bash
+andes --spectrum a.raw --spectrum b.raw --database db.fasta --xl "BS3" --output-pin out/s.pin
+andes cohort xl-fdr out/s.xl.tsv --output out/cohort
+andes --spectrum a.raw --spectrum b.raw --database db.fasta --xl "BS3" \
+  --lfq --mbr --xl-fdr 0.05 --xl-cohort-fdr out/cohort --output-pin out/q.pin
+```
+
+**Measurement.** A cross-linked pair of 3-8 kDa has a wide isotope envelope whose
+monoisotopic peak is weak, so the isotopes that hold 95 % of the envelope (4 to 14) are traced,
+with the envelope computed from the elemental formula of both peptides, their modifications
+and the linker. The elution peak is found on a pattern signal: per MS1 scan, the least-squares
+amplitude of the envelope in the isotope intensities times their squared cosine, so that a
+scan where one isotope alone has signal counts for little. The quantity is the amplitude of the
+envelope in the isotope areas of the peak, fitted without the isotopes whose area is more than
+1.5 times what the others predict (another ion adds signal, it never removes it), and divided
+by the share of the envelope that was traced.
+
+Nothing about the chromatography is a parameter. The width of the elution peaks of each run is
+estimated from the autocorrelation of the pattern traces around its identifications, which
+noise between scans does not change. It sets the smoothing (half a peak standard deviation),
+the search for the apex (the MS2 spectrum of an identification was taken while its precursor
+eluted, so the apex is looked for within a peak width of it) and the extracted window.
+`--lfq-rt-window` and `--lfq-gaussian-width` replace the window and the smoothing; `--lfq-tol`
+and `--lfq-min-cosine` apply as for linear peptides.
+
+**Match between runs.** The runs are aligned jointly on the apex retention times of the
+cross-link features and of the linear peptides identified in the same spectra (cross-links
+alone are too few to align a run). A cross-link is then looked for in every run that did not
+identify it, around its predicted retention time, with a prior whose width combines the
+uncertainty of the prediction and the peak width. Each transfer competes with a decoy feature
+measured the same way: the same envelope at a shifted mass or, for every other transfer, the
+same mass at a shifted retention time. The q-value of that competition is `quant_q`, and a
+transfer is an accepted quantity at `--quant-transfer-fdr` (default: `--quant-fdr`, 0.05).
+
+**Tables.** `<base>.xl.features.parquet` has one row per precursor and run with `run`,
+`precursor`, `residue_pair`, `protein_pair`, `link`, `crosslinker`, both peptides with their
+sites, `charge`, `mono_mz`, `evidence` (`identified` or `transferred`), `accepted`, `quantity`,
+`quant_q`, `feature_score`, the anchor and apex retention times, the peak bounds, `cosine`,
+the isotopes traced and found, and the scan, score and count of the identifying matches. Rows
+that are not accepted stay in the table with their value. `<base>.xl.residue_pairs.quant.tsv`
+is the residue pair by run matrix: the sum of the accepted quantities of the precursors of each
+residue pair, empty where a run has none.
+
+**Limits.** Two precursors that differ only in the link site have one mass and can share one
+elution peak; their rows are then the same signal reported twice, under two residue pairs.
+Runs with several FAIMS compensation voltages are traced over all voltages together. The
+benchmark against published Skyline quantities is `docs/benchmarks/xl/quant/README.md`.
 
 ## 3. Output formats
 

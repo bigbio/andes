@@ -1,0 +1,318 @@
+[
+ {
+  "name": "hsa_dilution",
+  "project": "PXD011036",
+  "design": "dilution",
+  "linker": "BS3",
+  "enzyme": "Trypsin",
+  "fasta": {
+   "file": "db/HSA-Active.FASTA",
+   "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA-Active.FASTA"
+  },
+  "reference_level": 1.0,
+  "normalise": false,
+  "search": {
+   "xl": "BS3 (K, S, T, Y, Protein N-term)",
+   "xl_fdr": 0.05
+  },
+  "published": {
+   "skyline_document": {
+    "file": "ref/HSA_BS3_DDA_dilution.sky",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_DDA_dilution.sky",
+    "spacer_mod": "Kxlink",
+    "site_mod": "LinkSite"
+   },
+   "xifdr_psms": {
+    "file": "ref/XiFDR_PSMfile_HSA_BS3_5linklevel.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/XiFDR_PSMfile_HSA_BS3_5linklevel.csv"
+   }
+  },
+  "runs": [
+   {
+    "run": "HSA_BS3_0.1x_DDA_001",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_001.raw",
+    "sha1": "1158167e9e10e246866cf4ba05fa5e490393f454"
+   },
+   {
+    "run": "HSA_BS3_0.1x_DDA_002",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_002.raw",
+    "sha1": "408e665e8d2e7ddbe39853f7cf2a66e83511d97d"
+   },
+   {
+    "run": "HSA_BS3_0.1x_DDA_003",
+    "level": 0.1,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.1x_DDA_003.raw",
+    "sha1": "2cabe39452f2f914435dc59e4417cf9d7759e136"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_001",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_001.raw",
+    "sha1": "de59f7ac2a4cb01138a709cd2c76790b477a9cfb"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_002",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_002.raw",
+    "sha1": "f2eddb87e11456945b5766730b3799a9adc6533c"
+   },
+   {
+    "run": "HSA_BS3_0.3x_DDA_003",
+    "level": 0.3,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.3x_DDA_003.raw",
+    "sha1": "745b0ab343e7dfa41de15a57290aad76ae9ec1b2"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_001",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_001.raw",
+    "sha1": "02062b1f22ccbe60c234699c86be30a6b9591ac1"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_002",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_002.raw",
+    "sha1": "af6651a2f50d86089b8d04bb8ddd76b658800134"
+   },
+   {
+    "run": "HSA_BS3_0.5x_DDA_003",
+    "level": 0.5,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.5x_DDA_003.raw",
+    "sha1": "8fc02dba389e602e620fe6ddcc63c4d5f7123d1b"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_001",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_001.raw",
+    "sha1": "1daef4f884eeca425457f9045f8485eeb9203a19"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_002",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_002.raw",
+    "sha1": "bd7f53372c413bcca90baa6a5f054520ca4750c7"
+   },
+   {
+    "run": "HSA_BS3_0.9x_DDA_003",
+    "level": 0.9,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_0.9x_DDA_003.raw",
+    "sha1": "c16df65cf78264192db9ea59ab359453fc2ae6a9"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_001",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_001.raw",
+    "sha1": "e1472621f32e91a2d60a0cc66677b48d9ab78dc1"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_002",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_002.raw",
+    "sha1": "fd3a4d61ac76019b0c81943de3301ad645adc477"
+   },
+   {
+    "run": "HSA_BS3_1x_DDA_003",
+    "level": 1.0,
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA_BS3_1x_DDA_003.raw",
+    "sha1": "6f2b4489e40b851625d6c187e95193291bc13496"
+   }
+  ]
+ },
+ {
+  "name": "hsa_replicates",
+  "project": "PXD007250",
+  "design": "replicates",
+  "linker": "BS3",
+  "enzyme": "Trypsin",
+  "fasta": {
+   "file": "db/HSA-Active.FASTA",
+   "url": "https://ftp.ebi.ac.uk/pride/data/archive/2019/01/PXD011036/HSA-Active.FASTA"
+  },
+  "normalise": false,
+  "run_order": "injection",
+  "search": {
+   "xl": "BS3 (K, S, T, Y, Protein N-term)",
+   "xl_fdr": 0.05
+  },
+  "published": {
+   "skyline_cv_injection": {
+    "file": "ref/SkylinereportCVvaluesinjectionreplica.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/SkylinereportCVvaluesinjectionreplica.csv"
+   },
+   "skyline_cv_reaction": {
+    "file": "ref/SkylinereportCVvaluesreactionreplica.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/SkylinereportCVvaluesreactionreplica.csv"
+   },
+   "xifdr_psms_injection": {
+    "file": "ref/HSA_BS3_injection_replica_01.08.16_PSM.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/HSA_BS3_injection_replica_01.08.16_PSM.csv"
+   },
+   "xifdr_psms_reaction": {
+    "file": "ref/HSA_BS3_reactionreplica_15.08.16_PSM.csv",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/HSA_BS3_reactionreplica_15.08.16_PSM.csv"
+   }
+  },
+  "runs": [
+   {
+    "run": "B160801_02_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_001",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_02_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_001.raw",
+    "sha1": "b88efe0fbbbf99b827c51902314b868ac38ebe9f"
+   },
+   {
+    "run": "B160801_03_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_002",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_03_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_002.raw",
+    "sha1": "e123f97d8d321e839090eff0ca6f9f08b6d722bb"
+   },
+   {
+    "run": "B160801_04_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_003",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_04_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_003.raw",
+    "sha1": "01294b570ca5de0afe35a80e158e101a5685a5a2"
+   },
+   {
+    "run": "B160801_05_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_004",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_05_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_004.raw",
+    "sha1": "58b1e6df5aa18f5326bdcfb8f279b33ac1fd0964"
+   },
+   {
+    "run": "B160801_06_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_005",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_06_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_005.raw",
+    "sha1": "934faae0346067c25cc8ccd3266bc4d3c84d9095"
+   },
+   {
+    "run": "B160801_07_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_006",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_07_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_006.raw",
+    "sha1": "db01816137aa5cc7ce1fe64668904c9f38891547"
+   },
+   {
+    "run": "B160801_08_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_007",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_08_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_007.raw",
+    "sha1": "f1f835584b583c95c62a61955858c2388d6e1ec5"
+   },
+   {
+    "run": "B160801_09_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_008",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_09_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_008.raw",
+    "sha1": "056a9f2f9746dfe14f6124e61cd7a6484fc48e16"
+   },
+   {
+    "run": "B160801_10_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_009",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_10_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_009.raw",
+    "sha1": "4fa449bcf9d05df6537b46341258cc74ea6fe255"
+   },
+   {
+    "run": "B160801_11_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_010",
+    "group": "injection",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160801_11_Lumos_FM_IN_190_HSA_BS3_DDA_iRT_010.raw",
+    "sha1": "575cfbf6eb586d336f6be547f3e56fc8644f4333"
+   },
+   {
+    "run": "B160815_02_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_001",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_02_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_001.raw",
+    "sha1": "68373fa2f9b262d5381e75fa315c527b45429b41"
+   },
+   {
+    "run": "B160815_03_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_002",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_03_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_002.raw",
+    "sha1": "000f84f0fadb9045782231a44af0500bcaccef31"
+   },
+   {
+    "run": "B160815_04_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_003",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_04_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_003.raw",
+    "sha1": "835425e93f616e610df66126b72b2c4d588d38b2"
+   },
+   {
+    "run": "B160815_05_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_004",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_05_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_004.raw",
+    "sha1": "fa45f83c1ac8e891bc0ee42d39605d58d6c58cf1"
+   },
+   {
+    "run": "B160815_06_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_005",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_06_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_005.raw",
+    "sha1": "178a6c331795b025920d0f5205101a46f456e92c"
+   },
+   {
+    "run": "B160815_07_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_006",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_07_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_006.raw",
+    "sha1": "b556071d19a5c3f7255ecab953149fdb6559d7e3"
+   },
+   {
+    "run": "B160815_08_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_007",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_08_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_007.raw",
+    "sha1": "30390fffbf16feb874a95188da4a3a590a184f95"
+   },
+   {
+    "run": "B160815_09_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_008",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_09_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_008.raw",
+    "sha1": "4ba4497f93347d4816eab670535136f445d10285"
+   },
+   {
+    "run": "B160815_10_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_009",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_10_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_009.raw",
+    "sha1": "7e9048f778532df51dc69f36edc102647d1865ce"
+   },
+   {
+    "run": "B160815_11_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_010",
+    "group": "reaction",
+    "url": "https://ftp.ebi.ac.uk/pride/data/archive/2018/01/PXD007250/B160815_11_Lumos_FM_IN_190_HSA_BS3_DDA_R_-DMSO_010.raw",
+    "sha1": "ebd8636cfbea8c2ac7bf3a735e1bd1ee91b35926"
+   }
+  ]
+ },
+ {
+  "name": "transfer_matzinger",
+  "design": "absence",
+  "linker": "DSSO",
+  "fasta": {
+   "file": "db/Ribosome_EColi_SG_AND_human_abundant500excl-ribosomal_671sequences.fasta"
+  },
+  "measures": "wrong identities among transfers",
+  "runs": [
+   {
+    "dataset": "mat_dsso",
+    "truth": "lib:main_library"
+   },
+   {
+    "dataset": "mat_dsso_hek",
+    "truth": "lib:main_library"
+   }
+  ]
+ },
+ {
+  "name": "transfer_clasen",
+  "design": "absence",
+  "linker": "DSSO",
+  "fasta": {
+   "file": "db/all_320_proteins_from_first_second_third_fourth_fifth_batch.fasta"
+  },
+  "measures": "false transfers",
+  "runs": [
+   {
+    "dataset": "cla_b1",
+    "truth": "clasen:batch1"
+   },
+   {
+    "dataset": "cla_b4",
+    "truth": "clasen:batch4"
+   }
+  ]
+ }
+]

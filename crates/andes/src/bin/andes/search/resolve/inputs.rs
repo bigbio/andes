@@ -30,7 +30,7 @@ pub(crate) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
     let original_spectrum_paths = cli.spectrum.clone();
     let _d_archives = unpack_d_archives(&mut cli.spectrum, &scratch_dir)?;
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
-    if cli.mbr && !cli.glyco {
+    if cli.mbr && !cli.glyco && cli.xl.is_none() {
         check_mbr_args(cli)?;
         crate::quant::run::check_unique_stems(&cli.spectrum)?;
         if cli.quant_dir.is_none() && cli.label.is_none() {

@@ -86,6 +86,9 @@ pub struct Crosslinker {
     pub name: String,
     pub accession: Option<String>,
     pub intact: f64,
+    /// The element counts of the intact link, for the isotope envelope of a cross-linked pair;
+    /// `None` for a reagent that is defined by a mass alone.
+    pub composition: Option<model::crosslinkers::Elements>,
     pub cleavage: Option<Cleavage>,
     pub ends: [LinkEnd; 2],
     pub monolinks: Vec<Monolink>,

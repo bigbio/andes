@@ -76,6 +76,24 @@ impl Formula {
         self.s = self.s.saturating_sub(other.s);
     }
 
+    /// Adds the signed element counts of `e`; an element that would fall below zero stops at
+    /// zero. Phosphorus is left out: it has one stable isotope, so it moves the mass and not
+    /// the shape of the isotope envelope.
+    pub fn add_elements(&mut self, e: &model::crosslinkers::Elements) {
+        let apply = |slot: &mut u32, n: i32| {
+            *slot = if n >= 0 {
+                slot.saturating_add(n.unsigned_abs())
+            } else {
+                slot.saturating_sub(n.unsigned_abs())
+            };
+        };
+        apply(&mut self.c, e.c);
+        apply(&mut self.h, e.h);
+        apply(&mut self.n, e.n);
+        apply(&mut self.o, e.o);
+        apply(&mut self.s, e.s);
+    }
+
     pub fn peptide<I>(residues: I) -> Self
     where
         I: IntoIterator<Item = (u8, f64)>,
@@ -121,6 +139,18 @@ mod tests {
                 s: 0
             }
         );
+    }
+
+    #[test]
+    fn signed_element_counts_add_and_remove_atoms() {
+        let mut f = Formula::peptide([(b'G', 0.0), (b'A', 0.0)]);
+        f.add_elements(&model::crosslinkers::composition_elements("H(10) C(8) O(2)").unwrap());
+        assert_eq!((f.c, f.h, f.n, f.o, f.s), (13, 20, 2, 5, 0));
+        f.add_elements(&model::crosslinkers::composition_elements("H(-2) O(-1) P").unwrap());
+        assert_eq!((f.c, f.h, f.n, f.o, f.s), (13, 18, 2, 4, 0));
+        let mut small = Formula::water();
+        small.add_elements(&model::crosslinkers::composition_elements("H(-5) O(-3)").unwrap());
+        assert_eq!((small.h, small.o), (0, 0));
     }
 
     #[test]

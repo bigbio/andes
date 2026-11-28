@@ -439,6 +439,13 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         chunks = next?;
     }
     drop(in_flight);
+    if meta.len() > crate::RowId::MAX as usize {
+        return Err(format!(
+            "Error: the PIN holds {} PSMs; the rescorer handles at most {} in one run.",
+            thousands(meta.len()),
+            thousands(crate::RowId::MAX as usize)
+        ));
+    }
     log::debug!(
         target: "rescore",
         "after reading the PIN: {:.2} GiB of the {:.2} GiB storage budget free, {:.2} GiB charged to {} rows",

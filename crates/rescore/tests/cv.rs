@@ -96,14 +96,14 @@ fn pool(threads: usize) -> rayon::ThreadPool {
         .unwrap()
 }
 
-fn rows_of(res: &CvResult, f: usize, train_rows: bool) -> Vec<usize> {
-    (0..res.fold.len())
-        .filter(|&i| (res.fold[i] as usize == f) != train_rows)
+fn rows_of(res: &CvResult, f: usize, train_rows: bool) -> Vec<rescore::RowId> {
+    (0..res.fold.len() as rescore::RowId)
+        .filter(|&i| (res.fold[i as usize] as usize == f) != train_rows)
         .collect()
 }
 
-fn decoys(pin: &Pin, rows: &[usize]) -> Vec<bool> {
-    rows.iter().map(|&i| pin.meta[i].label < 0).collect()
+fn decoys(pin: &Pin, rows: &[rescore::RowId]) -> Vec<bool> {
+    rows.iter().map(|&i| pin.meta[i as usize].label < 0).collect()
 }
 
 fn bits(v: &[f64]) -> Vec<u64> {

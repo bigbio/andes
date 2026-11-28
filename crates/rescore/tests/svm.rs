@@ -103,7 +103,7 @@ fn rows_gather_normalises_and_appends_bias() {
         ((3.109375 - norm.mean[0]) * norm.inv_sd[0]) as f32
     );
     assert_eq!(x.row(2)[5], 1.0);
-    let all: Vec<usize> = (0..pin.meta.len()).collect();
+    let all: Vec<rescore::RowId> = (0..pin.meta.len() as rescore::RowId).collect();
     let full = Rows::gather(&pin.rows, &norm, &all);
     assert_eq!(full.row(5), x.row(0));
     assert_eq!(full.row(200), x.row(2));
@@ -144,7 +144,7 @@ fn mfn_matches_reference_weights() {
     .unwrap();
     assert_eq!(pin.meta.len(), 201);
     let norm = stdv(&pin);
-    let all: Vec<usize> = (0..pin.meta.len()).collect();
+    let all: Vec<rescore::RowId> = (0..pin.meta.len() as rescore::RowId).collect();
     let x = Rows::gather(&pin.rows, &norm, &all);
     let opts = MfnOpts::default();
     let reference = std::fs::read_to_string(data_path("svm_ref_weights.tsv")).unwrap();
@@ -214,5 +214,5 @@ fn rows_gather_panics_on_unreached_index() {
     )
     .unwrap();
     let norm = stdv(&pin);
-    Rows::gather(&pin.rows, &norm, &[0, pin.meta.len()]);
+    Rows::gather(&pin.rows, &norm, &[0, pin.meta.len() as rescore::RowId]);
 }

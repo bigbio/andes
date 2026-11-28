@@ -6,6 +6,7 @@ use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
 use crate::svm::{mfn_from, warm_scores, Examples, MfnOpts, Rows, GRAM_BYTES};
+use crate::RowId;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -51,8 +52,8 @@ pub struct CvResult {
 }
 
 struct Fold {
-    train: Vec<usize>,
-    test: Vec<usize>,
+    train: Vec<RowId>,
+    test: Vec<RowId>,
     train_decoy: Vec<bool>,
     test_decoy: Vec<bool>,
 }
@@ -69,7 +70,7 @@ pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = (3 * std::mem::size_of::<f64>()
     + std::mem::size_of::<bool>()
     + std::mem::size_of::<f32>()) as u64;
 
-fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
+fn score_fits(pin: &Pin, norm: &Norm, rows: &[RowId], ws: &[&[f64]]) -> Vec<Vec<f64>> {
     let nf = pin.rows.nfeat();
     if nf == 0 {
         return ws.iter().map(|w| vec![w[0]; rows.len()]).collect();
@@ -168,23 +169,24 @@ fn fit_reserve(folds: &[Fold]) -> u64 {
         .unwrap_or(0)
 }
 
-fn example_union(sets: &[TrainSet]) -> Vec<usize> {
-    let mut all: Vec<usize> = sets
+fn example_union(sets: &[TrainSet]) -> Vec<RowId> {
+    let mut all: Vec<RowId> = sets
         .iter()
         .flat_map(|t| t.ex.rows.iter().copied())
         .collect();
     all.par_sort_unstable();
     all.dedup();
+    all.shrink_to_fit();
     all
 }
 
-fn to_positions(rows: &mut [usize], union: &[usize]) {
+fn to_positions(rows: &mut [RowId], union: &[RowId]) {
     let mut j = 0usize;
     for r in rows.iter_mut() {
         while union[j] < *r {
             j += 1;
         }
-        *r = j;
+        *r = j as RowId;
     }
 }
 
@@ -209,6 +211,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
     let folds = make_folds(&fold, &is_decoy);
     let targets = is_decoy.iter().filter(|&&d| !d).count();
+    drop(is_decoy);
     if targets == 0 {
         return Err("Error: no target PSMs were provided.".to_string());
     }
@@ -236,6 +239,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         cfg.initial_selection_fdr,
         cfg.overrule,
     )?;
+    drop(mask);
     let init_positives = initial_positives(pin, norm, cfg, &folds, &init);
     let mut w = init.clone();
     let mut train_scores: Vec<Vec<f64>> = folds
@@ -460,11 +464,11 @@ fn make_folds(fold: &[u8], is_decoy: &[bool]) -> Vec<Fold> {
     (0..FOLDS)
         .into_par_iter()
         .map(|f| {
-            let (test, train): (Vec<usize>, Vec<usize>) =
-                (0..n).partition(|&i| fold[i] as usize == f);
+            let (test, train): (Vec<RowId>, Vec<RowId>) =
+                (0..n as RowId).partition(|&i| fold[i as usize] as usize == f);
             Fold {
-                train_decoy: train.iter().map(|&i| is_decoy[i]).collect(),
-                test_decoy: test.iter().map(|&i| is_decoy[i]).collect(),
+                train_decoy: train.iter().map(|&i| is_decoy[i as usize]).collect(),
+                test_decoy: test.iter().map(|&i| is_decoy[i as usize]).collect(),
                 train,
                 test,
             }
@@ -517,7 +521,7 @@ fn scatter_test_scores(folds: &[Fold], test: &[Vec<f64>], n: usize) -> Vec<f64> 
     let mut test_scores = vec![0.0f64; n];
     for (fd, s) in folds.iter().zip(test) {
         for (&i, &v) in fd.test.iter().zip(s) {
-            test_scores[i] = v;
+            test_scores[i as usize] = v;
         }
     }
     test_scores

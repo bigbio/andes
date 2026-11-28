@@ -346,7 +346,7 @@ fn encode_rescore(backend: &PercolatorBackend, args: &[String]) -> String {
         PercolatorBackend::Native { memory } => format!(
             "native\n{}\n{}",
             match memory.sizing {
-                output::Sizing::Fixed => memory.bytes.to_string(),
+                output::Sizing::Fixed | output::Sizing::Cap => memory.bytes.to_string(),
                 output::Sizing::FitInput { .. } => "auto".to_string(),
             },
             memory.spill_dir.display()
@@ -378,7 +378,7 @@ fn decode_rescore(s: &str) -> Result<(PercolatorBackend, Vec<String>), String> {
                 memory: output::MemLimit {
                     bytes: bytes.parse().map_err(|_| bad())?,
                     spill_dir: PathBuf::from(spill),
-                    sizing: output::Sizing::Fixed,
+                    sizing: output::Sizing::Cap,
                 },
             },
             args(a),
@@ -424,10 +424,10 @@ fn study_rescore(
         PercolatorBackend::Native { memory } => (
             PercolatorBackend::Native {
                 memory: match memory.sizing {
-                    output::Sizing::Fixed => output::MemLimit {
+                    output::Sizing::Fixed | output::Sizing::Cap => output::MemLimit {
                         bytes: memory.bytes,
                         spill_dir: scratch.to_path_buf(),
-                        sizing: output::Sizing::Fixed,
+                        sizing: memory.sizing,
                     },
                     output::Sizing::FitInput { .. } => {
                         crate::memory::rescore_memory(None, scratch.to_path_buf())
@@ -1185,7 +1185,7 @@ mod tests {
                     memory: output::MemLimit {
                         bytes: gb << 30,
                         spill_dir: PathBuf::from(dir),
-                        sizing: output::Sizing::Fixed,
+                        sizing: output::Sizing::Cap,
                     },
                 },
                 &args,
@@ -1223,7 +1223,7 @@ mod tests {
             memory: output::MemLimit {
                 bytes: 1 << 33,
                 spill_dir: PathBuf::from("/tmp/x"),
-                sizing: output::Sizing::Fixed,
+                sizing: output::Sizing::Cap,
             },
         };
         let (n2, _) = decode_rescore(&encode_rescore(&n, &[])).unwrap();

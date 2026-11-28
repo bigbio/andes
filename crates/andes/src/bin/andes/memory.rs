@@ -248,7 +248,7 @@ pub(crate) fn rescore_memory(gb: Option<u64>, spill_dir: PathBuf) -> output::Mem
         Some(gb) => output::MemLimit {
             bytes: gb.saturating_mul(1 << 30),
             spill_dir,
-            sizing: output::Sizing::Fixed,
+            sizing: output::Sizing::Cap,
         },
         None => {
             let (bytes, why) = rescore_allowance(
@@ -478,7 +478,7 @@ mod tests {
     fn a_fixed_rescore_budget_is_the_flag_in_gib() {
         let m = rescore_memory(Some(3), PathBuf::from("/s"));
         assert_eq!(m.bytes, 3 * GIB);
-        assert_eq!(m.sizing, output::Sizing::Fixed);
+        assert_eq!(m.sizing, output::Sizing::Cap);
         let m = rescore_memory(None, PathBuf::from("/s"));
         assert!(matches!(m.sizing, output::Sizing::FitInput { .. }));
     }

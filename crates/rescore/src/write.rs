@@ -191,11 +191,25 @@ pub fn write_results(
     file_names: &[String],
     res: &Results,
 ) -> Result<(), String> {
+    let order = psm_order(meta, res.rows, res.scores, |i| texts.get(i).map(|t| t.psm_id))?;
+    write_ordered(target, decoy, meta, texts, file_names, res, &order)
+}
+
+/// `write_results` with the rows already in output order (`order` from `psm_order` on the
+/// same rows and scores).
+pub(crate) fn write_ordered(
+    target: &Path,
+    decoy: &Path,
+    meta: &[RowMeta],
+    texts: &Texts,
+    file_names: &[String],
+    res: &Results,
+    order: &[usize],
+) -> Result<(), String> {
     let (rows, scores) = (res.rows, res.scores);
-    let order = psm_order(meta, rows, scores, |i| texts.get(i).map(|t| t.psm_id))?;
     let cols = [scores, res.q, res.pep];
-    write_one(target, 1, meta, texts, file_names, &order, rows, cols)?;
-    write_one(decoy, -1, meta, texts, file_names, &order, rows, cols)
+    write_one(target, 1, meta, texts, file_names, order, rows, cols)?;
+    write_one(decoy, -1, meta, texts, file_names, order, rows, cols)
 }
 
 pub fn write_weights(

@@ -7,7 +7,7 @@ use crate::normalize::{score, stdv, Norm};
 use crate::pep::{estimate_pi0, pep_from_q, too_good_separation};
 use crate::pin::{read_pin, MemLimit, Pin};
 use crate::scores::{mix_max_q, psm_order, tdc_q, tdc_winners};
-use crate::write::{write_results, write_weights, Results};
+use crate::write::{write_ordered, write_weights, Results};
 use crate::RowId;
 use std::collections::HashMap;
 use std::path::Path;
@@ -288,12 +288,13 @@ fn finish(
         q: &q,
         pep: &pep,
     };
-    write_results(
+    write_ordered(
         &a.target,
         &a.decoy,
         &pin.meta,
         &pin.texts,
         &pin.file_names,
         &res,
+        &order,
     )
 }

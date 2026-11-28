@@ -1,4 +1,5 @@
 use crate::pin::RowMeta;
+use crate::RowId;
 use rayon::prelude::*;
 
 pub(crate) fn order_key64(x: f64) -> u64 {
@@ -342,14 +343,57 @@ pub fn training_sets(q: &[f64], is_decoy: &[bool], fdr: f64) -> (Vec<usize>, Vec
 
 pub fn tdc_winners<F>(meta: &[RowMeta], scores: &[f64], psm_id: F) -> Result<Vec<usize>, String>
 where
-    F: Fn(usize) -> Result<String, String>,
+    F: Fn(usize) -> Result<String, String> + Sync,
 {
-    let mut keyed: Vec<(u32, u64, u64, u64, i8, usize)> = meta
-        .par_iter()
-        .enumerate()
-        .map(|(i, m)| {
+    let (start, by_file) = rows_by_file(meta);
+    let per_file: Vec<Vec<usize>> = start
+        .par_windows(2)
+        .map(|w| file_winners(meta, scores, &by_file[w[0]..w[1]], &psm_id))
+        .collect::<Result<_, _>>()?;
+    drop(by_file);
+    let mut out: Vec<usize> = per_file.concat();
+    out.par_sort_unstable();
+    Ok(out)
+}
+
+/// The rows of `meta` grouped by file, in row order within a file (a counting sort), and
+/// where each file's rows start.
+fn rows_by_file(meta: &[RowMeta]) -> (Vec<usize>, Vec<RowId>) {
+    let nfiles = meta.par_iter().map(|m| m.file as usize + 1).max().unwrap_or(0);
+    let mut start = vec![0usize; nfiles + 1];
+    for m in meta {
+        start[m.file as usize + 1] += 1;
+    }
+    for f in 0..nfiles {
+        start[f + 1] += start[f];
+    }
+    let mut next = start.clone();
+    let mut by_file: Vec<RowId> = vec![0; meta.len()];
+    for (i, m) in meta.iter().enumerate() {
+        let f = m.file as usize;
+        by_file[next[f]] = i as RowId;
+        next[f] += 1;
+    }
+    (start, by_file)
+}
+
+/// The target-decoy competition winners among `rows`, the rows of one file: per scan and
+/// experimental mass, the best score, then a decoy over a target, then the smallest PSM id.
+fn file_winners<F>(
+    meta: &[RowMeta],
+    scores: &[f64],
+    rows: &[RowId],
+    psm_id: &F,
+) -> Result<Vec<usize>, String>
+where
+    F: Fn(usize) -> Result<String, String> + Sync,
+{
+    let mut keyed: Vec<(u64, u64, u64, i8, usize)> = rows
+        .iter()
+        .map(|&r| {
+            let i = r as usize;
+            let m = &meta[i];
             (
-                m.file,
                 m.scan,
                 order_key64(m.exp_mass + 0.0),
                 !order_key64(scores[i] + 0.0),
@@ -360,25 +404,24 @@ where
         .collect();
     keyed.par_sort_unstable();
     let mut out = Vec::new();
-    for group in keyed.chunk_by(|a, b| (a.0, a.1, a.2) == (b.0, b.1, b.2)) {
+    for group in keyed.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
         let tied = group
             .iter()
-            .take_while(|k| (k.3, k.4) == (group[0].3, group[0].4))
+            .take_while(|k| (k.2, k.3) == (group[0].2, group[0].3))
             .count();
-        let mut best = group[0].5;
+        let mut best = group[0].4;
         if tied > 1 {
             let mut best_id = psm_id(best)?;
             for k in &group[1..tied] {
-                let id = psm_id(k.5)?;
+                let id = psm_id(k.4)?;
                 if id < best_id {
-                    best = k.5;
+                    best = k.4;
                     best_id = id;
                 }
             }
         }
         out.push(best);
     }
-    out.par_sort_unstable();
     Ok(out)
 }
 

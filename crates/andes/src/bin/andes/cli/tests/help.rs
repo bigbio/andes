@@ -82,6 +82,23 @@ const HIDDEN: &[&str] = &[
 ];
 
 #[test]
+fn experimental_entrapment_flags_are_advanced_diagnostics() {
+    let mut cmd = SearchWrap::command();
+    let short = cmd.render_help().to_string();
+    let long = cmd.render_long_help().to_string();
+    for flag in ["--add-entrapment", "--entrapment-seed"] {
+        assert!(!listed(&short).iter().any(|listed| listed == flag));
+        assert!(listed(&long).iter().any(|listed| listed == flag));
+    }
+    assert!(long.contains("experimental"));
+    assert!(long.contains("have not been validated"));
+    for id in ["add_entrapment", "entrapment_seed"] {
+        let arg = cmd.get_arguments().find(|arg| arg.get_id() == id).unwrap();
+        assert_eq!(arg.get_help_heading(), Some(ADVANCED_FDR));
+    }
+}
+
+#[test]
 fn short_help_lists_the_main_options_under_five_headings() {
     let mut cmd = SearchWrap::command();
     let short = cmd.render_help().to_string();

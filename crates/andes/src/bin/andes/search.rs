@@ -5,6 +5,7 @@
 mod calibrate;
 mod collect;
 mod files;
+mod entrapment;
 mod finish;
 mod outputs;
 mod rescored;

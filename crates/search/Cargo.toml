@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aho-corasick = "1"
 log = { workspace = true }
 xl = { path = "../xl" }
 glyco = { path = "../glyco" }

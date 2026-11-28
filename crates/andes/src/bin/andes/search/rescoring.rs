@@ -33,6 +33,7 @@ pub(super) struct Rescoring {
     pub(super) row_scores: Option<output::RowScores>,
     pub(super) dia_replaced: std::collections::HashSet<String>,
     pub(super) dia_precursor_ids: std::collections::HashSet<String>,
+    pub(super) dia_precursor_charges: std::collections::HashMap<String, u8>,
 }
 
 /// The DIA precursor learned score trained beside the steps before rescoring, and the pass-2
@@ -97,6 +98,8 @@ pub(super) fn rescore_pin(
     let mut row_scores: Option<output::RowScores> = None;
     let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dia_precursor_charges: std::collections::HashMap<String, u8> =
+        std::collections::HashMap::new();
     let rescore_map = if use_percolator {
         let backend = if use_native {
             crate::cli::ensure_scratch_dir(scratch_dir)?;
@@ -182,6 +185,14 @@ pub(super) fn rescore_pin(
                 learned,
             ) {
                 Ok(r) => {
+                    if cli.add_entrapment && cli.rescore {
+                        dia_precursor_charges = t
+                            .spec_id
+                            .iter()
+                            .cloned()
+                            .zip(t.charge.iter().copied())
+                            .collect();
+                    }
                     log::info!(
                         target: "dia",
                         "precursor PIN used: {} target precursors at q <= 0.01 (pass 1: \
@@ -231,6 +242,7 @@ pub(super) fn rescore_pin(
         row_scores,
         dia_replaced,
         dia_precursor_ids,
+        dia_precursor_charges,
     })
 }
 

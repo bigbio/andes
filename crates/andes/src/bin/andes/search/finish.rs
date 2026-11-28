@@ -9,7 +9,7 @@ use model::Spectrum;
 use rayon::prelude::*;
 use search::TopNQueue;
 
-use super::outputs::{release_at_exit, write_proteoform_table, write_search_tsv, PsmTables};
+use super::outputs::{PsmTables, release_at_exit, write_proteoform_table, write_search_tsv};
 use super::*;
 use crate::cli::Cli;
 use crate::quant::run::QuantCollector;
@@ -227,6 +227,7 @@ pub(super) struct AfterRescoring<'a> {
     pub(super) dia_precursor_ids: HashSet<String>,
     pub(super) pin_candidates: Vec<search::candidates::Candidate>,
     pub(super) pin_index: search::SearchIndex,
+    pub(super) true_charges: HashMap<String, u8>,
     pub(super) trace: crate::report::build::Trace,
 }
 
@@ -271,23 +272,12 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        true_charges,
         mut trace,
     } = state;
     let spectrum_paths = &cli.spectrum;
 
-    if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
-        crate::dia::study::store_run(
-            dir,
-            &spectrum_path,
-            &output_pin_path,
-            &t,
-            None,
-            &Default::default(),
-        )?;
-    }
-    if cli.dia {
-        crate::memory::release_free_memory();
-    }
+    store_dia_run(dia_pass2.take(), &cli, &spectrum_path, &output_pin_path)?;
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
@@ -416,6 +406,17 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
         )
     });
     if let Some(summary) = id_summary.as_mut() {
+        summary.entrapment = entrapment_report(super::entrapment::Inputs {
+            cli: &cli,
+            index: &pin_index,
+            params: &params,
+            rows: rescore_map.as_ref(),
+            groups: protein_groups.as_ref(),
+            base: &report_base,
+            pin: &output_pin_path,
+            true_charges: &true_charges,
+            precursor_pin: !dia_precursor_ids.is_empty(),
+        })?;
         summary.open_search = open_search_summary.take();
     }
     log::info!(target: "summary", "{}", run_stats.render_with(id_summary.as_ref()));
@@ -482,6 +483,31 @@ pub(super) fn after_rescoring(state: AfterRescoring<'_>) -> Result<(), Box<dyn s
     })
 }
 
+fn store_dia_run(
+    table: Option<output::dia::pass2::Pass2Table>,
+    cli: &Cli,
+    spectrum: &Path,
+    pin: &Path,
+) -> Result<(), String> {
+    if let (Some(table), Some(dir)) = (table, cli.quant_dir.as_deref()) {
+        crate::dia::study::store_run(dir, spectrum, pin, &table, None, &Default::default())?;
+    }
+    if cli.dia {
+        crate::memory::release_free_memory();
+    }
+    Ok(())
+}
+
+fn entrapment_report(input: super::entrapment::Inputs<'_>) -> Result<Option<String>, String> {
+    let precursor_path = crate::dia::score::precursor_pin_path(input.pin);
+    let pin = if input.precursor_pin {
+        &precursor_path
+    } else {
+        input.pin
+    };
+    super::entrapment::report(super::entrapment::Inputs { pin, ..input })
+}
+
 /// What the filtered TSV and the open-search offsets read.
 struct Filtered<'a> {
     cli: &'a Cli,
@@ -502,7 +528,10 @@ struct Filtered<'a> {
 fn write_filtered<'m>(
     rescore_map: Option<&'m HashMap<String, output::PercolatorPsm>>,
     f: &Filtered<'_>,
-) -> (Option<(Vec<&'m output::PercolatorPsm>, String)>, Option<String>) {
+) -> (
+    Option<(Vec<&'m output::PercolatorPsm>, String)>,
+    Option<String>,
+) {
     let (Some(map), Some(cutoffs)) = (rescore_map, f.cutoffs) else {
         return (None, None);
     };
@@ -700,6 +729,7 @@ pub(super) fn write_pin_and_rescore(
         &params,
         &pin_index,
     )?;
+    let mut true_charges = collect_true_charges(&cli, &spectra, &queues, &pin_candidates);
     log::info!(
         target: "output",
         "Wrote PIN: {} in {:.2} s",
@@ -859,7 +889,9 @@ pub(super) fn write_pin_and_rescore(
         row_scores,
         dia_replaced,
         dia_precursor_ids,
+        dia_precursor_charges,
     } = rescoring;
+    true_charges.extend(dia_precursor_charges);
     after_rescoring(AfterRescoring {
         cli,
         spectrum_path,
@@ -897,8 +929,29 @@ pub(super) fn write_pin_and_rescore(
         dia_precursor_ids,
         pin_candidates,
         pin_index,
+        true_charges,
         trace,
     })
+}
+
+fn collect_true_charges(
+    cli: &Cli,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    pin_candidates: &[search::candidates::Candidate],
+) -> HashMap<String, u8> {
+    if !(cli.add_entrapment && cli.rescore) {
+        return HashMap::new();
+    }
+    spectra
+        .iter()
+        .zip(queues)
+        .flat_map(|(spectrum, queue)| {
+            output::emitted_row_candidates(spectrum, queue, pin_candidates)
+                .into_iter()
+                .map(|(id, _, charge)| (id, charge))
+        })
+        .collect()
 }
 
 /// The spectra, their PSM queues and the refine output, as the search leaves them.

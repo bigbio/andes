@@ -67,8 +67,16 @@ impl TargetPeptides {
         self.hashes.len()
     }
 
-    fn contains(&self, residues: &[u8]) -> bool {
+    pub(super) fn contains(&self, residues: &[u8]) -> bool {
         self.hashes.binary_search(&peptide_hash(residues)).is_ok()
+    }
+
+    /// The peptides of `self` that are not peptides of `other`.
+    pub(super) fn count_outside(&self, other: &TargetPeptides) -> usize {
+        self.hashes
+            .iter()
+            .filter(|h| other.hashes.binary_search(h).is_err())
+            .count()
     }
 
     /// Whether a residue is a cleavage site of any of the digests.

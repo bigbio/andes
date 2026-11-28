@@ -119,6 +119,8 @@ rescoring:
   # predictor_instrument: QE          # --predictor-instrument (advanced): Instrument given to the MS2 model, e.g. QE, Lumos, timsTOF [default: from the instrument] (example)
   # predictor_batch: 256              # --predictor-batch (advanced): Peptides per predictor batch
   # proteoform_fdr: 0.05              # --proteoform-fdr (advanced): q-value threshold of proteoform claims [default: the larger of --psm-fdr and 0.05] (example)
+  # add_entrapment: false             # --add-entrapment (advanced): Add experimental shuffled entrapment proteins for diagnostic FDP estimates [default: off]
+  # entrapment_seed: 1                # --entrapment-seed (advanced): Unitless seed of the experimental --add-entrapment shuffle; use several seeds for a range
 
 # ── Glycopeptides ───────────────────────────────────────────────────────────
 glyco:

@@ -2620,6 +2620,7 @@ dependencies = [
 name = "search"
 version = "0.4.0"
 dependencies = [
+ "aho-corasick",
  "glyco",
  "input",
  "log",

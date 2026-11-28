@@ -566,6 +566,7 @@ pub struct IdentificationSummary {
     pub ptm_counts: Vec<(String, usize)>,
     pub unmodified_psms: usize,
     pub open_search: Option<String>,
+    pub entrapment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -759,6 +760,7 @@ impl IdentificationSummary {
             ptm_counts,
             unmodified_psms,
             open_search: None,
+            entrapment: None,
         }
     }
 
@@ -906,6 +908,9 @@ impl IdentificationSummary {
                 s.push_str(&ptm_line(name, *count));
             }
             s.push_str(&ptm_line("(unmodified)", self.unmodified_psms));
+        }
+        if let Some(entrapment) = &self.entrapment {
+            s.push_str(entrapment);
         }
         s.push_str("───────────────────────────────────────────────────────────────\n");
         s

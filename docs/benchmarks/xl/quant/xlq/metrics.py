@@ -58,7 +58,7 @@ def log_matrix(df, runs, rollup="median-polish"):
         else:
             raise ValueError(f"unknown roll-up {rollup!r}")
         out[rp] = row
-    return pd.DataFrame.from_dict(out, orient="index", columns=runs)
+    return pd.DataFrame.from_dict(out, orient="index", columns=runs).astype(float)
 
 
 @_quiet
@@ -95,7 +95,7 @@ def depth(df, M):
     ident = df[df["evidence"] == "identified"]
     return {
         "precursors": int(df["precursor"].nunique()),
-        "residue_pairs": int(np.isfinite(M.to_numpy()).any(axis=1).sum()),
+        "residue_pairs": int(np.isfinite(M.to_numpy(dtype=float)).any(axis=1).sum()),
         "residue_pairs_identified": int(ident["residue_pair"].nunique()),
         "rows": int(len(df)),
         "rows_identified": int(len(ident)),

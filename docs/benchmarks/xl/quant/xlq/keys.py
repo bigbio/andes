@@ -8,7 +8,7 @@ tables of different tools join on the same string.
 """
 
 SEP = " -- "
-UNIFY_EXAMPLES = 5
+MATCH_EXAMPLES = 5
 
 
 def acc_of(token):
@@ -74,17 +74,24 @@ def _item_pairs(key):
     return {tuple(sorted((x, y))) for x in a.split(";") for y in b.split(";")}
 
 
-def unify(keys_by_arm):
-    """Bring the residue-pair keys of several arms to one spelling.
+def comparison_ids(keys_by_arm):
+    """One comparison id per residue-pair key, for choosing the residue pairs the arms share.
 
     Tools can list different protein positions for one peptide: andes lists the positions of the
     peptide's digestion occurrences, `side` every substring occurrence. Keys that mean the same
-    residue pair can then differ as strings and would not join. Two keys are linked when they
-    share one pair of `ACC:pos` items, one from each side. A set of linked keys is renamed to its
-    smallest key when no arm has more than one key in it; otherwise the residue pairs cannot be
-    told apart from the keys, the set is left as it is and counted as ambiguous.
+    residue pair can then differ as strings. Keys that share one pair of `ACC:pos` items, one from
+    each side, are collected into a set, and the keys of a set get one id (its smallest key) when
 
-    Returns (mapping of each renamed key to its new key, report for the result file).
+    - no arm has more than one key in the set, and
+    - one pair of items is shared by every key of the set. Overlap that only chains (A with B, B
+      with C, but A and C share nothing) is not a match.
+
+    Otherwise the set is ambiguous and each of its keys keeps itself as its id.
+
+    The ids are for the `common` selection only. The keys themselves are never changed: an arm's
+    own metrics and its truth read the positions and proteins the arm reported.
+
+    Returns (id of every key, report for the result file).
     """
     parent = {}
 
@@ -94,10 +101,11 @@ def unify(keys_by_arm):
             k = parent[k]
         return k
 
-    owner = {}
+    owner, pairs = {}, {}
     for key in sorted(set().union(*keys_by_arm.values())) if keys_by_arm else []:
         parent[key] = key
-        for pair in sorted(_item_pairs(key)):
+        pairs[key] = _item_pairs(key)
+        for pair in sorted(pairs[key]):
             if pair in owner:
                 parent[find(key)] = find(owner[pair])
             else:
@@ -105,15 +113,18 @@ def unify(keys_by_arm):
     sets = {}
     for key in parent:
         sets.setdefault(find(key), []).append(key)
-    mapping, ambiguous, examples = {}, 0, []
+    ids, matched, ambiguous, examples = {key: key for key in parent}, 0, 0, []
     for members in sets.values():
         if len(members) == 1:
             continue
         members.sort()
-        if any(sum(k in keys for k in members) > 1 for keys in keys_by_arm.values()):
+        one_per_arm = all(sum(k in keys for k in members) <= 1 for keys in keys_by_arm.values())
+        shared = set.intersection(*(pairs[k] for k in members))
+        if not (one_per_arm and shared):
             ambiguous += 1
             continue
-        mapping.update({k: members[0] for k in members[1:]})
-        if len(examples) < UNIFY_EXAMPLES:
+        matched += 1
+        ids.update({k: members[0] for k in members})
+        if len(examples) < MATCH_EXAMPLES:
             examples.append(members)
-    return mapping, {"renamed_keys": len(mapping), "ambiguous_sets": ambiguous, "examples": examples}
+    return ids, {"matched_sets": matched, "ambiguous_sets": ambiguous, "examples": examples}

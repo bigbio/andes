@@ -8,9 +8,12 @@ An arm is NAME:KIND:PATH. KIND `table` is the long table of xlq/table.py (TSV or
 `skyline` is a Skyline document with pseudo-peptide cross-links, read with the modification names
 of the dataset's `published.skyline_document` entry. A relative PATH is taken under --data. Every
 arm is scored on its own residue pairs and, with more than one arm, also on the residue pairs every
-arm quantifies (`common`). Before that, residue-pair keys that differ between arms only in the
-protein positions listed for a peptide are brought to one spelling (`keys.unify`), and the result
-says how many.
+arm quantifies (`common`). The `own` scores of an arm depend on that arm alone: adding or removing
+another arm does not change them. Only the choice of the `common` residue pairs looks across arms.
+There, keys that differ only in the protein positions listed for a peptide are matched by
+`keys.comparison_ids`; the keys themselves are never changed, so the truth of an arm reads the
+positions and proteins that arm reported. The result says how many sets of keys were matched and
+how many were ambiguous.
 
 An arm that keeps no row (its run names do not match the design, or a filter removes everything)
 is an error. Runs of the table that the design does not have, and runs of the design without a row
@@ -167,27 +170,25 @@ def main(argv=None):
         tables[name] = df
         result["arms"][name] = {"kind": kind, "file": path.name, "sha256": sha256(path),
                                 "read": counts, "runs_dropped": dropped, "runs_without_rows": missing}
-    if len(tables) > 1:
-        renamed, report = keys.unify({name: set(df["residue_pair"]) for name, df in tables.items()})
-        result["key_unification"] = report
-        if renamed:
-            tables = {name: df.assign(residue_pair=df["residue_pair"].replace(renamed))
-                      for name, df in tables.items()}
-        if report["ambiguous_sets"]:
-            print(f"{report['ambiguous_sets']} set(s) of residue-pair keys overlap between arms but "
-                  "could not be matched one to one; they are scored under their own keys", file=sys.stderr)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         try:
             for name, df in tables.items():
                 result["arms"][name]["own"] = score(df, dataset, a.data, a.rollup)
             if len(tables) > 1:
-                common = set.intersection(*(set(df["residue_pair"]) for df in tables.values()))
+                arm_keys = {name: set(df["residue_pair"]) for name, df in tables.items()}
+                ids, report = keys.comparison_ids(arm_keys)
+                result["key_matching"] = report
+                if report["ambiguous_sets"]:
+                    print(f"{report['ambiguous_sets']} set(s) of residue-pair keys overlap between arms "
+                          "but do not match one to one; they are not treated as shared", file=sys.stderr)
+                common = set.intersection(*({ids[k] for k in arm} for arm in arm_keys.values()))
                 result["common_residue_pairs"] = len(common)
                 if not common:
                     print("the arms share no residue pair: the `common` view is empty", file=sys.stderr)
                 for name, df in tables.items():
-                    result["arms"][name]["common"] = score(df, dataset, a.data, a.rollup, keep=common)
+                    keep = {k for k in arm_keys[name] if ids[k] in common}
+                    result["arms"][name]["common"] = score(df, dataset, a.data, a.rollup, keep=keep)
         except ValueError as e:
             sys.exit(f"{a.dataset}: {e}")
     write_json(a.out, result)

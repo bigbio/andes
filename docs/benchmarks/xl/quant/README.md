@@ -89,12 +89,18 @@ How rows are matched:
   - Runs the design does not have, and runs of the design without a row, are named on stderr
     and in the result (`runs_dropped`, `runs_without_rows`).
 - **Residue pairs.** Keys are compared with UniProt identifiers reduced to their accession.
-  - Tools can list different protein positions for one peptide: andes lists the positions
-    of the peptide's digestion occurrences, the Skyline reader every substring occurrence.
-  - With several arms, keys that share a pair of positions are therefore brought to one
-    spelling when no arm has two keys in the set.
-  - The result says how many keys were renamed and how many sets stayed ambiguous
-    (`key_unification`).
+  - **An arm's keys are never changed.** Its own scores and its truth read the positions and
+    proteins it reported, so they do not depend on which other arms are scored with it.
+  - **Matching is for the `common` view only.** Tools can list different protein positions
+    for one peptide: andes lists the positions of the peptide's digestion occurrences, the
+    Skyline reader every substring occurrence. Keys of different arms are treated as one
+    residue pair when all of the following hold:
+    - they share a pair of positions;
+    - no arm has two keys in the set;
+    - one pair of positions is common to every key of the set. Overlap that only chains
+      (A with B, B with C, but A and C share nothing) is not a match.
+  - The result says how many sets were matched and how many were ambiguous (`key_matching`).
+    Ambiguous sets are not treated as shared.
 
 ## Metrics
 
@@ -107,8 +113,9 @@ Every arm goes through the same steps:
   every run, or in at least 90 % of the runs when fewer than 200 have all.
 - **Statistics:** quant-eval's moderated t and Benjamini-Hochberg at 5 %.
 
-Each arm is scored on its own residue pairs and, with several arms, on the residue pairs all of
-them quantify (`common`).
+Each arm is scored on its own residue pairs (`own`) and, with several arms, on the residue pairs
+all of them quantify (`common`). The `own` scores of an arm are the same whatever other arms are
+given.
 
 - **Dilution.** For a residue pair with at least two values at a level and at 1×, the observed
   log2 ratio is the difference of the replicate means. A reference level without runs, or a

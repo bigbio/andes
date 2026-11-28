@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests of the cross-link quantification harness on small synthetic inputs (seconds):
-  1. residue-pair keys: protein positions, accession reduction, canonical order, one spelling
-     across arms;
+  1. residue-pair keys: protein positions, accession reduction, canonical order, and the
+     matching of keys between arms for the common view (never by renaming, never by chains);
   2. the long-table contract refuses duplicates and unknown evidence;
   3. the Skyline readers: a pseudo-peptide document (zero areas counted), its site isomers, an
      xiFDR PSM file and both CV report formats;
@@ -9,7 +9,8 @@
      and completeness, the offsets of single injections, null calls under drift,
      false-transfer rate;
   5. arm filters and run matching, with the cases that must be errors;
-  6. the evaluate and published commands on synthetic designs; result files hold no NaN.
+  6. the evaluate and published commands on synthetic designs; result files hold no NaN; an
+     arm's own scores, its false-transfer rate included, do not depend on the other arms.
 
     python3 tests/test_xlq.py
 """
@@ -90,15 +91,21 @@ class Keys(unittest.TestCase):
         with self.assertRaises(ValueError):
             keys.normalise_key("P1:3")
 
-    def test_unify(self):
-        renamed, report = keys.unify({"andes": {"A:10 -- X:5", "Q:1 -- Q:9"},
-                                      "other": {"A:10;B:57 -- X:5", "Q:1 -- Q:9"}})
-        self.assertEqual(renamed, {"A:10;B:57 -- X:5": "A:10 -- X:5"})
-        self.assertEqual((report["renamed_keys"], report["ambiguous_sets"]), (1, 0))
-        renamed, report = keys.unify({"andes": {"A:10 -- X:5", "B:57 -- X:5"}, "other": {"A:10;B:57 -- X:5"}})
-        self.assertEqual(renamed, {})
-        self.assertEqual(report["ambiguous_sets"], 1)
-        self.assertEqual(keys.unify({"one": {"A:1 -- A:2"}})[0], {})
+    def test_comparison_ids(self):
+        short, long, other = "A:10 -- X:5", "A:10;B:57 -- X:5", "B:57 -- X:5"
+        ids, report = keys.comparison_ids({"andes": {short, "Q:1 -- Q:9"}, "other": {long, "Q:1 -- Q:9"}})
+        self.assertEqual((ids[short], ids[long], ids["Q:1 -- Q:9"]), (short, short, "Q:1 -- Q:9"))
+        self.assertEqual((report["matched_sets"], report["ambiguous_sets"]), (1, 0))
+        ids, report = keys.comparison_ids({"andes": {short, other}, "other": {long}})
+        self.assertEqual((ids[short], ids[long], ids[other]), (short, long, other))
+        self.assertEqual((report["matched_sets"], report["ambiguous_sets"]), (0, 1))
+        self.assertEqual(keys.comparison_ids({"one": {"A:1 -- A:2"}})[0], {"A:1 -- A:2": "A:1 -- A:2"})
+
+    def test_overlap_that_only_chains_is_no_match(self):
+        short, long, other = "A:10 -- X:5", "A:10;B:57 -- X:5", "B:57 -- X:5"
+        ids, report = keys.comparison_ids({"one": {short}, "two": {long}, "three": {other}})
+        self.assertEqual(len({ids[short], ids[long], ids[other]}), 3)
+        self.assertEqual((report["matched_sets"], report["ambiguous_sets"]), (0, 1))
 
 
 class Table(unittest.TestCase):
@@ -234,6 +241,12 @@ class Metrics(unittest.TestCase):
         self.assertEqual((solo["complete"], solo["median_cv_complete"], solo["median_cv_2plus"]), (2, None, None))
         json.dumps(solo, allow_nan=False)
 
+    def test_empty_table(self):
+        empty = long_table([], [])
+        M = metrics.log_matrix(empty.reindex(columns=["run", "precursor", "residue_pair", "quantity", "evidence"]), ["a", "b"])
+        self.assertEqual(M.shape, (0, 2))
+        self.assertEqual(metrics.depth(pd.DataFrame(columns=["run", "precursor", "residue_pair", "quantity", "evidence"]), M)["residue_pairs"], 0)
+
     def test_rollups(self):
         df = pd.concat([long_table([100, 120, 80], ["a", "b", "c"], precursor="x/3"),
                         long_table([200, 240, None], ["a", "b", "c"], precursor="x/4")])
@@ -304,6 +317,57 @@ class Arms(unittest.TestCase):
             design.match_runs(twice, dataset)
 
 
+class ClasenTransfers(unittest.TestCase):
+    """The truth of a transfer design reads the proteins an arm reported, whatever other arms are
+    scored next to it. The known interaction group is {B, X}; `A:10 -- X:5` is outside it, while
+    `A:10;B:57 -- X:5` and `B:57 -- X:5` are inside."""
+    SHORT, LONG, OTHER = "A:10 -- X:5", "A:10;B:57 -- X:5", "B:57 -- X:5"
+    MANIFEST = [{"name": "toy", "design": "absence", "fasta": {"file": "x.fasta"},
+                 "runs": [{"dataset": "cla_b1", "truth": "clasen:batch1"}, {"dataset": "cla_b4", "truth": "clasen:batch4"}]}]
+
+    def setUp(self):
+        ev = design._xl_eval(".")
+        truth = ev.ClasenTruth.__new__(ev.ClasenTruth)
+        truth.groups = {"g1_batch1": {"B", "X"}}
+        truth.batch_prots = {"B", "X"}
+        ev.truth_for = lambda spec: truth
+        self.loader, design._xl_eval = design._xl_eval, lambda data_dir: ev
+
+    def tearDown(self):
+        design._xl_eval = self.loader
+
+    def rates(self, arms):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp, "m.json")
+            manifest.write_text(json.dumps(self.MANIFEST))
+            run = design.load("toy", manifest)["runs"][0]["run"]
+            argv = ["--dataset", "toy", "--data", tmp, "--manifest", str(manifest), "--out", str(Path(tmp, "r.json"))]
+            for name, key in arms.items():
+                pd.DataFrame([{"run": run, "precursor": "p/4", "residue_pair": key, "quantity": 5.0,
+                               "evidence": "transferred"}]).to_csv(Path(tmp, f"{name}.tsv"), sep="\t", index=False)
+                argv += ["--arm", f"{name}:table:{name}.tsv"]
+            with contextlib.redirect_stderr(io.StringIO()):
+                evaluate.main(argv)
+            r = json.loads(Path(tmp, "r.json").read_text())
+        own = {name: a["own"]["transfers"]["false_transfer_rate"] for name, a in r["arms"].items()}
+        common = {name: a["common"]["transfers"]["false_transfer_rate"] for name, a in r["arms"].items() if "common" in a}
+        return own, common, r
+
+    def test_rate_is_invariant_to_other_arms(self):
+        self.assertEqual(self.rates({"two": self.LONG})[0], {"two": 0.0})
+        own, common, r = self.rates({"one": self.SHORT, "two": self.LONG})
+        self.assertEqual(own, {"one": 1.0, "two": 0.0})
+        self.assertEqual(common, {"one": 1.0, "two": 0.0})
+        self.assertEqual(r["common_residue_pairs"], 1)
+        own, _, _ = self.rates({"one": self.SHORT, "two": self.LONG, "three": self.OTHER})
+        self.assertEqual(own, {"one": 1.0, "two": 0.0, "three": 0.0})
+
+    def test_chained_keys_are_not_one_common_residue_pair(self):
+        _, _, r = self.rates({"one": self.SHORT, "two": self.LONG, "three": self.OTHER})
+        self.assertEqual(r["common_residue_pairs"], 0)
+        self.assertEqual((r["key_matching"]["matched_sets"], r["key_matching"]["ambiguous_sets"]), (0, 1))
+
+
 def strict_json(text):
     """Parse a result file as strict JSON: NaN and Infinity are refused."""
     def refuse(token):
@@ -343,7 +407,7 @@ class EndToEnd(unittest.TestCase):
         self.assertLess(abs(own["dilution"]["levels"]["0.5"]["median_error"]), 1e-9)
         self.assertEqual(r["common_residue_pairs"], 12)
         self.assertEqual((r["arms"]["a"]["runs_dropped"], r["arms"]["a"]["runs_without_rows"]), ([], []))
-        self.assertEqual(r["key_unification"]["renamed_keys"], 0)
+        self.assertEqual(r["key_matching"]["matched_sets"], 0)
         self.assertLess(own["run_offsets"]["1"]["spread"], 1e-9)
 
     def test_normalise(self):
@@ -361,8 +425,17 @@ class EndToEnd(unittest.TestCase):
         other = self.rows(key="P1:{i};Q9:{i} -- P1:{j}")
         with tempfile.TemporaryDirectory() as tmp:
             r, _ = self.evaluate(tmp, ["andes:table:a.tsv", "other:table:b.tsv"], {"a.tsv": self.rows(), "b.tsv": other})
-        self.assertEqual(r["key_unification"]["renamed_keys"], 12)
+        self.assertEqual(r["key_matching"]["matched_sets"], 12)
         self.assertEqual(r["common_residue_pairs"], 12)
+        self.assertEqual(r["arms"]["other"]["common"]["depth"]["residue_pairs"], 12)
+
+    def test_own_scores_do_not_depend_on_other_arms(self):
+        other = self.rows(key="P1:{i};Q9:{i} -- P1:{j}")
+        with tempfile.TemporaryDirectory() as tmp:
+            alone, _ = self.evaluate(tmp, ["other:table:b.tsv"], {"b.tsv": other})
+        with tempfile.TemporaryDirectory() as tmp:
+            both, _ = self.evaluate(tmp, ["andes:table:a.tsv", "other:table:b.tsv"], {"a.tsv": self.rows(), "b.tsv": other})
+        self.assertEqual(both["arms"]["other"]["own"], alone["arms"]["other"]["own"])
 
     def test_arm_without_rows_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:

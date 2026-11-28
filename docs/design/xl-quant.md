@@ -143,10 +143,25 @@ time and memory are not documented today.
 A cross-link precursor is keyed by
 `(linker, α peptidoform, α site, β peptidoform, β site, charge)`, in a canonical order.
 
-- **Site isomers.** Two link sites on the same peptide pair are isobaric and can co-elute.
-  They are measured at `(linker, α peptidoform, β peptidoform, charge)` and attributed to the
-  site of the best spectrum match, with a `site_ambiguous` flag, as `IsomerClass` does for
-  linear peptides.
+- **Site isomers.** Two link sites on one peptide pair give isobaric precursors.
+  - **When they co-elute, MS1 measures their sum.** No identification of one of them, however
+    well localised and however small its q-value, makes that sum a quantity of one site.
+  - Example: site A stays at 100 in both conditions while site B goes from 100 to 900. The
+    shared precursor goes from 200 to 1000, a five-fold change that is true of neither site.
+    A `site_ambiguous` flag on a value attributed to A does not prevent the false call.
+- **Site-isomer group.** Such a precursor is quantified as its own entity: the key
+  `(linker, α peptidoform, β peptidoform, charge)` and the set of residue pairs it may stand
+  for. Its quantity is never assigned to one of those residue pairs.
+- **When a precursor is site-resolved.** Only when both of the following hold:
+  - each peptide has one linkable residue, or every identification of the feature localises
+    the same site by a decisive margin of the site score (`gap_next`);
+  - no identification of another site of the same peptide pair falls inside the feature.
+
+  Otherwise it is a site-isomer group. The margin is an algorithm constant, set on the
+  peptide-library datasets, whose designated link residues give the true site.
+- **Measured in the reference.** In the published Skyline HSA document, 48 of the 638
+  precursors belong to 24 site-isomer sets. For 44 of them, the peak overlaps the isomer's
+  peak in at least one run.
 - **Conflicts between runs.** When runs assign one precursor to different peptide pairs, the
   best-scoring assignment wins, and the conflicts are counted in the log.
 
@@ -171,6 +186,9 @@ A cross-link precursor is keyed by
 - **Per-run q-values.** Each run has its own decoys (m/z-shifted traces) and picked
   target-decoy q-values.
 - **Interference.** Linear and cross-link precursors form one library for `claims.rs`.
+- **Site isomers.** Isobaric site isomers of one peptide pair whose retention-time windows
+  overlap are claims on one feature. `claims.rs` gives them one shared measurement, which
+  becomes the quantity of their site-isomer group (D2), and no measurement per site.
 
 ### D5. Match between runs
 
@@ -196,10 +214,18 @@ A cross-link precursor is keyed by
 - **Top-N baseline.** A top-N value is computed too, as the residue-pair quantity of
   Müller et al. (Mol Cell Proteomics 2019), who compared N from 1 to 10. The benchmark picks
   the default between MaxLFQ and top-N, which is then an algorithm constant.
-- **Protein pairs.** A protein-pair value comes from its inter-protein residue pairs. It
-  carries `n_residue_pairs` and a `heterogeneity` value, the spread of the residue-pair
-  log-ratios. A high spread flags interfaces that change differently, which points to a
-  change of conformation rather than of abundance.
+- **Residue pairs are site-specific.** A residue-pair value is rolled up from site-resolved
+  precursors only.
+- **Site-isomer groups.** A group keeps its own quantity at its own level. It rolls up only
+  into a higher level that all its candidate residue pairs share, never into one of them:
+  - the protein pair, when every candidate maps to the same protein pair (one protein for an
+    intra link);
+  - otherwise into nothing above the group.
+- **Protein pairs.** A protein-pair value comes from its inter-protein residue pairs and the
+  site-isomer groups that lie entirely inside it. It carries `n_residue_pairs`, `n_groups`
+  and a `heterogeneity` value, the spread of the residue-pair log-ratios. A high spread
+  flags interfaces that change differently, which points to a change of conformation rather
+  than of abundance.
 - **What is quantified.** Only entities that pass their level's identification FDR. Every
   value records how many of its precursors were identified and how many transferred.
 
@@ -213,7 +239,8 @@ Protein abundances come from the linear co-search. Each residue pair reports:
   - inter link: `xl − mean(A, B)`.
 
 Monolinks on the same lysine are an optional normaliser, as in iqPIR; the water monolink is
-already searched.
+already searched. Site-isomer groups get the same columns at their own level, never under a
+residue pair.
 
 This adjustment is andes's own proposal, not taken from a paper. Above all the inter-link
 model is a modelling choice, so the adjusted change is labelled experimental until the
@@ -224,6 +251,11 @@ benchmark designs show it helps.
 andes writes an MSstats-format table: residue pair (or protein pair) as `ProteinName`, the
 cross-link precursor as `PeptideSequence`. MSstats then handles missing values and testing
 unchanged. This matches DOCS.md §10.
+
+The residue-pair export holds site-resolved precursors only. Site-isomer groups are left out
+of every site-specific test, the MSstats export included, and stay in their own table (D9).
+A group enters a protein-pair export only under the rule of D6. Exporting groups for testing
+under their group key would be a later opt-in, never a default.
 
 Native testing is not part of the first phases. The benchmark harness measures the FDP of
 differential calls with the shared evaluation in `docs/benchmarks/quant-eval` (median polish,
@@ -240,10 +272,14 @@ New tables are Parquet with a `TableVersion`, written atomically.
   protein-pair q-values.
 - **`<base>.xl.features.parquet`**, one row per precursor and run. Columns: evidence
   (`identified` or `transfer_ms1`), apex, area, `quantity_normalized`, envelope cosine,
-  feature q-value and `quant_q`.
+  feature q-value, `quant_q`, `site_resolved`, and the site-isomer group key when not
+  resolved.
 - **`<base>.xl.residue_pairs.quant.parquet`** and **`<base>.xl.ppi.quant.parquet`**, long
   format. Columns: entity, run, condition, quantity (MaxLFQ and top-N), `n_precursors`,
   `n_identified`, `n_transferred`, the protein log2 fold changes and the adjusted change.
+  Residue pairs come from site-resolved precursors only.
+- **`<base>.xl.site_groups.quant.parquet`**, the site-isomer groups: group key, candidate
+  residue pairs, run, condition, quantity and the same counts.
 - **Wide TSV matrices**, as glyco's `.matrix.tsv` already does, and `<base>.xl.msstats.csv`.
 - **A `statistics.log` section:**
   - quantified counts per level, identified against transferred, share missing, CV per
@@ -274,7 +310,7 @@ There is one reviewable PR per phase, and each is measured on the benchmark befo
 | P1 | Retention time, MS1-snapped precursor m/z, run and theoretical m/z on spectrum matches; `.xl.csms.parquet`; linker composition on `Crosslinker`; phosphorus in `Formula`; the composition test. | no; columns added | tests |
 | P2 | Linear co-search in quantified runs; per-run cross-link quantification (D3, D4); `.xl.features.parquet`; `--xl --lfq` allowed. | new outputs | replicate CV and completeness |
 | P3 | Match between runs (D5): joint library and alignment, class-stratified transfer q-values, `--mbr`, the staged `andes quant` path, the cohort `xl-quant` stage. | new outputs | false-transfer rate (§6) |
-| P4 | Roll-up and reporting (D6 to D9): `quant::rollup`, residue-pair and protein-pair tables, protein fold changes, MSstats export, SDRF condition, `statistics.log`, DOCS.md. | new outputs | dilution accuracy, FDP of differential calls |
+| P4 | Roll-up and reporting (D6 to D9): `quant::rollup`, residue-pair, site-isomer-group and protein-pair tables, protein fold changes, MSstats export, SDRF condition, `statistics.log`, DOCS.md. The harness gains a `site_group` column and applies the same rule to every arm, the Skyline reference included. | new outputs | dilution accuracy, FDP of differential calls, the site-isomer counterexample (§6) |
 | P5 | andes numbers next to the reference in `docs/benchmarks/xl/quant/README.md`, a `render.py` block, README row. | docs | — |
 
 ## 6. Benchmarks and acceptance targets
@@ -312,6 +348,22 @@ match-between-runs.
 No public two-proteome spike-in exists for a non-cleavable linker (for example
 DSS-crosslinked *E. coli* spiked 1:1, 1:2 and 1:4 into HEK). It would be the decisive
 benchmark, and it needs a wet lab.
+
+**Site-isomer counterexample (P4 regression test and benchmark check).**
+
+- **Setup.** Two link sites A and B of one peptide pair share a co-eluting precursor. A is at
+  100 in both conditions; B goes from 100 to 900. The shared precursor reads 200 in one
+  condition and 1000 in the other. The test feeds this to the roll-up and the exports, both
+  as an andes unit test and as a synthetic harness table.
+- **Required outcome:**
+  - no residue-pair value for A or B comes from the shared precursor;
+  - the group quantity (200 → 1000) appears only in the site-isomer group table;
+  - neither A nor B is called changed, and the MSstats export carries no row of the group;
+  - the protein-pair value includes the group when A and B lie in one protein pair, and not
+    otherwise.
+- **The same check on real data.** On the peptide-library datasets the true link residues
+  are known. Measured there: the share of quantified residue pairs whose site is wrong, and
+  how many precursors end up in site-isomer groups.
 
 Targets, to be measured and not promised:
 
@@ -356,6 +408,9 @@ Targets, to be measured and not promised:
   decoys, and the measured false-transfer rate.
 - **High charge and chimeric spectra** cause monoisotope errors and interference: handled by
   the coverage-based envelope, the M−1 check and joint claims.
+- **Co-eluting site isomers make false site-specific changes:** handled by site-isomer
+  groups that never enter a residue-pair value or test (D2, D6, D8), with the counterexample
+  of §6 as a regression test.
 - **Constants fitted to small benchmarks** (seven proteins, HSA): handled by keeping tuning
   and held-out sets apart.
 - **Pooled cohort q-values do not control each project's share** (DOCS.md, "Crosslink FDR
